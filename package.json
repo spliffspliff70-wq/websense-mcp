@@ -1,0 +1,38 @@
+{
+  "name": "websense-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "WebSense MCP — non-vision, AI-native web automation via the Semantic Action Graph. No screenshots, no CDP, no bot detection.",
+  "license": "MIT",
+  "author": "spliff70",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spliff70/websense-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "browser-automation",
+    "chrome-extension",
+    "web-scraping",
+    "ai-agent",
+    "semantic-action-graph",
+    "csp-safe",
+    "react"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "websense-mcp": "src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test-regressions.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.21.0",
+    "zod": "^3.25.0"
+  }
+}

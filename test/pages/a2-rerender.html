@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>A2 Re-render Test</title></head>
+<body>
+<h1 id="title">A2 Re-render Test</h1>
+<div id="app">
+  <form id="customer-form">
+    <label for="custname">Customer name</label>
+    <input id="custname" name="custname" type="text" placeholder="Your name" data-testid="custname-input">
+    <label for="custtel">Telephone</label>
+    <input id="custtel" name="custtel" type="tel" placeholder="Your phone">
+    <button type="submit" id="submit-btn">Submit</button>
+  </form>
+</div>
+<button id="rerender" onclick="rerender()">Re-render (React-style)</button>
+<pre id="state">ready</pre>
+<script>
+// Simulates a React re-render: rebuilds the SAME tree with fresh DOM nodes.
+// The old nodes are destroyed; identical new nodes take their place.
+function rerender() {
+  var app = document.getElementById('app');
+  var oldForm = document.getElementById('customer-form');
+  var html = oldForm.outerHTML;      // capture structure BEFORE destroying
+  app.removeChild(oldForm);          // destroy old tree (React unmount)
+  var tmp = document.createElement('div');
+  tmp.innerHTML = html;              // rebuild identical tree (React mount)
+  app.appendChild(tmp.firstChild);
+  document.getElementById('state').textContent =
+    're-rendered at ' + new Date().toISOString() + ' — fresh nodes';
+}
+</script>
+</body>
+</html>

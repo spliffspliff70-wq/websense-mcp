@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head><title>Login Test Page</title></head>
+<body>
+<h1>Welcome Back</h1>
+<p>Please log in to continue.</p>
+
+<form id="login-form" method="post" action="/api/login">
+  <div>
+    <label for="email">Email Address</label>
+    <input type="email" id="email" name="email" placeholder="you@example.com" required>
+  </div>
+  <div>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" required>
+  </div>
+  <div>
+    <input type="checkbox" id="remember" name="remember">
+    <label for="remember">Remember me</label>
+  </div>
+  <button type="submit" id="submit-btn">Log In</button>
+</form>
+
+<a href="/register">Sign Up</a>
+<a href="/forgot" target="_blank">Forgot Password?</a>
+<button onclick="alert('hi')">Help</button>
+
+<select id="country" name="country">
+  <option value="">Select an option</option>
+  <option value="us">United States</option>
+  <option value="uk">United Kingdom</option>
+  <option value="de">Germany</option>
+</select>
+
+<div role="tablist">
+  <button role="tab" id="tab1" aria-controls="panel1" aria-selected="true">Overview</button>
+  <button role="tab" id="tab2" aria-controls="panel2" aria-selected="false">Details</button>
+</div>
+<div id="panel1" role="tabpanel">Overview content here</div>
+<div id="panel2" role="tabpanel" hidden>Details content here</div>
+
+<details>
+  <summary>Advanced Settings</summary>
+  <p>Hidden settings content</p>
+</details>
+
+<div id="myModal" role="dialog" aria-modal="true" style="display:none">
+  <p>Modal content</p>
+  <button id="modal-close">Close</button>
+</div>
+<button onclick="document.getElementById('myModal').style.display='block'" aria-haspopup="dialog" aria-controls="myModal">Open Modal</button>
+</body>
+</html>

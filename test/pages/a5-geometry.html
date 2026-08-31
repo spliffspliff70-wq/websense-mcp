@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>A5 Geometry Test</title>
+<style>
+  #form { position: relative; z-index: 1; width: 400px; height: 300px; background: #eee; padding: 20px; margin-top: 60px; }
+  #modal-overlay { position: fixed; inset: 0; z-index: 999; background: rgba(0,0,0,0.5); display: none; }
+  #modal-box { position: fixed; top: 200px; left: 600px; z-index: 1000; width: 300px; height: 150px; background: white; border: 1px solid #999; padding: 20px; }
+  #btn-open { margin-top: 10px; }
+</style>
+</head>
+<body>
+<h1 id="title">A5 Geometry Test</h1>
+<button id="btn-open" onclick="openModal()">Open modal</button>
+<div id="form">
+  <label for="fname">Name</label>
+  <input id="fname" name="fname" type="text">
+  <button type="submit" id="fsubmit">Submit</button>
+</div>
+<div id="modal-overlay"></div>
+<div id="modal-box" style="display:none">
+  <h2>Modal Dialog</h2>
+  <button id="modal-close" onclick="closeModal()">Close</button>
+</div>
+<pre id="state">ready</pre>
+<script>
+function openModal() {
+  document.getElementById('modal-overlay').style.display = 'block';
+  document.getElementById('modal-box').style.display = 'block';
+  document.getElementById('state').textContent = 'modal open';
+}
+function closeModal() {
+  document.getElementById('modal-overlay').style.display = 'none';
+  document.getElementById('modal-box').style.display = 'none';
+  document.getElementById('state').textContent = 'modal closed';
+}
+</script>
+</body>
+</html>
