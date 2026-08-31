@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - name: Syntax check
+        run: |
+          node --check src/server.js
+          node --check src/hub.js
+          node --check extension/websense-cs.js
+          node --check extension/background.js
+          node --check extension/offscreen.js
+      - name: Regression tests
+        run: node test-regressions.mjs
