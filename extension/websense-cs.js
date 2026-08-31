@@ -2170,8 +2170,13 @@
         .map((l) => l.trim() === '' ? '<br>' : '<div>' + l.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>')
         .join(''));
       const ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
-      const notConsumed = !el.dispatchEvent(ev);
-      return { dispatched: true, consumed: !notConsumed, text: dt.getData('text/plain') };
+      // v4.2 FIX: dispatchEvent returns FALSE when a handler calls
+      // preventDefault() (i.e. the editor CONSUMED it) and TRUE when the event
+      // went unhandled. The old code inverted this — a consuming editor was
+      // reported as not-consumed, the ladder fell through to insertText, and
+      // the text was inserted TWICE (observed live 2026-08-31).
+      const consumed = !el.dispatchEvent(ev);
+      return { dispatched: true, consumed, text: dt.getData('text/plain') };
     } catch (e) {
       return { dispatched: false, consumed: false, error: String(e) };
     }
@@ -2240,18 +2245,20 @@
       const expected = String(text).trim();
       const textMatches = () => { const v = readBack(); return v === expected || v.replace(/\n/g, '') === expected.replace(/\n/g, ''); };
 
-      // RUNG 1: synthetic ClipboardEvent paste (the strategy editors consume)
+      // RUNG 1: synthetic ClipboardEvent paste (the strategy editors consume).
+      // v4.2: accept on TEXT MATCH as primary signal — some editors consume the
+      // event without preventDefault, and a second insertText would double it.
       const p = syntheticPaste(el, text);
       results.attempts.push({ rung: 'paste', dispatched: p.dispatched, consumed: p.consumed });
       await new Promise((r) => setTimeout(r, 250));
-      if (p.dispatched && p.consumed && textMatches()) {
+      if (p.dispatched && textMatches()) {
         const truth = checkStateTruth(el);
         results.attempts.push({ rung: 'verify', truth });
         return new Promise(function(resolve) {
           setTimeout(function() {
             resolve({
               success: true,
-              confirmed: truth.synced === false ? 'dom-synced-state-unsynced' : 'editor-state-synced',
+              confirmed: truth.synced === false ? 'dom-synced-state-unsynced' : (truth.synced === true ? 'editor-state-synced' : 'paste-dom-persisted'),
               actualValue: readBack().slice(0, 200),
               reverted: false,
               expected: expected.slice(0, 200),
@@ -2825,8 +2832,8 @@
       const dt = new DataTransfer();
       dt.items.add(file);
       const ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
-      const notConsumed = !targetEl.dispatchEvent(ev);
-      const consumed = !notConsumed;
+      // v4.2 FIX: dispatchEvent false == handler consumed (preventDefault)
+      const consumed = !targetEl.dispatchEvent(ev);
       // Editor marks handling asynchronously — give it a beat, then look for
       // ANY evidence the file registered (preview node, filename text, upload chip).
       await new Promise((r) => setTimeout(r, 600));
