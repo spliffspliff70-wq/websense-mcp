@@ -302,6 +302,19 @@
       case 'screen_center': return screenCenter(params.ref || params.selector || '');
       case 'layout_relation': return layoutRelation(params.refA || '', params.refB || '');
       case 'get_events': return getEvents(params.since);
+      case 'ping': return { pong: true, ts: Date.now() };
+      case 'get_status': return { hubConnected: true, pageConnected: true, currentUrl: location.href, currentTitle: document.title, source: 'content-script' };
+      case 'handle_dialog': {
+        const idx = (params.index !== undefined && params.index !== null) ? params.index : (WS_DIALOGS.length - 1);
+        const dlg = WS_DIALOGS[idx];
+        if (!dlg) return { success: false, error: 'No pending dialog at index ' + idx };
+        const act = params.action || 'accept';
+        if (dlg._timer) { try { clearTimeout(dlg._timer); } catch (_) {} }
+        if (dlg.type === 'alert') { WS_DIALOGS.splice(idx, 1); return { success: true, handled: 'alert' }; }
+        else if (dlg.type === 'confirm') { const cv = (act === 'dismiss') ? false : true; if (dlg._res) dlg._res(cv); WS_DIALOGS.splice(idx, 1); return { success: true, handled: 'confirm', value: cv }; }
+        else if (dlg.type === 'prompt') { const pv = (act === 'dismiss') ? null : (params.value !== undefined && params.value !== null ? params.value : dlg.defaultValue); if (dlg._res) dlg._res(pv); WS_DIALOGS.splice(idx, 1); return { success: true, handled: 'prompt', value: pv }; }
+        return { success: false, error: 'Unknown dialog type: ' + dlg.type };
+      }
       case 'explore_intent': return exploreIntent(params.goal || '');
       case 'read_selector': {
         // B2 helper: read text/value from a selector (used by SW compound ops)
