@@ -1,13 +1,13 @@
 {
   "name": "websense-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "WebSense MCP — non-vision, AI-native web automation via the Semantic Action Graph. No screenshots, no CDP, no bot detection.",
   "license": "MIT",
   "author": "spliff70",
   "repository": {
     "type": "git",
-    "url": "https://github.com/spliff70/websense-mcp.git"
+    "url": "https://github.com/spliffspliff70-wq/websense-mcp.git"
   },
   "keywords": [
     "mcp",

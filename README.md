@@ -190,4 +190,4 @@ websense-mcp/
 
 **MIT** — use it, fork it, ship it. If WebSense saves you hours, a coffee is appreciated ☕
 
-[GitHub Sponsors](https://github.com/sponsors/spliff70) · [Buy me a coffee](https://ko-fi.com/spliff70)
+[GitHub Sponsors](https://github.com/sponsors/spliffspliff70-wq) · [Ko-fi](https://ko-fi.com/spliffspliff70)
