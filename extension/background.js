@@ -313,6 +313,16 @@ async function handleTabControl(action, payload) {
       await setupOffscreen();
       return { success: true, message: 'offscreen respawned' };
     }
+    case 'extension_reload': {
+      // v4 (2026-08-31): full self-reload — chrome.runtime.reload() tears down
+      // ALL extension contexts (SW, offscreen, content scripts) and reloads
+      // everything from disk. The server-side extension_reload tool polls the
+      // hub until the fresh SW reconnects (~3s), so callers get one clean
+      // result. NOTE: this SW dies right here — the response never makes it
+      // back; the poll is the actual confirmation mechanism.
+      setTimeout(() => { try { chrome.runtime.reload(); } catch (_) {} }, 150);
+      return { success: true, message: 'reloading extension in 150ms' };
+    }
     case 'get_window_tabs': {
       const tabs = await getAllTabs();
       return { success: true, tabs };

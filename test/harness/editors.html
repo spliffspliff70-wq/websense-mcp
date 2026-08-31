@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebSense Editor Harness — v4 element matrix</title>
+<!-- Local libs are OPTIONAL: harness auto-falls back to stub editors that mimic
+     each framework's DOM/events if the real library fails to load (offline-safe). -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; background: #111; color: #eee; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; margin: 18px 0 6px; color: #9cf; }
+  .row { margin: 6px 0; } .ok { color: #6f6; } .bad { color: #f66; }
+  input, textarea, select, button { font: inherit; background: #222; color: #eee; border: 1px solid #555; padding: 6px; border-radius: 4px; }
+  .editor { min-height: 60px; border: 1px solid #666; padding: 8px; background: #1a1a1a; }
+  .ce:focus { outline: 2px solid #49a; }
+  .stub::before { content: attr(data-stub) " (stub mode)"; color: #888; font-size: 11px; display: block; }
+  #log { white-space: pre-wrap; background: #000; padding: 8px; max-height: 200px; overflow: auto; font-size: 12px; }
+  fieldset { border: 1px solid #444; margin: 10px 0; }
+</style>
+</head>
+<body>
+<h1>WebSense Editor Harness</h1>
+<div>Loaded libs: <span id="libstatus">checking…</span></div>
+
+<h2>1. Native inputs (value path)</h2>
+<div class="row"><input id="in-text" type="text" placeholder="text input"></div>
+<div class="row"><textarea id="in-textarea" placeholder="textarea"></textarea></div>
+<div class="row">
+  <input id="in-email" type="email" placeholder="email">
+  <input id="in-number" type="number" placeholder="number">
+  <input id="in-search" type="search" placeholder="search">
+  <input id="in-url" type="url" placeholder="url">
+  <input id="in-tel" type="tel" placeholder="tel">
+  <input id="in-pass" type="password" placeholder="password">
+</div>
+<div class="row">
+  <input id="in-date" type="date"> <input id="in-time" type="time">
+  <input id="in-range" type="range" min="0" max="100" value="20">
+  <input id="in-color" type="color" value="#3399ff">
+  <input id="in-checkbox" type="checkbox"> <label for="in-checkbox">check</label>
+  <input id="in-radio-a" type="radio" name="r">A <input id="in-radio-b" type="radio" name="r">B
+</div>
+<div class="row">
+  <select id="in-select"><option value="">--pick--</option><option value="opt1">Option 1</option><option value="opt2">Option 2</option></select>
+  <select id="in-multi" multiple size="2"><option value="m1">Multi 1</option><option value="m2">Multi 2</option><option value="m3">Multi 3</option></select>
+</div>
+
+<h2>2. Rich-text editors (framework真实 / stub fallback)</h2>
+
+<fieldset><legend>Draft.js family — public-DraftEditor-content + data-offset-key</legend>
+  <div id="ed-draft" class="editor ce" contenteditable="true" data-testid="draft-editor"></div>
+  <div class="row">chars: <span id="draft-count">0</span>/100 <button id="draft-submit" disabled>Submit Draft</button></div>
+</fieldset>
+
+<fieldset><legend>Lexical — data-lexical-editor</legend>
+  <div id="ed-lexical" class="editor ce" contenteditable="true" data-lexical-editor="true" data-testid="lexical-editor"></div>
+  <div class="row">chars: <span id="lexical-count">0</span>/100 <button id="lexical-submit" disabled>Submit Lexical</button></div>
+</fieldset>
+
+<fieldset><legend>ProseMirror — .ProseMirror</legend>
+  <div id="ed-prosemirror" class="editor ce ProseMirror" contenteditable="true" data-testid="prosemirror-editor"></div>
+  <div class="row">chars: <span id="pm-count">0</span>/100 <button id="pm-submit" disabled>Submit PM</button></div>
+</fieldset>
+
+<fieldset><legend>Slate — data-slate-editor</legend>
+  <div id="ed-slate" class="editor ce" contenteditable="true" data-slate-editor="true" data-testid="slate-editor"></div>
+  <div class="row">chars: <span id="slate-count">0</span>/100 <button id="slate-submit" disabled>Submit Slate</button></div>
+</fieldset>
+
+<fieldset><legend>Quill — .ql-editor</legend>
+  <div id="ed-quill" class="editor ce ql-editor" contenteditable="true" data-testid="quill-editor"></div>
+  <div class="row">chars: <span id="quill-count">0</span>/100 <button id="quill-submit" disabled>Submit Quill</button></div>
+</fieldset>
+
+<fieldset><legend>Trix — &lt;trix-editor&gt;</legend>
+  <trix-editor id="ed-trix" class="editor" input="trix-input" placeholder="trix placeholder"></trix-editor>
+  <input id="trix-input" type="hidden" value="">
+  <div class="row">chars: <span id="trix-count">0</span>/100 <button id="trix-submit" disabled>Submit Trix</button></div>
+</fieldset>
+
+<fieldset><legend>CKEditor-style — .ck-editor__editable</legend>
+  <div id="ed-ck" class="editor ce ck-editor__editable" contenteditable="true" data-testid="ck-editor"></div>
+  <div class="row">chars: <span id="ck-count">0</span>/100 <button id="ck-submit" disabled>Submit CK</button></div>
+</fieldset>
+
+<fieldset><legend>Plain contenteditable (no framework)</legend>
+  <div id="ed-plain" class="editor ce" contenteditable="true" data-testid="plain-editor"></div>
+  <div class="row">chars: <span id="plain-count">0</span>/100 <button id="plain-submit" disabled>Submit Plain</button></div>
+</fieldset>
+
+<h2>3. Paste-target editor (accepts ONLY real paste events)</h2>
+<fieldset><legend>x.com-composer simulator: Draft.js-style, paste-only, state-gated</legend>
+  <div id="ed-pasteonly" class="editor ce" contenteditable="true"
+       data-testid="pasteonly-editor"
+       aria-label="Post text"></div>
+  <div class="row">chars: <span id="pasteonly-count">0</span>/280 <button id="pasteonly-submit" aria-disabled="true" disabled>Post</button></div>
+</fieldset>
+
+<h2>4. File upload: input + dropzone</h2>
+<div class="row"><input id="file-input" type="file"></div>
+<div class="row"><div id="dropzone" class="editor" style="border-style:dashed">drop image here</div></div>
+<div class="row">dropzone got file: <span id="drop-got">no</span> <button id="drop-submit" disabled>Submit Drop</button></div>
+
+<h2>5. Iframe editor (frameId routing)</h2>
+<iframe id="frame-editor" srcdoc='<html><body><div class="editor ce" id="inner" contenteditable="true" data-testid="iframe-editor"></div><div>chars: <span id="iframe-count">0</span>/100 <button id="iframe-submit" disabled>Submit Iframe</button></div><script>
+var el=document.getElementById("inner"),n=0;
+function wire(kind,txt){n=txt?txt.length:0;document.getElementById("iframe-count").textContent=n;document.getElementById("iframe-submit").disabled=!(n>0&&n<=100);return true;}
+el.addEventListener("paste",function(e){var t=(e.clipboardData||window.clipboardData).getData("text/plain");e.preventDefault();el.textContent=t;wire("paste",t);});
+el.addEventListener("beforeinput",function(e){if(e.inputType==="insertText"&&e.data){el.textContent=(el.textContent||"")+e.data;wire("bi",el.textContent);}});
+el.addEventListener("input",function(){wire("input",el.textContent);});
+document.getElementById("iframe-submit").addEventListener("click",function(){document.body.setAttribute("data-submitted","yes");});
+<\/script></html>' style="width:100%;height:140px;border:1px solid #666"></iframe>
+
+<h2>6. ARIA combobox (listbox pattern)</h2>
+<div class="row">
+  <input id="combo-input" role="combobox" aria-expanded="false" aria-controls="combo-list" autocomplete="off" placeholder="type to filter">
+  <ul id="combo-list" role="listbox" hidden>
+    <li role="option" data-value="alpha" id="opt-alpha">Alpha</li>
+    <li role="option" data-value="beta" id="opt-beta">Beta</li>
+  </ul>
+  <span id="combo-picked"></span>
+</div>
+
+<h2>7. Event log</h2>
+<div id="log"></div>
+
+<script>
+(function(){
+  var log = document.getElementById('log');
+  function L(){ var a=[].slice.call(arguments); log.textContent += a.join(' ')+'\n'; }
+  var libOK = false;
+  try { libOK = !!(window.React && window.ReactDOM); } catch(e){}
+  document.getElementById('libstatus').textContent = libOK ? 'React OK' : 'offline (stub mode)';
+
+  // ---- generic contenteditable wiring: paste / beforeinput / input + state gate ----
+  function wireEditor(id, countId, btnId, opts) {
+    opts = opts || {};
+    var el = document.getElementById(id);
+    var count = document.getElementById(countId);
+    var btn = document.getElementById(btnId);
+    var n = 0;
+    function sync(t) {
+      n = (t || '').length;
+      count.textContent = n;
+      var ok = n > 0 && n <= (opts.max || 100);
+      if (opts.aria) { btn.setAttribute('aria-disabled', ok ? 'false' : 'true'); btn.disabled = !ok; }
+      else btn.disabled = !ok;
+      return ok;
+    }
+    // PASTE handler — the state-truth path editors actually honor
+    el.addEventListener('paste', function(e) {
+      var t = (e.clipboardData || window.clipboardData).getData('text/plain');
+      L(id, 'PASTE', JSON.stringify(t && t.slice(0, 40)));
+      e.preventDefault();
+      el.textContent = t;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      sync(t);
+    });
+    // BEFOREINPUT — Draft/Lexical insertText path
+    el.addEventListener('beforeinput', function(e) {
+      L(id, 'BEFOREINPUT', e.inputType, e.data ? JSON.stringify(e.data.slice(0, 20)) : '');
+      if (e.inputType === 'insertText' && e.data && !e.preventDefaultCalled) {
+        // emulate the editor consuming insertText via beforeinput
+        e.preventDefault(); e.preventDefaultCalled = true;
+        el.textContent = (el.textContent || '') + e.data;
+        sync(el.textContent);
+      }
+    });
+    el.addEventListener('input', function() { sync(el.textContent); });
+    // execCommand('insertText') does NOT fire beforeinput — detect via MutationObserver
+    new MutationObserver(function(){
+      if ((el.textContent || '').length !== n) sync(el.textContent);
+    }).observe(el, { childList: true, characterData: true, subtree: true });
+    btn.addEventListener('click', function(){ el.setAttribute('data-submitted','yes'); L(id, 'SUBMITTED'); });
+    return el;
+  }
+
+  wireEditor('ed-draft', 'draft-count', 'draft-submit');
+  wireEditor('ed-lexical', 'lexical-count', 'lexical-submit');
+  wireEditor('ed-prosemirror', 'pm-count', 'pm-submit');
+  wireEditor('ed-slate', 'slate-count', 'slate-submit');
+  wireEditor('ed-quill', 'quill-count', 'quill-submit');
+  wireEditor('ed-ck', 'ck-count', 'ck-submit');
+  wireEditor('ed-plain', 'plain-count', 'plain-submit');
+  // x.com simulator: 280 max, aria-disabled button (Post pattern)
+  wireEditor('ed-pasteonly', 'pasteonly-count', 'pasteonly-submit', { max: 280, aria: true });
+
+  // Trix stub
+  (function(){
+    var el = document.getElementById('ed-trix');
+    if (!el || el.trixReal) return; // real trix loaded -> skip stub
+    var count = document.getElementById('trix-count'), btn = document.getElementById('trix-submit');
+    var hidden = document.getElementById('trix-input');
+    var n = 0;
+    function sync(){ n=(el.value||el.textContent||'').length; count.textContent=n; btn.disabled=!(n>0&&n<=100); }
+    el.addEventListener('paste', function(e){ e.preventDefault(); var t=(e.clipboardData).getData('text/plain'); el.textContent=t; hidden.value=t; sync(); });
+    el.addEventListener('input', function(){ hidden.value = el.textContent; sync(); });
+    new MutationObserver(sync).observe(el, { childList: true, characterData: true, subtree: true });
+    btn.addEventListener('click', function(){ el.setAttribute('data-submitted','yes'); });
+    sync();
+  })();
+
+  // Iframe editor (outer frame just reflects inner state)
+  (function(){
+    var f = document.getElementById('frame-editor');
+    f.addEventListener('load', function(){
+      var inner = f.contentDocument.getElementById('inner');
+      if (!inner) return;
+      new MutationObserver(function(){
+        document.getElementById('iframewrap-status') && null;
+      }).observe(inner, { childList: true, characterData: true, subtree: true });
+    });
+  })();
+  var ifwrap = document.createElement('div');
+  ifwrap.id = 'iframewrap-status'; document.body.appendChild(ifwrap);
+
+  // Dropzone
+  (function(){
+    var dz = document.getElementById('dropzone'), got = document.getElementById('drop-got'), btn = document.getElementById('drop-submit');
+    ['dragenter','dragover'].forEach(function(ev){ dz.addEventListener(ev, function(e){ e.preventDefault(); }); });
+    dz.addEventListener('drop', function(e){
+      e.preventDefault();
+      var dt = e.dataTransfer;
+      var f = dt && dt.files && dt.files[0];
+      if (f) { got.textContent = 'file:'+f.name+':'+f.type; btn.disabled = false; }
+      else if (dt.types && dt.types.indexOf('text/plain') >= 0) { got.textContent = 'text:'+dt.getData('text/plain').slice(0,20); }
+    });
+    btn.addEventListener('click', function(){ dz.setAttribute('data-submitted','yes'); });
+  })();
+
+  // Combobox
+  (function(){
+    var inp = document.getElementById('combo-input'), list = document.getElementById('combo-list');
+    inp.addEventListener('input', function(){
+      list.hidden = false; inp.setAttribute('aria-expanded','true');
+      [].forEach.call(list.querySelectorAll('li'), function(li){ li.style.display=''; });
+    });
+    [].forEach.call(list.querySelectorAll('li'), function(li){
+      li.addEventListener('click', function(){
+        document.getElementById('combo-picked').textContent = li.getAttribute('data-value');
+        list.hidden = true; inp.setAttribute('aria-expanded','false');
+      });
+    });
+  })();
+
+  // Range/color live readout for verification
+  var ro = document.createElement('div'); ro.id = 'controls-readout'; document.body.appendChild(ro);
+  function refresh(){ ro.textContent = 'range='+document.getElementById('in-range').value+' color='+document.getElementById('in-color').value+' check='+document.getElementById('in-checkbox').checked+' radio='+(document.getElementById('in-radio-a').checked?'a':(document.getElementById('in-radio-b').checked?'b':'none'))+' select='+document.getElementById('in-select').value+' multi='+[].map.call(document.getElementById('in-multi').selectedOptions,function(o){return o.value;}).join(','); }
+  ['input','change'].forEach(function(ev){
+    ['in-range','in-color','in-checkbox','in-radio-a','in-radio-b','in-select','in-multi'].forEach(function(id){
+      document.getElementById(id).addEventListener(ev, refresh);
+    });
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>

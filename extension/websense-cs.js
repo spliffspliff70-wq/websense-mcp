@@ -263,7 +263,8 @@
       case 'discover_actions': { const sag = await extractActionGraph({ includeContent: false, full: false, includeHidden: false, maxActions: params.maxActions || 250, frameId: params.frameId }); return sag.actions; }
       case 'click': { var b = getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); return { success: true, ref: params.ref, ...(cr && typeof cr === 'object' ? cr : {}), beforeState: b, afterState: getQuickState() }; }
       case 'type_text': { var r = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); r.ref = params.ref; return r; }
-      case 'select_option': { var s = nativeSelect(await resolveRefHealed(params.ref), params.value); s.ref = params.ref; return s; }
+      case 'select_option': { var s = nativeSelect(await resolveRefHealed(params.ref), params.value, params.clearAll); s.ref = params.ref; return s; }
+      case 'form_special': { var fs = await nativeSetSpecial(await resolveRefHealed(params.ref), params.value); fs.ref = params.ref; return fs; }
       case 'toggle': { var t = nativeToggle(await resolveRefHealed(params.ref)); t.ref = params.ref; return t; }
       case 'scroll': return nativeScroll(params.direction, params.amount || 1, params.ref);
       case 'scroll_to': return nativeScrollTo(params.y);
@@ -461,25 +462,50 @@
     return ref;
   }
 
+  // v4 (2026-08-31): quote-safe [data-websense-ref="<ref>"] lookup + selector
+  // fast-path. Escapes backslashes and double quotes before embedding the ref
+  // into an attribute selector, so refs containing quotes can never crash
+  // querySelector again.
+  function resolveAttrRef(ref) {
+    if (typeof ref !== 'string' || !ref) return null;
+    try {
+      const esc = ref.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      return document.querySelector('[' + REF_ATTR + '="' + esc + '"]') || null;
+    } catch (_) { return null; }
+  }
+
+  // SELECTOR-REF fast path (v4): if the ref looks like a CSS selector, try it
+  // directly before falling back to the locator chain.
+  function resolveSelectorRef(ref) {
+    if (typeof ref !== 'string') return null;
+    if (!/^[\[\]#\.>\+~,:*='"\w\-()%|\s]+$/.test(ref)) return null;
+    if (!(ref.startsWith('[') || ref.startsWith('#') || ref.startsWith('.') || ref.includes(' > ') || ref.includes('>') || ref.includes('~'))) return null;
+    try {
+      return document.querySelector(ref) || null;
+    } catch (_) { return null; }
+  }
+
   function resolveRef(ref) {
     if (refMap.has(ref)) {
       const el = refMap.get(ref);
       if (el && el.isConnected) return el;
       refMap.delete(ref);
     }
-    const el = document.querySelector('[' + REF_ATTR + '="' + ref + '"]');
+    // v4 (2026-08-31): attribute-lookup with QUOTE-SAFE escaping. A ref/selector
+    // containing double quotes (e.g. [data-testid="tweetTextarea_0"]) crashed
+    // the naive string concat with "not a valid selector". Also fast-path:
+    // a well-formed selector ref goes straight to querySelector.
+    const el = resolveAttrRef(ref);
     if (el) { refMap.set(ref, el); return el; }
-    // SELECTOR REFS (2026-08-13, project directive): accept CSS selectors directly
+    // SELECTOR REFS (2026-08-13): accept CSS selectors directly
     // so tools like geometry()'s returned refs ("[aria-label='X']", "#id",
-    // ".class > span") can be clicked without an E# SAG entry. This is what
-    // makes the Bugcrowd VRT dropdown (options NOT indexed in the SAG) fully
-    // clickable — no coordinates, no drift: click(ref="[aria-label='Sensitive
-    // Data Exposure']") → resolveRef → nativeClick (deepest-child semantics).
-    if (typeof ref === 'string' && /^[\[\]#\.\w>+~,:*='"\-()%| ]+$/.test(ref) && (ref.startsWith('[') || ref.startsWith('#') || ref.startsWith('.') || ref.includes(' > '))) {
-      try {
-        const found = document.querySelector(ref);
-        if (found) { refMap.set(ref, found); return found; }
-      } catch (_) { /* invalid selector — fall through to locator chain */ }
+    // ".class > span") can be clicked without an E# SAG entry. v4 (2026-08-31):
+    // wrapped in resolveAttrRef() which QUOTE-ESCAPES the attribute value —
+    // selectors containing double quotes (e.g. [data-testid="tweetTextarea_0"])
+    // previously crashed querySelector with "not a valid selector".
+    {
+      const selEl = resolveSelectorRef(ref);
+      if (selEl) { refMap.set(ref, selEl); return selEl; }
     }
     // A2 (2026-08-10): the ref node died (re-render). Re-resolve via the
     // semantic locator chain — data-testid → id → aria-label → name → CSS
@@ -1981,7 +2007,30 @@
 
   async function nativeClick(el) {
     if (!el) throw new Error('Element not found');
-    // BACKGROUND BLANK-TARGET (2026-08-13, project directive): <a target="_blank">
+    // v4 DISABLED DIAGNOSIS (2026-08-31, x.com Post-button lesson): a disabled
+    // button silently "absorbs" clicks — the agent then retries blindly. Refuse
+    // with a REASON instead. Checks: [disabled] attr, aria-disabled, and
+    // disabled-class heuristics (X uses r-icoktb / r-3pj75a on disabled buttons).
+    if (el.disabled === true || el.getAttribute('aria-disabled') === 'true') {
+      // Why is it disabled? Look for an adjacent char counter / required hint.
+      let hint = null;
+      try {
+        const scope = el.closest('[role="dialog"], form, [data-testid]') || el.parentElement;
+        const counter = scope && (scope.querySelector('[data-testid$="counter"], [class*="counter"], [aria-live]'));
+        if (counter) hint = (counter.textContent || '').trim().slice(0, 40);
+      } catch (_) {}
+      return {
+        success: false,
+        refused: 'disabled-button',
+        disabled: true,
+        ariaDisabled: el.getAttribute('aria-disabled') === 'true',
+        label: (el.textContent || '').trim().slice(0, 40),
+        hint,
+        reason: hint ? 'button disabled — adjacent counter says: ' + hint
+                     : 'button disabled — a prerequisite (text/validation) is not satisfied; typing/clicking it cannot work',
+      };
+    }
+    // BACKGROUND BLANK-TARGET (2026-08-13): <a target="_blank">
     // clicks make Chrome open a new ACTIVE tab, raising the OS window — the
     // remaining foreground-steal path (Bugcrowd "Submit report" is one).
     // Intercept: open the href in a BACKGROUND tab via the SW instead.
@@ -2034,6 +2083,115 @@
     return { success: true, target: targetEl.tagName.toLowerCase(), dispatchedOn: targetEl === el ? 'resolved' : 'deepest' };
   }
 
+  // ═══ v4 EDITOR FRAMEWORK DETECTOR (2026-08-31) ═══
+  // Classifies any text-entry element so nativeType can pick the right strategy.
+  // Returns { kind, framework, strategy, stateControl }.
+  //   kind: input | textarea | select | editor | unknown
+  //   framework: draftjs | lexical | prosemirror | slate | quill | trix |
+  //              ckeditor | tinymce | google-docs | contenteditable | null
+  //   strategy: value | paste | insertText | beforeinput | iframe | unsupported
+  //   stateControl: selector of the dependent submit button, if discoverable
+  function detectEditor(el) {
+    if (!el || el.nodeType !== 1) return { kind: 'unknown', framework: null, strategy: 'none', stateControl: null };
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA') return { kind: 'textarea', framework: null, strategy: 'value', stateControl: null };
+    if (tag === 'SELECT') return { kind: 'select', framework: null, strategy: 'select', stateControl: null };
+    if (tag === 'INPUT') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      // value-settable types
+      if (!['checkbox','radio','file','range','color','submit','button','image','reset'].includes(t))
+        return { kind: 'input', framework: null, strategy: 'value', stateControl: null };
+      return { kind: 'input', framework: null, strategy: 'none', stateControl: null, inputType: t };
+    }
+    if (!el.isContentEditable) return { kind: 'unknown', framework: null, strategy: 'none', stateControl: null };
+
+    // ---- contenteditable: identify the editor framework ----
+    const cls = el.className || '';
+    const d = (sel) => !!el.querySelector(sel);
+    const up = (sel) => { let p = el.parentElement; while (p) { if (p.matches && p.matches(sel)) return true; p = p.parentElement; } return false; };
+
+    let framework = 'contenteditable';
+    let strategy = 'paste';           // default best bet for editors
+    if (d('.public-DraftEditor-content') || el.hasAttribute('data-offset-key') || d('[data-offset-key]') || up('.DraftEditor-root')) framework = 'draftjs';
+    else if (el.hasAttribute('data-lexical-editor') || d('[data-lexical-editor]')) framework = 'lexical';
+    else if (el.classList.contains('ProseMirror') || d('.ProseMirror')) framework = 'prosemirror';
+    else if (el.hasAttribute('data-slate-editor') || d('[data-slate-editor]')) framework = 'slate';
+    else if (el.classList.contains('ql-editor') || up('.ql-editor') || d('.ql-editor')) framework = 'quill';
+    else if (tag === 'TRIX-EDITOR' || up('trix-editor') || d('trix-editor')) framework = 'trix';
+    else if (el.classList.contains('ck-editor__editable') || el.classList.contains('ck-content') || d('.ck-editor__editable')) framework = 'ckeditor';
+    else if (up('.tox-edit-area') || d('.tox-edit-area')) framework = 'tinymce';
+    else if (up('#docs-editor') || d('.kix-appview-editor')) { framework = 'google-docs'; strategy = 'unsupported'; }
+
+    // iframe-hosted editor (CKEditor/TinyMCE inline frames)
+    let inIframe = false;
+    try { inIframe = (window.self !== window.top); } catch (_) { inIframe = true; }
+
+    // state control: a submit-ish sibling — the "source of truth" that proves
+    // the app REGISTERED our text. Walk up to the form-ish container, look for
+    // button[type=submit], [data-testid*=submit], or a button mentioning post/send/submit.
+    let stateControl = null;
+    try {
+      let scope = el.parentElement;
+      for (let i = 0; i < 6 && scope && !stateControl; i++) {
+        const btns = scope.querySelectorAll('button, [role="button"]');
+        for (const b of btns) {
+          const lbl = ((b.textContent || '') + ' ' + (b.getAttribute('data-testid') || '') + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase();
+          const isSubmitish = b.getAttribute('type') === 'submit' || /submit|post|send|reply|tweet|publish|comment/.test(lbl);
+          if (isSubmitish) { stateControl = b; break; }
+        }
+        scope = scope.parentElement;
+      }
+    } catch (_) {}
+    const scInfo = stateControl ? {
+      disabled: stateControl.disabled || stateControl.getAttribute('aria-disabled') === 'true',
+      testid: stateControl.getAttribute('data-testid'),
+      text: (stateControl.textContent || '').trim().slice(0, 30),
+    } : null;
+
+    return { kind: 'editor', framework, strategy, inIframe, stateControl: scInfo };
+  }
+
+  // SYNTHETIC PASTE (v4): the strategy Draft.js/Lexical/ProseMirror/Slate/Quill
+  // actually honor — a ClipboardEvent with a real DataTransfer, dispatch on the
+  // focused editor. CSP-safe (no eval). Returns true if a handler preventDefault()ed
+  // (i.e. an editor consumed it).
+  function syntheticPaste(el, text) {
+    try {
+      el.focus();
+      // caret to end
+      const sel = window.getSelection();
+      const r = document.createRange();
+      r.selectNodeContents(el); r.collapse(false);
+      sel.removeAllRanges(); sel.addRange(r);
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      dt.setData('text/html', text
+        .split('\n')
+        .map((l) => l.trim() === '' ? '<br>' : '<div>' + l.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>')
+        .join(''));
+      const ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
+      const notConsumed = !el.dispatchEvent(ev);
+      return { dispatched: true, consumed: !notConsumed, text: dt.getData('text/plain') };
+    } catch (e) {
+      return { dispatched: false, consumed: false, error: String(e) };
+    }
+  }
+
+  // STATE-TRUTH CHECK (v4): after typing, verify the app REGISTERED the text by
+  // inspecting the dependent submit control. DOM text present + submit still
+  // disabled = editor state didn't sync = strategy failed.
+  function checkStateTruth(el) {
+    try {
+      const det = el.__wsEditorDetect || detectEditor(el);
+      if (det.stateControl) {
+        const b = det.stateControl;
+        const disabled = b.disabled || b.getAttribute('aria-disabled') === 'true';
+        return { synced: !disabled, submitDisabled: disabled, submitLabel: det.stateControl.text };
+      }
+    } catch (_) {}
+    return { synced: null, submitDisabled: null, submitLabel: null };
+  }
+
   async function nativeType(el, text, clearFirst) {
     if (!el) throw new Error('Element not found');
     var cf = (typeof clearFirst !== 'undefined') ? clearFirst : true;
@@ -2050,13 +2208,17 @@
     // beforeinput/input events Draft.js and Lexical actually listen to, and
     // works multi-line. Verify by reading textContent instead of .value.
     if (el.isContentEditable) {
+      // ═══ v4 STRATEGY LADDER (2026-08-31) ═══
+      // Detect the framework, then try: synthetic paste → execCommand insertText.
+      // Verify against the app's STATE TRUTH (dependent submit control), not the DOM.
+      const det = detectEditor(el);
+      el.__wsEditorDetect = det;
       el.focus();
       const sel = window.getSelection();
+      const results = { framework: det.framework, attempts: [] };
+
+      // CLEAR phase (shared): select-all + delete + settle ticks
       if (cf !== false) {
-        // CLEAR: select all existing content, delete it, and WAIT one tick for
-        // Draft.js/Lexical to process the deletion — issuing insertText in the
-        // same tick races the editor's internal model and produces duplicated/
-        // re-ordered blocks (observed live on x.com, 2026-08-31).
         const rAll = document.createRange();
         rAll.selectNodeContents(el);
         sel.removeAllRanges(); sel.addRange(rAll);
@@ -2065,25 +2227,54 @@
         el.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise((r) => setTimeout(r, 80));
       }
-      // caret to end of the (now empty) editor
+
+      const readBack = () => (el.innerText || el.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+      const expected = String(text).trim();
+      const textMatches = () => { const v = readBack(); return v === expected || v.replace(/\n/g, '') === expected.replace(/\n/g, ''); };
+
+      // RUNG 1: synthetic ClipboardEvent paste (the strategy editors consume)
+      const p = syntheticPaste(el, text);
+      results.attempts.push({ rung: 'paste', dispatched: p.dispatched, consumed: p.consumed });
+      await new Promise((r) => setTimeout(r, 250));
+      if (p.dispatched && p.consumed && textMatches()) {
+        const truth = checkStateTruth(el);
+        results.attempts.push({ rung: 'verify', truth });
+        return new Promise(function(resolve) {
+          setTimeout(function() {
+            resolve({
+              success: true,
+              confirmed: truth.synced === false ? 'dom-synced-state-unsynced' : 'editor-state-synced',
+              actualValue: readBack().slice(0, 200),
+              reverted: false,
+              expected: expected.slice(0, 200),
+              ...results,
+            });
+          }, 300);
+        });
+      }
+
+      // RUNG 2: execCommand insertText (plain contenteditable fallback)
       const range = document.createRange();
       range.selectNodeContents(el);
       range.collapse(false);
       sel.removeAllRanges(); sel.addRange(range);
       const ok = document.execCommand('insertText', false, text);
+      results.attempts.push({ rung: 'insertText', ok });
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return new Promise(function(resolve) {
         setTimeout(function() {
-          const finalVal = (el.innerText || el.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
-          const expected = String(text).trim();
+          const finalVal = readBack();
           const matches = ok && (finalVal === expected || finalVal.replace(/\n/g,'') === expected.replace(/\n/g,''));
+          const truth = checkStateTruth(el);
           resolve({
             success: matches,
-            confirmed: matches ? 'contenteditable-persisted' : false,
+            confirmed: matches ? (truth.synced === false ? 'dom-synced-state-unsynced' : 'contenteditable-persisted') : false,
             actualValue: finalVal.slice(0, 200),
             reverted: !matches,
             expected: expected.slice(0, 200),
             execCommandOk: ok,
+            stateTruth: truth,
+            ...results,
           });
         }, 500);
       });
@@ -2113,13 +2304,107 @@
     });
   }
 
-  function nativeSelect(el, value) {
+  function nativeSelect(el, value, clearAll) {
     if (!el) throw new Error('Element not found');
     if (el.tagName!=='SELECT') { let p=el.parentElement; while(p&&p.tagName!=='SELECT')p=p.parentElement; if(p)el=p; else throw new Error('Not a select'); }
+    // v4 (2026-08-31): multi-select support — value can be a string or an array
+    // (also JSON-encoded array string). Toggling option.selected fires the
+    // change event React/Naive selects listen to.
+    if (el.multiple) {
+      let wanted = Array.isArray(value) ? value.map(String)
+        : (() => { try { const j = JSON.parse(value); return Array.isArray(j) ? j.map(String) : [String(value)]; } catch (_) { return [String(value)]; } })();
+      let matchedAny = false;
+      const clearRest = typeof clearAll === 'boolean' ? clearAll : true;
+      for (const opt of el.options) {
+        const match = wanted.some((w) => opt.value === w || (opt.textContent || '').trim() === w || (opt.label || '') === w);
+        if (match) { opt.selected = true; matchedAny = true; }
+        else if (clearRest) { opt.selected = false; }
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { success: matchedAny, value: [].map.call(el.selectedOptions, (o) => o.value), multi: true };
+    }
     let matched=false;
     for (const opt of el.options) { if (opt.value===value||(opt.textContent||'').trim()===value||(opt.label||'')===value) { const d=getNativeValueSetter(el); if(d&&d.set)d.set.call(el,opt.value); else el.value=opt.value; matched=true; break; } }
     if (matched) { el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }
     return { success:matched, value:el.value };
+  }
+
+  // v4 (2026-08-31): special input types — the value-setter path is wrong or
+  // insufficient for these. One entry point: form_special(ref, kind, value).
+  //   range    → set .value AsNumber within min/max/step + input/change
+  //   color    → set .value as #rrggbb + input/change
+  //   date     → set .valueAsDate (YYYY-MM-DD) + input/change
+  //   time     → set .value (HH:MM, HH:MM:SS) + input/change
+  //   number   → set .value via native setter (float-safe) + input/change
+  //   checkbox → .checked = !!value + change (no click — idempotent set)
+  //   radio    → .checked = true on the matching radio in its group + change
+  async function nativeSetSpecial(el, value) {
+    if (!el || el.tagName !== 'INPUT') throw new Error('Not an input');
+    const t = (el.getAttribute('type') || 'text').toLowerCase();
+    const fire = () => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); };
+    const set = (v) => { const d = getNativeValueSetter(el); if (d && d.set) d.set.call(el, v); else el.value = v; };
+    switch (t) {
+      case 'range': {
+        const num = Number(value);
+        if (isNaN(num)) return { success: false, refused: 'range-needs-number' };
+        const min = el.min === '' ? 0 : Number(el.min);
+        const max = el.max === '' ? 100 : Number(el.max);
+        const step = el.step && el.step !== 'any' ? Number(el.step) : 1;
+        let v = Math.min(max, Math.max(min, num));
+        // snap to step
+        v = min + Math.round((v - min) / step) * step;
+        v = Math.min(max, Math.max(min, v));
+        set(String(v)); fire();
+        return { success: true, value: el.value, min, max, step };
+      }
+      case 'color': {
+        let v = String(value).trim();
+        if (!/^#[0-9a-fA-F]{6}$/.test(v)) {
+          // accept #rgb or rgb() and normalize
+          if (/^#[0-9a-fA-F]{3}$/.test(v)) v = '#' + v.slice(1).split('').map((c) => c + c).join('');
+          else { const m = v.match(/rgb\((\d+)[,\s]+(\d+)[,\s]+(\d+)\)/); if (m) v = '#' + [m[1], m[2], m[3]].map((c) => Number(c).toString(16).padStart(2, '0')).join(''); else return { success: false, refused: 'color-needs-hex' }; }
+        }
+        set(v); fire();
+        return { success: true, value: el.value };
+      }
+      case 'date': case 'datetime-local': case 'month': case 'week': {
+        const v = String(value).trim();
+        set(v); fire();
+        // verify the browser accepted it (invalid dates keep value '')
+        return { success: el.value === v, value: el.value, note: el.value === v ? undefined : 'browser rejected the value format for type=' + t };
+      }
+      case 'time': {
+        const v = String(value).trim();
+        set(v); fire();
+        return { success: el.value === v, value: el.value };
+      }
+      case 'number': {
+        const num = Number(value);
+        if (isNaN(num)) return { success: false, refused: 'number-needs-number' };
+        set(String(num)); fire();
+        return { success: el.value !== '' && !isNaN(Number(el.value)), value: el.value };
+      }
+      case 'checkbox': {
+        el.checked = !!value && value !== 'false' && value !== '0';
+        fire();
+        return { success: true, checked: el.checked };
+      }
+      case 'radio': {
+        // value may be 'true' (just check this one) or a value of the radio in its group
+        const name = el.name;
+        if (value === true || value === 'true' || value === '') {
+          el.checked = true; fire();
+          return { success: el.checked, checked: el.checked };
+        }
+        const group = name ? Array.from(document.querySelectorAll('input[type="radio"][name="' + CSS.escape(name) + '"]')) : [el];
+        const target = group.find((r) => r.value === String(value)) || (group.find((r) => (r.labels || [])[0] && (r.labels[0].textContent || '').trim() === String(value)));
+        if (!target) return { success: false, refused: 'radio-not-found', group: group.map((r) => r.value) };
+        target.checked = true; target.dispatchEvent(new Event('input', { bubbles: true })); target.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true, checked: true, value: target.value };
+      }
+      default:
+        return { success: false, refused: 'not-special', inputType: t };
+    }
   }
 
   function nativeToggle(el) {
@@ -2515,6 +2800,45 @@
     };
   }
 
+  // ═══ v4 Strategy 3: CLIPBOARD-PASTE into editors (2026-08-31) ═══
+  // Rich-text editors (x.com composer, Discord, Slack, Notion) accept images /
+  // files via the paste pipeline — no file input, no dropzone. Synthetic
+  // ClipboardEvent('paste') carrying the file as a DataTransfer item, with the
+  // editor focused. consumed=true (handler called preventDefault) means the
+  // editor took it. Positive-only confirmation per PRINCIPLE 5.
+  async function nativeUploadPasteIntoEditor(targetEl, base64, fileName, mimeType) {
+    try {
+      const file = makeFileFromBase64(base64, fileName, mimeType);
+      const det = detectEditor(targetEl);
+      if (det.kind !== 'editor') {
+        return { success: false, refused: 'not-an-editor', note: 'paste-upload targets rich-text editors; use file_input/dropzone strategies for inputs' };
+      }
+      targetEl.focus();
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const ev = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
+      const notConsumed = !targetEl.dispatchEvent(ev);
+      const consumed = !notConsumed;
+      // Editor marks handling asynchronously — give it a beat, then look for
+      // ANY evidence the file registered (preview node, filename text, upload chip).
+      await new Promise((r) => setTimeout(r, 600));
+      const shown = pageShowsFileName(fileName);
+      return {
+        success: consumed,
+        method: 'editor_paste',
+        framework: det.framework,
+        fileName: file.name,
+        fileSize: file.size,
+        confirmed: shown === true ? 'preview-visible' : (consumed ? 'consumed-unverified' : 'unconfirmed'),
+        note: shown === true ? 'Paste dispatched and page shows the file.'
+            : consumed ? 'Paste event was consumed by the editor but no preview detected — verify before claiming success.'
+            : 'Editor did not consume the paste event.',
+      };
+    } catch (e) {
+      return { success: false, method: 'editor_paste', error: String(e) };
+    }
+  }
+
   // ═══ Network Request Capture ═══
   var networkLog = [];
   var networkCapturing = false;
@@ -2719,7 +3043,8 @@
         case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||250}); result = sag.actions; break; }
         case 'click': { const before=getQuickState(); nativeClick(await resolveRefHealed(params.ref)); result={success:true,ref:params.ref,beforeState:before,afterState:getQuickState()}; break; }
                 case 'type_text': { result = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); result.ref = params.ref; break; }
-                case 'select_option': { result=nativeSelect(await resolveRefHealed(params.ref),params.value); result.ref=params.ref; break; }
+                case 'select_option': { result=nativeSelect(await resolveRefHealed(params.ref),params.value, params.clearAll); result.ref=params.ref; break; }
+                case 'form_special': { result=await nativeSetSpecial(await resolveRefHealed(params.ref), params.value); result.ref=params.ref; break; }
                 case 'toggle': { result=nativeToggle(await resolveRefHealed(params.ref)); result.ref=params.ref; break; }
                 case 'scroll': result=nativeScroll(params.direction,params.amount||1,params.ref); break;
                 case 'scroll_to': result=nativeScrollTo(params.y); break;
@@ -2733,7 +3058,18 @@
                 case 'drag_drop': result=nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef)); break;
                 case 'click_xy': result=nativeClickXY(params.x, params.y, params.ref, params.button); break;
         case 'copy_to_clipboard': result=nativeCopyToClipboard(params.text); break;
-        case 'upload_file': result=nativeUploadFromBase64(resolveRef(params.ref), params.fileContent, params.fileName, params.mimeType); break;
+        case 'upload_file': {
+          // v4: editor targets get the paste strategy; input/dropzone targets
+          // keep the classic strategies.
+          const upEl = resolveRefHealed(params.ref);
+          const upDet = detectEditor(upEl);
+          if (upDet.kind === 'editor') {
+            result = await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
+          } else {
+            result = await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
+          }
+          break;
+        }
         case 'network_log': if (!networkCapturing) startNetworkCapture(); result=getNetworkLog(params.clear !== false, params.maxEntries || 50); break;
         case 'console_log': if (!consoleCapturing) startConsoleCapture(); result=getConsoleLog(params.clear !== false, params.maxEntries || 100); break;
         case 'dropdown_options': result=getDropdownOptions(params.ref); break;

@@ -117,7 +117,7 @@ function withSessionTab(cmd) {
       'list_frames','download_state','tab_contents','bind_tab','transfer_text',
       'switch_tab_and_read','list_windows','focus_window','move_tab_to_window',
       'ax_state','ax_read','ax_click','ax_type',
-      'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen']);
+      'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen','extension_reload']);
     // NOTE: 'navigate' was REMOVED from TAB_OPS (2026-08-13, project directive —
     // session isolation). Each session's navigate is stamped with ITS OWN
     // bound tabId so a worker's navigate never steals another session's tab.
@@ -509,19 +509,25 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 6. FORM ═══
   reg(server, 'form', {
-    description: 'Form ops: action:"state" (fields, validation, submit readiness; formRef optional = all) | "select" (ref,value — native <select> AND ARIA dropdowns) | "toggle" (checkbox/switch/aria-pressed) | "upload" (ref, filePath — DataTransfer, no OS picker).',
+    description: 'Form ops: action:"state" (fields, validation, submit readiness; formRef optional = all) | "select" (ref,value — native <select> AND ARIA dropdowns; select[multiple] accepts JSON array) | "toggle" (checkbox/switch/aria-pressed) | "special" (ref,value — date/time/color/range/number/checkbox/radio with auto-format + browser-rejection detection) | "upload" (ref, filePath — file input / dropzone / rich-editor paste, auto-picked).',
     inputSchema: {
-      action: z.enum(['state', 'select', 'toggle', 'upload']).describe('Form operation'),
+      action: z.enum(['state', 'select', 'toggle', 'special', 'upload']).describe('Form operation'),
       formRef: z.string().optional().describe('state: form ref e.g. "F0" (omit = all forms)'),
-      ref: z.string().optional().describe('Element ref for select/toggle/upload'),
-      value: z.string().optional().describe('select: option value'),
+      ref: z.string().optional().describe('Element ref for select/toggle/special/upload'),
+      value: z.string().optional().describe('select: option value (or JSON array for multi) | special: target value ("2026-09-01", "#ff8800", "42", "true")'),
+      clearAll: z.boolean().optional().describe('select on multi-select: deselect non-matching options (default true)'),
       filePath: z.string().optional().describe('upload: absolute file path'),
     },
   }, async (o) => {
     if (o.action === 'state') return textResult(await getActiveHub().send({ type: 'form_state', formRef: o.formRef, frameId: o.frameId }));
     if (o.action === 'select') {
-      const result = await getActiveHub().send({ type: 'select_option', ref: o.ref, value: o.value, frameId: o.frameId });
+      const result = await getActiveHub().send({ type: 'select_option', ref: o.ref, value: o.value, clearAll: o.clearAll, frameId: o.frameId });
       session.recordAction({ action: 'select_option', ref: o.ref, value: o.value }, result);
+      return textResult(result);
+    }
+    if (o.action === 'special') {
+      const result = await getActiveHub().send({ type: 'form_special', ref: o.ref, value: o.value, frameId: o.frameId });
+      session.recordAction({ action: 'form_special', ref: o.ref, value: o.value }, result);
       return textResult(result);
     }
     if (o.action === 'toggle') {
@@ -968,6 +974,49 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     description: 'Force-close + recreate the offscreen document so the CURRENT on-disk extension code loads. Use after editing offscreen.js/background.js when new tab ops return "Unknown action type" (MV3 does not reload the offscreen on card reload). No page impact.',
     inputSchema: {},
   }, async () => textResult(await getActiveHub().send({ type: 'respawn_offscreen' })));
+
+  // ═══ 19d. EXTENSION SELF-RELOAD (v4 — 2026-08-31) ═══
+  // Full `chrome.runtime.reload()` without the chrome://extensions dance.
+  // Flow: SW reloads itself → all extension contexts die → hub loses the client
+  // → the fresh SW's keepalive reconnects within ~3s → hub answers 'extension_reloaded'.
+  // The server polls the hub until it's back (default 15s), so the MCP result
+  // arrives AFTER the extension is live again — no manual reload, no dead window.
+  reg(server, 'extension_reload', {
+    description: 'Reload the WebSense extension itself (chrome.runtime.reload) and wait for it to reconnect. Use after editing ANY extension file (websense-cs.js, offscreen.js, background.js, manifest) so on-disk code goes live — replaces the manual chrome://extensions Reload click. Returns reconnected status; page tabs are NOT closed (content scripts re-inject on next navigate or explore).',
+    inputSchema: {
+      timeoutMs: z.number().optional().describe('How long to wait for reconnect (default 15000)'),
+    },
+  }, async (o) => {
+    const hub = getActiveHub();
+    const timeoutMs = (o && o.timeoutMs) || 15000;
+    let reloadSent = false;
+    try {
+      await hub.send({ type: 'extension_reload' });
+      reloadSent = true;
+    } catch (e) {
+      // expected: the SW dies mid-request, so the send may reject. Treat as sent.
+      reloadSent = true;
+    }
+    // Poll until the extension answers again
+    const t0 = Date.now();
+    let back = false;
+    let lastErr = null;
+    while (Date.now() - t0 < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const st = await hub.send({ type: 'get_status' }, { timeoutMs: 4000 });
+        if (st && (st.hubConnected || st.connected || st.ok)) { back = true; break; }
+      } catch (e) { lastErr = String(e); }
+    }
+    return textResult({
+      reloadSent,
+      reconnected: back,
+      waitedMs: Date.now() - t0,
+      lastError: back ? undefined : (lastErr || 'timeout waiting for extension reconnect'),
+      note: back ? 'extension reloaded and reconnected — fresh code is live. Re-bind tabs before page ops.'
+                 : 'extension did not reconnect in time — check chrome://extensions for errors.',
+    });
+  });
 
   // ═══ 20. CLIPBOARD ═══
   reg(server, 'clipboard', {

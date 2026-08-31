@@ -8,6 +8,16 @@ action type with a predicted effect, every form is fully introspected, every cli
 before/after state diff. Works on LinkedIn, GitHub, Google, Gmail — any strict-CSP site,
 including React/Vue/Angular SPAs.
 
+**v4: types into anything.** One `type_text` call auto-detects the editor engine —
+Draft.js (x.com), Lexical, ProseMirror, Slate, Quill, Trix, CKEditor, TinyMCE, plain
+inputs — and picks the right insertion strategy (synthetic paste event with real
+DataTransfer → beforeinput → execCommand), then verifies the app's *state truth*:
+the dependent submit button must actually enable. Disabled buttons are refused with a
+reason (adjacent char counter included), never silently swallowed. Uploads auto-route:
+file input → dropzone → rich-editor paste. New: `form special` (date/color/range/number/
+checkbox/radio), multi-select with JSON arrays, self-reload (`extension_reload`), and a
+local test harness covering the whole matrix (`test/harness/`).
+
 ---
 
 ## WebSense in plain language
