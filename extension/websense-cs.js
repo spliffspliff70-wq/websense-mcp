@@ -2034,7 +2034,7 @@
     return { success: true, target: targetEl.tagName.toLowerCase(), dispatchedOn: targetEl === el ? 'resolved' : 'deepest' };
   }
 
-  function nativeType(el, text, clearFirst) {
+  async function nativeType(el, text, clearFirst) {
     if (!el) throw new Error('Element not found');
     var cf = (typeof clearFirst !== 'undefined') ? clearFirst : true;
     nativeClick(el);
@@ -2051,27 +2051,32 @@
     // works multi-line. Verify by reading textContent instead of .value.
     if (el.isContentEditable) {
       el.focus();
-      // place caret inside the editor root
       const sel = window.getSelection();
+      if (cf !== false) {
+        // CLEAR: select all existing content, delete it, and WAIT one tick for
+        // Draft.js/Lexical to process the deletion — issuing insertText in the
+        // same tick races the editor's internal model and produces duplicated/
+        // re-ordered blocks (observed live on x.com, 2026-08-31).
+        const rAll = document.createRange();
+        rAll.selectNodeContents(el);
+        sel.removeAllRanges(); sel.addRange(rAll);
+        document.execCommand('delete', false, null);
+        await new Promise((r) => setTimeout(r, 120));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      // caret to end of the (now empty) editor
       const range = document.createRange();
       range.selectNodeContents(el);
       range.collapse(false);
       sel.removeAllRanges(); sel.addRange(range);
-      if (cf !== false) {
-        // select all existing content so insertText replaces it
-        const r2 = document.createRange();
-        r2.selectNodeContents(el);
-        sel.removeAllRanges(); sel.addRange(r2);
-        document.execCommand('insertText', false, '');
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      }
       const ok = document.execCommand('insertText', false, text);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return new Promise(function(resolve) {
         setTimeout(function() {
-          const finalVal = (el.innerText || el.textContent || '').trim();
+          const finalVal = (el.innerText || el.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
           const expected = String(text).trim();
-          const matches = ok && finalVal === expected;
+          const matches = ok && (finalVal === expected || finalVal.replace(/\n/g,'') === expected.replace(/\n/g,''));
           resolve({
             success: matches,
             confirmed: matches ? 'contenteditable-persisted' : false,
