@@ -241,6 +241,13 @@ function sendKeysForWindows(key) {
   // PLATFORM GUARD (OSS release): Windows-only enhancement. On macOS/Linux
   // this returns an honest error and the tool falls back to reporting the
   // escalation hint (no crash, no silent fake success).
+  // FOREGROUND GUARD (2026-08-31, Ali: "why is foreground stolen by factory
+  // agents?"): the mouse_event click lands on whatever window is FRONTMOST at
+  // the OS level. Even with the active-tab guard, a sibling worker churning
+  // tabs could make the check pass while the user's app is actually in front.
+  // This checks the foreground window's owning process is Chrome BEFORE moving
+  // the cursor — if the user is in a non-Chrome app, it refuses (honest error,
+  // no click into the user's active app).
   function realClickAt(x, y) {
     if (process.platform !== 'win32') {
       throw new Error('autoClimb real-click is Windows-only (uses user32 mouse_event via PowerShell). On ' + process.platform + ', deliver the OS click with your platform\'s native automation and retry.');
@@ -248,8 +255,14 @@ function sendKeysForWindows(key) {
     const ps =
       'Add-Type -AssemblyName System.Windows.Forms; ' +
       'Add-Type -TypeDefinition "using System;using System.Runtime.InteropServices;' +
-      'public class WS_MOUSE{[DllImport(\\"user32.dll\\")]public static extern bool SetCursorPos(int X,int Y);' +
-      '[DllImport(\\"user32.dll\\")]public static extern void mouse_event(uint dwFlags,uint dx,uint dy,uint dwData,System.UIntPtr dwExtraInfo);}' +
+      'public class WS_MOUSE{[DllImport(\\\\"user32.dll\\\\")]public static extern IntPtr GetForegroundWindow();' +
+      '[DllImport(\\\\"user32.dll\\\\")]public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);' +
+      '[DllImport(\\\\"user32.dll\\\\")]public static extern bool SetCursorPos(int X,int Y);' +
+      '[DllImport(\\\\"user32.dll\\\\")]public static extern void mouse_event(uint dwFlags,uint dx,uint dy,uint dwData,System.UIntPtr dwExtraInfo);}' +
+      '$fg=[WS_MOUSE]::GetForegroundWindow();' +
+      '$fgPid=0;[void][WS_MOUSE]::GetWindowThreadProcessId($fg,[ref]$fgPid);' +
+      '$p=Get-Process -Id $fgPid -ErrorAction SilentlyContinue;' +
+      'if($p -and $p.ProcessName -notlike "*chrome*"){throw "foreground window is $($p.ProcessName) (PID $fgPid), not Chrome — refusing OS click into the user\'s active app"};' +
       '[WS_MOUSE]::SetCursorPos(' + Math.round(x) + ',' + Math.round(y) + ');' +
       'Start-Sleep -Milliseconds 60;' +
       '[WS_MOUSE]::mouse_event(0x0002,0,0,0,[System.UIntPtr]::Zero);' + // LEFTDOWN
