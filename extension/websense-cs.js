@@ -2269,6 +2269,10 @@
       }
 
       // RUNG 2: execCommand insertText (plain contenteditable fallback)
+      // v4.2.1 SELF-HEAL: if the final text contains the expected text
+      // MORE THAN ONCE (the doubling signature: paste inserted it AND
+      // insertText appended it — observed across Chrome CS re-injection
+      // races), wipe and retype once cleanly.
       const range = document.createRange();
       range.selectNodeContents(el);
       range.collapse(false);
@@ -2278,8 +2282,21 @@
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return new Promise(function(resolve) {
         setTimeout(function() {
-          const finalVal = readBack();
-          const matches = ok && (finalVal === expected || finalVal.replace(/\n/g,'') === expected.replace(/\n/g,''));
+          let finalVal = readBack();
+          const occurrence = finalVal.split(expected.replace(/\n/g, '')).length - 1;
+          if (expected.length > 0 && occurrence > 1) {
+            // doubling detected — wipe (hard) and retype once
+            el.textContent = '';
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            const r3 = document.createRange();
+            r3.selectNodeContents(el); r3.collapse(false);
+            sel.removeAllRanges(); sel.addRange(r3);
+            document.execCommand('insertText', false, text);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            finalVal = readBack();
+            results.attempts.push({ rung: 'self-heal-retype', detected: 'doubling' });
+          }
+          const matches = finalVal === expected || finalVal.replace(/\n/g,'') === expected.replace(/\n/g,'');
           const truth = checkStateTruth(el);
           resolve({
             success: matches,
@@ -3092,7 +3109,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v2-logged',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.2',csBuild:'v4.2-paste-invert-fix',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;
