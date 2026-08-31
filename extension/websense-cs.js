@@ -345,7 +345,16 @@
       case 'mermaid_export': return { note: 'mermaid_export handled by server' };
       case 'wait_for': return { note: 'wait_for not available from content bridge' };
       case 'upload_file': return { error: 'upload_file requires the background SW (drag-and-drop DataTransfer unavailable in content world) — use the SW relay' };
-      case 'read_clipboard': return handleReadClipboard();
+      case 'read_clipboard': {
+        try {
+          const ta = document.createElement('textarea');
+          ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;';
+          document.body.appendChild(ta); ta.focus(); ta.select();
+          const ok = document.execCommand('paste');
+          ta.remove();
+          return { success: true, text: ok ? ta.value : '' };
+        } catch (e) { return { success: false, error: 'clipboard read failed: ' + (e.message || e) }; }
+      }
       case 'reset_session': wsReady = true; return { success: true };
       default: return { error: 'Unknown content action: ' + msg.type };
     }
@@ -2033,6 +2042,47 @@
     setNativeValue(el, text);
     el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true}));
     if (detectFramework()==='react') el.dispatchEvent(new InputEvent('beforeinput',{bubbles:true,data:text,inputType:'insertText'}));
+    // CONTENTEDITABLE SUPPORT (2026-08-31, marketing-campaign need): Draft.js /
+    // Lexical editors (x.com, LinkedIn, Reddit composers) are contenteditable
+    // DIVs — they have no .value, so the value-setter path above is a no-op and
+    // nativeType "succeeded" while typing nothing. For these, focus + select-all
+    // + document.execCommand('insertText') — CSP-safe (no eval), fires the
+    // beforeinput/input events Draft.js and Lexical actually listen to, and
+    // works multi-line. Verify by reading textContent instead of .value.
+    if (el.isContentEditable) {
+      el.focus();
+      // place caret inside the editor root
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel.removeAllRanges(); sel.addRange(range);
+      if (cf !== false) {
+        // select all existing content so insertText replaces it
+        const r2 = document.createRange();
+        r2.selectNodeContents(el);
+        sel.removeAllRanges(); sel.addRange(r2);
+        document.execCommand('insertText', false, '');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const ok = document.execCommand('insertText', false, text);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return new Promise(function(resolve) {
+        setTimeout(function() {
+          const finalVal = (el.innerText || el.textContent || '').trim();
+          const expected = String(text).trim();
+          const matches = ok && finalVal === expected;
+          resolve({
+            success: matches,
+            confirmed: matches ? 'contenteditable-persisted' : false,
+            actualValue: finalVal.slice(0, 200),
+            reverted: !matches,
+            expected: expected.slice(0, 200),
+            execCommandOk: ok,
+          });
+        }, 500);
+      });
+    }
     // Phase 3 (2026-08-15): VERIFY-PERSIST. React/custom-elements frequently
     // DISCARD the programmatic value on the next render (value shows transiently
     // then snaps back to the controlled value). The old code reported
