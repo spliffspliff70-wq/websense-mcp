@@ -5,7 +5,7 @@
  */
 'use strict';
 
-// ═══ MAIN-world console/JS-error hook (2026-08-30, parity with MCP browser-console tools) ═══
+// ═══ MAIN-world console/JS-error hook (2026-08-30, parity with Hermes browser_console) ═══
 // Page console.* runs in the MAIN world; the isolated content script can't see it.
 // Register console-hook.js into the MAIN world at document_start — it writes a
 // JSON ring buffer onto a hidden DOM node (#__ws_console_buffer) that the content
@@ -31,7 +31,7 @@ async function registerConsoleHook() {
 
 let offscreenCreating = null;
 
-// 2026-08-12 (project: 'the hub should never disconnect'): chrome.offscreen
+// 2026-08-12 (Ali: 'the hub should never disconnect'): chrome.offscreen
 // createDocument can HANG (never resolve) when Chrome is mid-suspension or a
 // zombie registration is half-cleared. If it hangs, offscreenCreating stays a
 // never-settling promise and line 48's `await offscreenCreating` deadlocks
@@ -153,7 +153,7 @@ async function setupOffscreen() {
     // slot (its runtime is dead but the registration survived a reload/toggle).
     // Force-close it and retry ONCE — the old code treated this as "OK" and
     // silently gave up, leaving the hub with a dead offscreen forever
-    // (2026-08-12: workers hijacked tabs + tab ops failed with
+    // (Ali 2026-08-12: workers hijacked tabs + tab ops failed with
     // 'Extension context invalidated' because the offscreen never respawned).
     const msg = String((err && err.message) || err);
     if (/only a single offscreen/i.test(msg)) {
@@ -270,11 +270,31 @@ async function handleTabControl(action, payload) {
       // Phase 4 (2026-08-15): browser_screenshot tool. chrome.tabs.captureVisibleTab
       // is a chrome.tabs API — no CDP, no webdriver flag, no bot-detection surface.
       // Returns a data URL the model can pass to vision.
+      // BACKGROUND-TAB FALLBACK (2026-08-31, OSS 24-tool sweep): captureVisibleTab
+      // only captures the VISIBLE tab — on a background/bound tab it fails with
+      // "image readback failed". Fall back to chrome.debugger Page.captureScreenshot
+      // on the BOUND tab (same transport the ax tool already uses; brief debugging
+      // infobar appears). Now a background tab screenshots fine.
+      const fmt = (payload.format === 'jpeg' || payload.format === 'jpg') ? 'jpeg' : 'png';
       try {
-        const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: (payload.format || 'png'), quality: payload.quality || 80 });
-        return { success: true, dataUrl: dataUrl, mime: 'image/' + (payload.format || 'png') };
-      } catch (err) {
-        return { error: 'captureVisibleTab failed: ' + (err.message || err) };
+        const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: fmt, quality: payload.quality || 80 });
+        return { success: true, dataUrl: dataUrl, mime: 'image/' + fmt, mode: 'visible' };
+      } catch (visibleErr) {
+        // Bound tab is backgrounded (or capture refused) — debugger fallback.
+        try {
+          const tabId = (typeof boundTabId === 'number') ? boundTabId : (payload.tabId ? parseInt(payload.tabId, 10) : null);
+          if (!tabId) return { error: 'captureVisibleTab failed: ' + (visibleErr.message || visibleErr) + ' — and no bound tab for debugger fallback' };
+          const target = { tabId };
+          try { await chrome.debugger.attach(target, '1.3'); } catch (_) { /* already attached is fine */ }
+          try {
+            const res = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: fmt, quality: fmt === 'jpeg' ? (payload.quality || 80) : undefined });
+            return { success: true, dataUrl: 'data:image/' + fmt + ';base64,' + res.data, mime: 'image/' + fmt, mode: 'debugger-fallback', tabId };
+          } finally {
+            try { await chrome.debugger.detach(target); } catch (_) {}
+          }
+        } catch (dbgErr) {
+          return { error: 'screenshot failed (visible: ' + (visibleErr.message || visibleErr) + '; debugger fallback: ' + (dbgErr.message || dbgErr) + ')' };
+        }
       }
     }
     case 'get_active_tab': {
@@ -787,7 +807,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // hub looks disconnected forever. A chrome.runtime.sendMessage to the
     // offscreen WAKES it (message events wake the document) and verifies it
     // answers. Only when the probe fails (dead/zombie/missing) do we
-    // force-recreate. (2026-08-12: 'the hub should never disconnect' —
+    // force-recreate. (Ali 2026-08-12: 'the hub should never disconnect' —
     // this is the missing keep-alive that makes recovery automatic.)
     (async () => {
       const alive = await new Promise((resolve) => {

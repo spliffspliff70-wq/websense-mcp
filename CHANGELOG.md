@@ -3,6 +3,20 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.1.1] — 2026-08-31
+
+### Fixed
+- **`screenshot` failed on background tabs** ("image readback failed") — now falls back to
+  `chrome.debugger` `Page.captureScreenshot` on the bound tab (mode: `debugger-fallback` in
+  the response). The visible-tab path is unchanged and preferred.
+
+### Changed
+- README: added a plain-language "What WebSense does" section (Chrome-extension framing made
+  explicit) and a Credits section acknowledging design ideas borrowed from agentreach,
+  Hermes Agent, the computer-use ecosystem, and Playwright/Puppeteer; Known Limitations
+  re-verified via a full 24-tool audit (screenshot limitation fixed, Chrome-only and other
+  trade-offs documented).
+
 ## [1.1.0] — 2026-08-31
 
 ### Fixed

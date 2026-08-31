@@ -10,6 +10,37 @@ including React/Vue/Angular SPAs.
 
 ---
 
+## WebSense in plain language
+
+**What it is:** a tool that lets an AI assistant (like Claude, or any MCP-capable agent)
+use a normal Chrome browser the way a person would — clicking buttons, filling forms,
+reading pages — but *seeing* the page as a clean structured map instead of pixels.
+
+**How it works, without the jargon:**
+
+1. You install a small **Chrome extension** (this is the eyes and hands — it lives inside
+   your real Chrome, with your real logins, on your machine). Chrome-only today.
+2. A tiny helper program (the **server**) runs on your computer and connects the assistant
+   to the extension. Nothing ever leaves your machine — it's all localhost.
+3. When the assistant asks "what's on this page?", the extension doesn't send a screenshot.
+   Instead it reads the page and answers: *"there's a login form with an email field, a
+   password field, a 'Remember me' checkbox, and a Log In button."* Every element gets a
+   name tag (`E0`, `E1`, …) the assistant can refer to later.
+4. When the assistant wants to act — "type the email into the form" — it says *type into
+   E1*, and the extension does it the same way your keyboard would, inside the page itself.
+   The site can't tell the difference: no robot flag, no fake browser, no second profile.
+5. After every action the assistant gets a **before/after diff**: "the modal opened," "the
+   form submitted," "nothing changed — try something else." That last honest verdict is
+   what makes agents reliable instead of guessy.
+
+**Why that matters:** other approaches either spin up a *fake* browser (which sites detect
+and block, and which has none of your logins) or take *screenshots* and have a vision model
+squint at pixels (slow, expensive, error-prone). WebSense does neither. Your assistant uses
+your real browser, sees structure instead of pixels, and acts like a human — because the
+extension operates inside the page exactly where your clicks and keystrokes land.
+
+---
+
 ## Why WebSense
 
 | | WebSense | CDP / Puppeteer | Vision-based (computer-use) |
@@ -43,6 +74,23 @@ The content script extracts a **Semantic Action Graph (SAG)** — every interact
 stable ref (`E0`, `E1`, …), action type (`navigation`, `form_input`, `form_submit`, `toggle`, …),
 predicted effect, and live state (`value`, `checked`, `disabled`, `expanded`, …). The agent
 plans against the graph, then acts by ref. No coordinates, no pixels, no eval.
+
+---
+
+## Credits — ideas borrowed from other projects
+
+WebSense is original code, but several design ideas were adapted from projects we studied
+and admired. Full credit where due:
+
+| From | What we borrowed |
+|---|---|
+| **[agentreach](https://github.com/Panniantong/Agent-Reach)** (tenlifejosh/agentreach & Panniantong/Agent-Reach, MIT) | The upload-confirmation doctrine — multi-strategy file-drop + *positive-only* confirmation (`input-has-file` / `preview-visible` / `unconfirmed` — never claim success without evidence); the idea of a self-diagnostics tool (`websense_doctor`); the per-site quirks registry pattern |
+| **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** (Nous Research) | The event-push supervisor pattern (push dialogs/navigation to a ring buffer instead of polling — `wait{event:}`); goal-aware read auto-summarization (threshold + goal extraction); inline after-action verification (the `capture_after` idea → our before/after click diff) |
+| **Computer-use / cua-driver ecosystem** | The verify-then-escalate ladder — structured effect verdicts (`confirmed` / `unverifiable` / `suspected_noop`) with a recommended escalation path instead of silent retries |
+| **Playwright / Puppeteer** | The locator-chain idea (data-testid → id → aria-label → name → CSS path → role+text) that powers re-targeting after re-renders — reimplemented for our ref system |
+
+Everything listed was re-implemented for WebSense's extension-based architecture — no code
+copied, ideas and proven patterns only. Thank you to those projects. 🙏
 
 ---
 
@@ -140,8 +188,16 @@ crashes. Core browsing is fully cross-platform.
 
 ## Known limitations
 
-- **Logged-in sites** must already be authenticated in the Chrome profile the extension runs in
-  (`navigate` opens a fresh tab that uses existing session cookies).
+*(All previously listed limitations were re-verified during a full 24-tool audit on
+2026-08-31. One was fixed — see below — the rest are inherent design trade-offs.)*
+
+- ~~**Screenshots fail on background tabs**~~ → **FIXED (v1.1.1)**: `screenshot` now falls
+  back to `chrome.debugger` `Page.captureScreenshot` on the bound tab when the tab isn't the
+  visible one. A brief "started debugging" infobar appears during fallback captures.
+- **Chrome-only** — the extension targets Chrome (Chromium builds like Edge/Brave generally
+  work but are untested). There is deliberately no headless mode and no CDP path.
+- **Logged-in sites** must already be authenticated in the Chrome profile the extension runs
+  in (`navigate` opens a fresh tab that uses existing session cookies).
 - **`evaluate`** uses `new Function` (eval) → blocked by strict page CSP (LinkedIn, HN). It's a
   power-user utility; the rest of the surface is CSP-safe.
 - **Canvas / WebGL content** (Telegram web, TradingView): use the `ax` tool (native accessibility
@@ -190,4 +246,4 @@ websense-mcp/
 
 **MIT** — use it, fork it, ship it. If WebSense saves you hours, a coffee is appreciated ☕
 
-[GitHub Sponsors](https://github.com/sponsors/spliffspliff70-wq) · [Ko-fi](https://ko-fi.com/spliffspliff70)
+[GitHub Sponsors](https://github.com/sponsors/spliffspliff70-wq)
