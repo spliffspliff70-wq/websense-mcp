@@ -219,7 +219,7 @@
           result = await relayTabControl('get_window_tabs', {});
         } else if (msg.type === 'navigate') {
           if (msg.newTab) {
-            // BACKGROUND-ONLY (2026-08-13, project directive): never activate —
+            // BACKGROUND-ONLY (2026-08-13, Ali directive): never activate —
             // activation raises the Chrome window (foreground hijack).
             result = await relayTabControl('open_new_tab', { url: msg.url, active: false });
             result = { success: true, tabId: (result && result.tabId) || null, reused: false, background: true };
@@ -2046,7 +2046,7 @@
     }
     if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(); else el.scrollIntoView({behavior:'auto',block:'center',inline:'nearest'});
     const rect = el.getBoundingClientRect(); const x = rect.left+rect.width/2; const y = rect.top+rect.height/2;
-    // REAL-CLICK SEMANTICS (2026-08-13, project directive — Bugcrowd VRT lesson):
+    // REAL-CLICK SEMANTICS (2026-08-13, Ali directive — Bugcrowd VRT lesson):
     // a genuine mouse click lands on the TOPMOST element at the cursor, not on
     // the resolved container. React trees like Bugcrowd's VRT dropdown close on
     // container (li) clicks but expand on the inner span/button. If the resolved
@@ -2218,14 +2218,22 @@
       const results = { framework: det.framework, attempts: [] };
 
       // CLEAR phase (shared): select-all + delete + settle ticks
+      // v4.1: VERIFY the clear actually emptied the editor before inserting.
+      // A framework that swallows execCommand('delete') leaves old content →
+      // insertText then APPENDS (doubling bug, observed live 2026-08-31).
+      // Retry up to 2x, then fall back to direct textContent wipe.
       if (cf !== false) {
-        const rAll = document.createRange();
-        rAll.selectNodeContents(el);
-        sel.removeAllRanges(); sel.addRange(rAll);
-        document.execCommand('delete', false, null);
-        await new Promise((r) => setTimeout(r, 120));
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        await new Promise((r) => setTimeout(r, 80));
+        const readBackNow = () => (el.innerText || el.textContent || '').trim();
+        for (let i = 0; i < 3 && readBackNow() !== ''; i++) {
+          const rAll = document.createRange();
+          rAll.selectNodeContents(el);
+          sel.removeAllRanges(); sel.addRange(rAll);
+          document.execCommand('delete', false, null);
+          if (readBackNow() !== '') { el.textContent = ''; }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          await new Promise((r) => setTimeout(r, 120));
+          await new Promise((r) => setTimeout(r, 80));
+        }
       }
 
       const readBack = () => (el.innerText || el.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
