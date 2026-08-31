@@ -7,7 +7,7 @@
  * HTTP mode (multi-client): node src/server.js --http [--http-port 9222]
  *
  * In HTTP mode, the server runs as a persistent background service.
- * Multiple MCP clients connect to http://localhost:9222/mcp.
+ * Multiple MCP clients (Hermes, Cline, Cursor) connect to http://localhost:9222/mcp.
  * The extension connects to the WS hub once and stays connected.
  *
  * Architecture: MCP Client → (stdio|HTTP) → This server → WebSocket Hub → Chrome Extension → Content Script → DOM
@@ -612,7 +612,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   }, async (o) => {
     const kind = o.kind || 'page';
     if (kind === 'bridge') {
-      let pageUrl = null, pageTitle = null;
+      let pageUrl = null, pageTitle = null, probe = 'none';
       if (getActiveHub().connected) {
         try {
           const ps = await Promise.race([
@@ -621,16 +621,26 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
           ]);
           pageUrl = ps?.url || null;
           pageTitle = ps?.title || null;
-        } catch (_) {}
+          probe = pageUrl !== null ? 'live' : 'empty';
+        } catch (_) {
+          // A5 (2026-08-31, OSS smoke-test): get_status timed out but ops DO
+          // work — a heavy page / settling SPA can exceed the 3s probe. Don't
+          // report a hard false (that reads as "extension dead" and misroutes
+          // agents); fall back to the session's last-known-good URL.
+          probe = 'timeout-fallback';
+          pageUrl = session.currentUrl || null;
+          pageTitle = pageUrl ? (session.pages.get(pageUrl)?.title || session.currentTitle || null) : null;
+        }
       }
       return textResult({
         hubConnected: getActiveHub().connected,
         pageConnected: pageUrl !== null,
+        pageProbe: probe,
         currentUrl: pageUrl,
         currentTitle: pageTitle,
         sessionSteps: session.stepCounter,
         pagesExplored: session.pages.size,
-        hint: getActiveHub().connected ? null : 'Extension not connected. Load the WebSense Chrome extension (extension/manifest.json) — it auto-connects to ws://localhost:38401 within 3s. Then call websense_guide.',
+        hint: probe === 'timeout-fallback' ? 'get_status probe timed out (heavy/settling page) — reporting last-known session URL; ops may still work' : (getActiveHub().connected ? null : 'Extension not connected. Load the WebSense Chrome extension (extension/manifest.json) — it auto-connects to ws://localhost:38401 within 3s. Then call websense_guide.'),
       });
     }
     if (kind === 'doctor') {
@@ -914,7 +924,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     },
   }, async (o) => textResult(await getActiveHub().send({ type: 'network_log', clear: o.clear !== false, maxEntries: o.maxEntries || 50 })));
 
-  // ═══ 19. CONSOLE (parity with MCP browser-console tools — 2026-08-30) ═══
+  // ═══ 19. CONSOLE (parity with Hermes browser_console — 2026-08-30) ═══
   reg(server, 'console_log', {
     description: 'Captured browser console + JS errors since last call (console.log/warn/error/info/debug + window.onerror + unhandledrejection, ring buffer 300). Call once to start capturing, then again after an interaction that "does nothing" to read what the page JS is complaining about. clear, maxEntries (default 100).',
     inputSchema: {

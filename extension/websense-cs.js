@@ -261,19 +261,19 @@
     switch (msg.type) {
       case 'explore_page': return await extractActionGraph({ full: !!params.full, includeContent: params.includeContent !== false, includeHidden: !!params.includeHidden, frameId: params.frameId, incremental: !!params.incremental });
       case 'discover_actions': { const sag = await extractActionGraph({ includeContent: false, full: false, includeHidden: false, maxActions: params.maxActions || 250, frameId: params.frameId }); return sag.actions; }
-      case 'click': { var b = getQuickState(); const cr = await nativeClick(resolveRef(params.ref)); return { success: true, ref: params.ref, ...(cr && typeof cr === 'object' ? cr : {}), beforeState: b, afterState: getQuickState() }; }
-      case 'type_text': { var r = await nativeType(resolveRef(params.ref), params.text, params.clearFirst !== false); r.ref = params.ref; return r; }
-      case 'select_option': { var s = nativeSelect(resolveRef(params.ref), params.value); s.ref = params.ref; return s; }
-      case 'toggle': { var t = nativeToggle(resolveRef(params.ref)); t.ref = params.ref; return t; }
+      case 'click': { var b = getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); return { success: true, ref: params.ref, ...(cr && typeof cr === 'object' ? cr : {}), beforeState: b, afterState: getQuickState() }; }
+      case 'type_text': { var r = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); r.ref = params.ref; return r; }
+      case 'select_option': { var s = nativeSelect(await resolveRefHealed(params.ref), params.value); s.ref = params.ref; return s; }
+      case 'toggle': { var t = nativeToggle(await resolveRefHealed(params.ref)); t.ref = params.ref; return t; }
       case 'scroll': return nativeScroll(params.direction, params.amount || 1, params.ref);
       case 'scroll_to': return nativeScrollTo(params.y);
-      case 'scroll_into_view': return nativeScrollIntoView(resolveRef(params.ref));
+      case 'scroll_into_view': return nativeScrollIntoView(await resolveRefHealed(params.ref));
       case 'press_key': return nativePressKeyEnhanced(params.key, params.ref, params.modifiers);
       case 'evaluate': return nativeEvaluate(params.script);
       case 'evaluate_safe': return nativeEvaluateSafe(params.query || {});
       case 'type_many': return nativeTypeMany(params.fields);
-      case 'hover': return nativeHover(resolveRef(params.ref));
-      case 'right_click': return nativeRightClick(resolveRef(params.ref));
+      case 'hover': return nativeHover(await resolveRefHealed(params.ref));
+      case 'right_click': return nativeRightClick(await resolveRefHealed(params.ref));
       case 'drag_drop': return nativeDragDrop(resolveRef(params.fromRef), resolveRef(params.toRef));
       case 'click_xy': return nativeClickXY(params.x, params.y, params.ref, params.button);
       case 'console_log': if (!consoleCapturing) startConsoleCapture(); return getConsoleLog(params.clear !== false, params.maxEntries || 100);
@@ -470,6 +470,24 @@
       }
     }
     return null;
+  }
+
+  // SELF-HEAL RESOLVE (2026-08-31, OSS smoke-test finding): async wrapper —
+  // ref was assigned in a scan BEFORE a full/compact explore rebuilt refMap,
+  // or the element is below fold / viewport-filtered / slow-render, and the
+  // sync DOM-walk resolution missed. Rebuild the graph ONCE, then retry —
+  // beats a hard "Element not found" and lets callers climb honestly.
+  // Guarded against recursion (extractActionGraph itself never calls this).
+  async function resolveRefHealed(ref) {
+    const first = resolveRef(ref);
+    if (first) return first;
+    if (resolveRefHealed._healing) return null;
+    try {
+      resolveRefHealed._healing = true;
+      await extractActionGraph({ includeContent: false, full: false, includeHidden: false });
+    } catch (_) { /* heal failed — return null below */ }
+    finally { resolveRefHealed._healing = false; }
+    return resolveRef(ref);
   }
 
   // ═══ Framework Detection ═══
@@ -686,7 +704,9 @@
       if (!isVisible(el)) continue;
       const c = classifyAction(el);
       const intent = detectIntent(el, c);
-      if (intent.includes(q) || q.includes(intent) || (el.getAttribute('name')||'').toLowerCase().includes(q) || (el.getAttribute('id')||'').toLowerCase().includes(q)) {
+      const labelText = (getLabel(el) || '').toLowerCase();
+      const hrefText = ((c.href || '') + '').toLowerCase();
+      if (intent.includes(q) || q.includes(intent) || (el.getAttribute('name')||'').toLowerCase().includes(q) || (el.getAttribute('id')||'').toLowerCase().includes(q) || labelText.includes(q) || hrefText.includes(q)) {
         matches.push({ ref: assignRef(el), intent, type: c.type, subtype: c.subtype, label: getLabel(el).slice(0, 60), locator: (buildLocator(el)||[])[0] || null });
       }
     }
@@ -1483,7 +1503,13 @@
     // full-SAG fallback on first call / churn (see exploreIncremental).
     if (options.incremental) return await exploreIncremental(options);
     wsLog('EAG:start opts=', JSON.stringify(options));
-    refMap = new Map(); refCounter = 0; locatorByRef.clear();
+    // REF STABILITY (2026-08-31, OSS smoke-test finding): refCounter is NOT
+    // reset here. Resetting it made refs from a previous explore silently
+    // re-point at DIFFERENT elements after a re-scan (silent wrong-click
+    // hazard) or die with "Element not found" (below-fold elements). Refs
+    // are only reset on SPA navigation (navObserver) — within one page they
+    // are stable for the tab's lifetime. refMap is still rebuilt (bounded).
+    refMap = new Map(); locatorByRef.clear();
     // On heavy pages, wait briefly for SPA hydration to settle (don't capture
     // a half-rendered tree). Skips quickly when the DOM is already quiet.
     await waitForSettle(options.settleMs || 2500, 400);
@@ -2432,7 +2458,7 @@
     return { entries, totalCaptured: networkLog.length, capturing: networkCapturing };
   }
 
-  // ═══ CONSOLE / JS-ERROR CAPTURE (2026-08-30 — parity with MCP browser-console tools) ═══
+  // ═══ CONSOLE / JS-ERROR CAPTURE (2026-08-30 — parity with Hermes browser_console) ═══
   // Auto-starts on init so page-load JS errors are captured before the first explicit call.
   var consoleCapturing = false;
   var consoleLog = [];
@@ -2600,21 +2626,21 @@
       switch (type) {
         case 'explore_page': try { result = params.incremental ? await exploreIncremental(params) : await extractActionGraph(params); } catch(e) { result = { success: false, error: 'explore_page failed: ' + e.message, stack: (e.stack||'').slice(0, 500) }; } break;
         case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||250}); result = sag.actions; break; }
-        case 'click': { const before=getQuickState(); nativeClick(resolveRef(params.ref)); result={success:true,ref:params.ref,beforeState:before,afterState:getQuickState()}; break; }
-        case 'type_text': { result = await nativeType(resolveRef(params.ref), params.text, params.clearFirst !== false); result.ref = params.ref; break; }
-        case 'select_option': { result=nativeSelect(resolveRef(params.ref),params.value); result.ref=params.ref; break; }
-        case 'toggle': { result=nativeToggle(resolveRef(params.ref)); result.ref=params.ref; break; }
-        case 'scroll': result=nativeScroll(params.direction,params.amount||1,params.ref); break;
-        case 'scroll_to': result=nativeScrollTo(params.y); break;
-        case 'scroll_into_view': result=nativeScrollIntoView(resolveRef(params.ref)); break;
-        case 'press_key': result=nativePressKeyEnhanced(params.key, params.ref, params.modifiers); break;
-        case 'evaluate': result=nativeEvaluate(params.script); break;
-        case 'evaluate_safe': result=nativeEvaluateSafe(params.query || {}); break;
-        case 'type_many': result=nativeTypeMany(params.fields); break;
-        case 'hover': result=nativeHover(resolveRef(params.ref)); break;
-        case 'right_click': result=nativeRightClick(resolveRef(params.ref)); break;
-        case 'drag_drop': result=nativeDragDrop(resolveRef(params.fromRef), resolveRef(params.toRef)); break;
-        case 'click_xy': result=nativeClickXY(params.x, params.y, params.ref, params.button); break;
+        case 'click': { const before=getQuickState(); nativeClick(await resolveRefHealed(params.ref)); result={success:true,ref:params.ref,beforeState:before,afterState:getQuickState()}; break; }
+                case 'type_text': { result = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); result.ref = params.ref; break; }
+                case 'select_option': { result=nativeSelect(await resolveRefHealed(params.ref),params.value); result.ref=params.ref; break; }
+                case 'toggle': { result=nativeToggle(await resolveRefHealed(params.ref)); result.ref=params.ref; break; }
+                case 'scroll': result=nativeScroll(params.direction,params.amount||1,params.ref); break;
+                case 'scroll_to': result=nativeScrollTo(params.y); break;
+                case 'scroll_into_view': result=nativeScrollIntoView(await resolveRefHealed(params.ref)); break;
+                case 'press_key': result=nativePressKeyEnhanced(params.key, params.ref, params.modifiers); break;
+                case 'evaluate': result=nativeEvaluate(params.script); break;
+                case 'evaluate_safe': result=nativeEvaluateSafe(params.query || {}); break;
+                case 'type_many': result=nativeTypeMany(params.fields); break;
+                case 'hover': result=nativeHover(await resolveRefHealed(params.ref)); break;
+                case 'right_click': result=nativeRightClick(await resolveRefHealed(params.ref)); break;
+                case 'drag_drop': result=nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef)); break;
+                case 'click_xy': result=nativeClickXY(params.x, params.y, params.ref, params.button); break;
         case 'copy_to_clipboard': result=nativeCopyToClipboard(params.text); break;
         case 'upload_file': result=nativeUploadFromBase64(resolveRef(params.ref), params.fileContent, params.fileName, params.mimeType); break;
         case 'network_log': if (!networkCapturing) startNetworkCapture(); result=getNetworkLog(params.clear !== false, params.maxEntries || 50); break;
