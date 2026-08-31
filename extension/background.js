@@ -494,6 +494,24 @@ async function handleTabControl(action, payload) {
       const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
       return { success: true, tabId: tab.id, frames: (frames || []).map((f) => ({ frameId: f.frameId, url: f.url || '', parentFrameId: f.parentFrameId, errorOccurred: !!f.errorOccurred })) };
     }
+    case 'tab_contents':
+    case 'accordion_contents': {
+      // 2026-08-31 post-reload verification: the CS direct-WS path has
+      // tab_contents/accordion_contents, and the hub classifies them as PAGE
+      // ops — but when the bound tab's content script is momentarily down the
+      // hub falls back to the offscreen, which relays here as TAB_CONTROL.
+      // The SW had no case → 'Unknown tab action'. Forward to the bound
+      // tab's content script via PAGE_CONTROL (same relay PAGE ops use).
+      const tab = await getActiveTab();
+      if (!tab) return { error: 'No active tab for ' + action };
+      try {
+        const resRaw = await chrome.tabs.sendMessage(tab.id, { type: action });
+        const unw = (r) => (r && typeof r === 'object' && r.data && typeof r.data === 'object' && 'success' in r.data) ? r.data : (r || {});
+        return unw(resRaw);
+      } catch (err) {
+        return { error: action + ' failed: ' + (err.message || err) };
+      }
+    }
     case 'download_state': {
       const items = await chrome.downloads.search({});
       return { success: true, downloads: (items || []).slice(0, 20).map((d) => ({ id: d.id, filename: d.filename, url: d.url, state: d.state, endTime: d.endTime || null, bytesReceived: d.bytesReceived, totalBytes: d.totalBytes })) };
