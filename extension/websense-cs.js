@@ -281,6 +281,8 @@
       case 'form_state': return getFormState(params.formRef, params.frameId);
       case 'action_preview': return getActionPreview(params.ref);
       case 'dropdown_options': return getDropdownOptions(resolveRef(params.ref));
+      case 'tab_contents': return getTabContents(resolveRef(params.ref));
+      case 'accordion_contents': return getAccordionContents(resolveRef(params.ref));
       case 'page_state': return getPageState(params.frameId);
       case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; var et=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; et+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; return { text: et }; }
       case 'read_content': return readContent(params);
@@ -837,6 +839,27 @@
       const sb = findSubmitButton(form); const sub = isFormSubmittable(form);
       return { ref:formRef, id:form.id||'', method:(form.method||'get').toLowerCase(), action:form.action||'', fields, submitRef:sb?assignRef(sb):null, submitLabel:sb?getLabel(sb):'', submitEnabled:sb?!sb.disabled&&sub:false, submitDisabledReason:sb?(sb.disabled?detectDisabledReason(sb):(!sub?'required_fields_not_met':null)):null };
     });
+  }
+
+  // getFormState (2026-08-31 full-tool sweep): the form{action:"state"} tool
+  // hit "getFormState is not defined" — the function was referenced in the
+  // message switch but NEVER implemented (dead tool since the 65→20 merge).
+  // One-form variant of extractForms: resolves the formRef (E# or selector),
+  // returns the SAME shape as a form entry in the SAG so agents can diff
+  // form{state} against explore_page output directly.
+  function getFormState(formRef, frameId) {
+    const el = formRef ? resolveRef(formRef) : null;
+    if (!el || el.tagName !== 'FORM') return { success: false, error: el ? 'ref ' + formRef + ' is not a <form> (got ' + el.tagName + ')' : 'form ref not found: ' + (formRef || '(none)') };
+    const all = extractForms();
+    const found = all.find((f) => f.ref === formRef) || extractForms().find((f) => f.id === (formRef||'').replace(/^#/,''));
+    if (found) return { success: true, form: found };
+    // Fallback: rebuild for just this form (extractForms may skip hidden forms)
+    const fields = Array.from(el.querySelectorAll('input,select,textarea')).filter((i)=>i.type!=='hidden').map((input) => {
+      const tag = input.tagName.toLowerCase();
+      return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:input.value||'', required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
+    });
+    const sb = findSubmitButton(el); const sub = isFormSubmittable(el);
+    return { success: true, form: { ref: formRef, id: el.id||'', method:(el.method||'get').toLowerCase(), action:el.action||'', fields, submitRef:sb?assignRef(sb):null, submitLabel:sb?getLabel(sb):'', submitEnabled:sb?!sb.disabled&&sub:false, submitDisabledReason:sb?(sb.disabled?detectDisabledReason(sb):(!sub?'required_fields_not_met':null)):null } };
   }
 
   // ═══ Content Intelligence: read_content + scroll_and_extract ═══
@@ -1952,7 +1975,7 @@
     }
     if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(); else el.scrollIntoView({behavior:'auto',block:'center',inline:'nearest'});
     const rect = el.getBoundingClientRect(); const x = rect.left+rect.width/2; const y = rect.top+rect.height/2;
-    // REAL-CLICK SEMANTICS (2026-08-13, project directive — deep-clickable-child lesson):
+    // REAL-CLICK SEMANTICS (2026-08-13, project directive — Bugcrowd VRT lesson):
     // a genuine mouse click lands on the TOPMOST element at the cursor, not on
     // the resolved container. React trees like Bugcrowd's VRT dropdown close on
     // container (li) clicks but expand on the inner span/button. If the resolved
