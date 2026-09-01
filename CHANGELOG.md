@@ -76,3 +76,10 @@ Initial open-source release.
   shadow-key writes, the Lexical/Draft.js editor wall, synthetic-click escalation ladder,
   shadow-tree BFS modal discovery, per-tab CS wedge recovery, time discipline. Applies to any
   site with shadow-DOM custom elements and modern editors, not just Reddit.
+- **Cross-platform verification (4 sites, same day):** the component-automation patterns
+  were validated beyond Reddit — x.com/Draft.js (fill 0.06s), LinkedIn/ProseMirror-tiptap
+  (1.6s), Gmail compose (1.09s). Refinements: the main_world editor wall is per-framework
+  (only Lexical reverts synthetic paste — Draft.js/ProseMirror/Gmail accept it);
+  userScripts.execute does not await async functions (sync functions + external polling);
+  Draft.js same-call reads return 0 (async commit) and selectAll+delete corrupts its state;
+  locale-proof element matching (LinkedIn Romanian UI defeated aria-label matching).

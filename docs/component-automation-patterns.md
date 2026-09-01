@@ -21,13 +21,25 @@ websense-browser-automation skill. This file is the OSS-facing summary.
    `host.shadowRoot.querySelector(...)`, focus, native prototype setter, dispatch
    `input`+`change` with `bubbles:true`. Never bare `el.value = X`.
 
-3. **The editor wall.** Rich-text editors accept text only via their own pipelines.
-   Lexical and Draft.js silently revert `execCommand('insertText')` and synthetic
-   `ClipboardEvent('paste')` — the function returns undefined and the editor stays
-   empty. Only a real paste (the extension's paste rung) works. Diagnostic: if a
-   main_world write doesn't ENABLE the dependent submit, the write was reconciled away —
-   stop retrying, switch to the paste rung, and verify by state-truth (submit enables),
-   not by DOM re-read.
+3. **The editor wall is per-framework.** Verified across 4 sites (same day):
+   - Lexical (Reddit): HARD WALL — reverts both `execCommand('insertText')` and
+     synthetic `ClipboardEvent('paste')`. Only the extension's real paste rung works.
+   - Draft.js (x.com): ACCEPTS synthetic paste (0.03s). Caveats: same-call DOM reads
+     return 0 (async commit — verify in a follow-up call); never `selectAll+delete`
+     (corrupts editor state until reload).
+   - ProseMirror/tiptap (LinkedIn): ACCEPTS synthetic paste.
+   - Gmail compose: ACCEPTS synthetic paste.
+   Universal diagnostic: if a main_world write doesn't ENABLE the dependent submit
+   (state-truth), the write was reconciled away — don't re-read the DOM, switch strategy.
+   
+3b. **userScripts.execute does not await async functions.** An `async () => {}` return
+   value is silently lost (result `{}`) even though side effects executed. Sync functions
+   only; poll with external follow-up calls (each 0.02-0.08s).
+   
+3c. **Locale-proof matching.** Translated UI breaks aria-label/innerText matching
+   (LinkedIn rendered Romanian: "Începeți un anunț" ≠ "Start a post"). Prefer, in order:
+   class names (`.tiptap`, `.ProseMirror`, `.ql-editor`), `[data-testid]`, role+structure,
+   stem-matched innerText fragments, elementFromPoint last.
 
 4. **Synthetic-click escalation ladder.** main_world `.click()` works on native/Lit
    listeners (radios, checkboxes, plain buttons) but is swallowed by `isTrusted`-guarded
