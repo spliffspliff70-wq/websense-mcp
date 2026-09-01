@@ -71,3 +71,8 @@ Initial open-source release.
 - **Per-tab content-script wedge recovery:** if `main_world` and `evaluate` both time out on
   a single tab (other tabs fine), that tab's content script is dead from a killed in-flight
   userScript. Fix: close the tab + open a fresh one — navigate/reload/re-bind do not recover.
+- **Platform-agnostic component-automation patterns** (`docs/component-automation-patterns.md`)
+  — the 7 transferable patterns behind the Reddit speed run: prototype-walk state discovery,
+  shadow-key writes, the Lexical/Draft.js editor wall, synthetic-click escalation ladder,
+  shadow-tree BFS modal discovery, per-tab CS wedge recovery, time discipline. Applies to any
+  site with shadow-DOM custom elements and modern editors, not just Reddit.
