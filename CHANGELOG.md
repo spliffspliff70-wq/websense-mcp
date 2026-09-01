@@ -55,3 +55,19 @@ Initial open-source release.
 - Session task-stack, cookies manager, downloads manager, offscreen respawn
 - Background-only navigation (target=_blank interception, no tab activation)
 - MIT license
+
+## [Unreleased] — 2026-09-01
+
+### Documented
+- **Reddit composer speed run** (`docs/reddit-speed-run-2026-09-01.md`) — timed E2E on two
+  subreddits (r/hermesagent flair-enforced, r/mcp): full composer fill in ~2s. Fast paths:
+  title via `main_world` shadow-key on `post-composer-title` (0.02s), flair via
+  `r-post-tags-section.handleClick()` + modal radio/apply button IDs (0.03s), submit gate =
+  `r-post-form-submit-button.form.isValid`.
+- **Hard wall documented:** Lexical editors silently revert ALL `main_world` writes —
+  `execCommand('insertText')` and synthetic `ClipboardEvent('paste')` with DataTransfer both
+  return undefined with an unchanged editor. The content-script `type_text` paste rung
+  (real paste pipeline) is the only accepted path (1.8-2.3s).
+- **Per-tab content-script wedge recovery:** if `main_world` and `evaluate` both time out on
+  a single tab (other tabs fine), that tab's content script is dead from a killed in-flight
+  userScript. Fix: close the tab + open a fresh one — navigate/reload/re-bind do not recover.

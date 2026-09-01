@@ -166,6 +166,12 @@ explore_page → pick a ref → click/type/form by ref → read the before/after
   submits), it can escalate to a genuine OS-level click. *Windows-only enhancement, off by
   default* (`WEBSENSE_AUTOCLIMB=1` env or `autoClimb:true`).
 - **`read {format:"diff"}`** — only the text that changed since the last read.
+- **Reddit composer speed run** (see `docs/reddit-speed-run-2026-09-01.md`) — full post fill
+  in ~2s using `main_world` component internals (title shadow-key 0.02s, flair modal
+  0.03s) + the `type_text` paste rung for the Lexical body (1.8-2.3s). Documents the hard
+  wall: Lexical silently reverts ALL `main_world` writes (execCommand insertText, synthetic
+  ClipboardEvent) — the extension paste pipeline is the only accepted path — plus the
+  per-tab content-script wedge recovery (close tab + fresh tab; navigate/reload don't fix it).
 
 ---
 
