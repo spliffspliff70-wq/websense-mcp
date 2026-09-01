@@ -69,9 +69,15 @@ def cmd_activate_tab(args):
 def cmd_click_xy(args):
     """Real OS click at VIEWPORT coords (x,y), title-gated, doc-origin offset."""
     import pyautogui
+    pyautogui.FAILSAFE = False  # headless helper: explicit move-to-coords; the title gate is the safety
     chrome = _find_chrome(args.gate)
     if args.gate and not chrome:
         return {"success": False, "error": f"Gate failed: no Chrome window containing '{args.gate}'"}
+    # SendInput only reaches the FOREGROUND window — raise Chrome first
+    if chrome:
+        try: chrome.set_focus()
+        except Exception: pass
+        time.sleep(0.4)
     ox, oy = (args.origin, 121) if args.origin is not None else (_doc_origin(chrome) if chrome else (0, 121))
     if args.origin is not None:
         ox, oy = 0, args.origin
@@ -84,9 +90,15 @@ def cmd_click_xy(args):
 def cmd_paste_text(args):
     """Click into the editor at VIEWPORT (x,y), set clipboard, real Ctrl+V."""
     import pyautogui
+    pyautogui.FAILSAFE = False  # headless helper: explicit move-to-coords; the title gate is the safety
     chrome = _find_chrome(args.gate)
     if args.gate and not chrome:
         return {"success": False, "error": f"Gate failed: no Chrome window containing '{args.gate}'"}
+    # SendInput only reaches the FOREGROUND window — raise Chrome first
+    if chrome:
+        try: chrome.set_focus()
+        except Exception: pass
+        time.sleep(0.4)
     ox, oy = _doc_origin(chrome) if chrome else (0, 121)
     sx, sy = ox + args.x, oy + args.y
     # 1. click into the editor
@@ -94,10 +106,11 @@ def cmd_paste_text(args):
     time.sleep(0.3)
     pyautogui.click(sx, sy)
     time.sleep(0.6)
-    # 2. set clipboard (PowerShell Set-Clipboard — no pyperclip dep)
+    # 2. set clipboard (stdin-piped Set-Clipboard — robust, no arg quoting issues)
     text = args.text or sys.stdin.read()
-    ps = ["powershell", "-NoProfile", "-Command", "Set-Clipboard", "-Value", text]
-    subprocess.run(ps, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    ps = ["powershell", "-NoProfile", "-Command", "$input | Set-Clipboard"]
+    subprocess.run(ps, input=text, check=True, text=True,
+                   creationflags=subprocess.CREATE_NO_WINDOW)
     time.sleep(0.5)
     # 3. real Ctrl+V (SendInput — trusted paste)
     pyautogui.hotkey('ctrl', 'v')

@@ -20,6 +20,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import * as z from 'zod';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { HubServer } from './hub.js';
@@ -1054,7 +1055,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   // All coords are VIEWPORT coords (same space as inspect geometry); the
   // helper measures the Chrome Document origin itself.
   const PY = process.env.WEBSENSE_PYTHON || 'C:/Users/Ali/AppData/Local/Programs/Python/Python311/python.exe';
-  const REAL_INPUT = new URL('../scripts/real_input.py', import.meta.url).pathname;
+  const REAL_INPUT = fileURLToPath(new URL('../scripts/real_input.py', import.meta.url));
 
   function runRealInput(args) {
     const out = execSync(`"${PY}" "${REAL_INPUT}" ${args}`, { encoding: 'utf8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] });
