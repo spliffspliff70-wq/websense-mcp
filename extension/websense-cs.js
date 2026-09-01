@@ -479,7 +479,7 @@
   function resolveSelectorRef(ref) {
     if (typeof ref !== 'string') return null;
     if (!/^[\[\]#\.>\+~,:*='"\w\-()%|\s]+$/.test(ref)) return null;
-    if (!(ref.startsWith('[') || ref.startsWith('#') || ref.startsWith('.') || ref.includes(' > ') || ref.includes('>') || ref.includes('~'))) return null;
+    if (!(ref.startsWith('[') || ref.startsWith('#') || ref.startsWith('.') || ref.includes(' > ') || ref.includes('>') || ref.includes('~') || /^[a-zA-Z][\w-]*([\[.:])/.test(ref))) return null;
     try {
       return document.querySelector(ref) || null;
     } catch (_) { return null; }
