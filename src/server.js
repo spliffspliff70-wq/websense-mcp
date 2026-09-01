@@ -92,7 +92,7 @@ function safeHandler(fn) {
     catch (err) { return textResult({ success: false, error: err.message }); }
   };
 }
-// ═══ PER-SESSION TAB BINDING (project directive 2026-08-12 — concurrency fix) ═══
+// ═══ PER-SESSION TAB BINDING (Ali directive 2026-08-12 — concurrency fix) ═══
 // The hub is SHARED across all MCP sessions, and the extension's boundTabId /
 // selectedTabId are GLOBAL — so session A's bind/navigate overwrote session
 // B's routing target (workers hijacked the collector's login tab). Fix:
@@ -118,7 +118,7 @@ function withSessionTab(cmd) {
       'switch_tab_and_read','list_windows','focus_window','move_tab_to_window',
       'ax_state','ax_read','ax_click','ax_type',
       'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen','extension_reload']);
-    // NOTE: 'navigate' was REMOVED from TAB_OPS (2026-08-13, project directive —
+    // NOTE: 'navigate' was REMOVED from TAB_OPS (2026-08-13, Ali directive —
     // session isolation). Each session's navigate is stamped with ITS OWN
     // bound tabId so a worker's navigate never steals another session's tab.
     // Sessions with no binding fall back to the SW's global tab via the
@@ -131,7 +131,7 @@ function withSessionTab(cmd) {
 function stampedHubSend(cmd) {
   return hubChrome.send(withSessionTab(cmd));
 }
-// ═══ SCHEMA MINIFIER (project directive 2026-08-18) ═══
+// ═══ SCHEMA MINIFIER (Ali directive 2026-08-18) ═══
 // WebSense exposes ~65 tools; raw SDK schemas cost ~10k+ tokens per request.
 // The SDK converts zod -> JSON schema internally, so we post-process the
 // tools/list WIRE OUTPUT (installSchemaMinifier below): strip structural fat
@@ -279,7 +279,7 @@ function sendKeysForWindows(key) {
   }
 
 
-// ═══ CONSOLIDATED TOOL SURFACE (2026-08-30, project directive: 65 → 20) ═══
+// ═══ CONSOLIDATED TOOL SURFACE (2026-08-30, Ali directive: 65 → 20) ═══
 // Every one of the 65 original capabilities is preserved. Each consolidated
 // tool maps params onto the SAME hub command types the content script already
 // implements — zero extension-side changes. Old one-tool-per-verb names are
@@ -1046,7 +1046,51 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     return textResult(await getActiveHub().send({ type: 'resolve_ref', ref: o.ref }));
   });
 
-  // Slim tool schemas on the wire (project directive 2026-08-18)
+  // ═══ 21. REAL-INPUT RUNG (v4.4 — 2026-09-01) ═══
+  // Synthetic events are ignored by React/Lit/Custom-Element submit buttons
+  // (shreddit, Lexical editors, faceplate components). These tools climb the
+  // ladder to GENUINE OS input via UIA (pywinauto) + SendInput (pyautogui),
+  // title-gated so multi-agent tab churn can't land input on a sibling tab.
+  // All coords are VIEWPORT coords (same space as inspect geometry); the
+  // helper measures the Chrome Document origin itself.
+  const PY = process.env.WEBSENSE_PYTHON || 'C:/Users/Ali/AppData/Local/Programs/Python/Python311/python.exe';
+  const REAL_INPUT = new URL('../scripts/real_input.py', import.meta.url).pathname;
+
+  function runRealInput(args) {
+    const out = execSync(`"${PY}" "${REAL_INPUT}" ${args}`, { encoding: 'utf8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] });
+    try { return JSON.parse(out.trim().split('\n').pop()); }
+    catch (e) { return { success: false, error: 'parse failed: ' + out.slice(0, 300) }; }
+  }
+
+  reg(server, 'real_activate_tab', {
+    description: 'REAL OS click on a Chrome tab pill via UIA (pywinauto click_input) — activates the tab so its content script injects (cold-background-tab fix) and gates on the window title. match: substring of the tab title; gate: expected title after activation (default match). Use when navigate(newTab:true) leaves the tab backgrounded and content-script ops hang.',
+    inputSchema: {
+      match: z.string().describe('Tab title substring to match (e.g. "Submit to r/mcp")'),
+      gate: z.string().optional().describe('Expected window title after activation (default: match)'),
+    },
+  }, async (o) => textResult(runRealInput(`activate-tab --match "${(o.match||'').replace(/"/g,'\\"')}"${o.gate ? ` --gate "${o.gate.replace(/"/g,'\\"')}"` : ''}`)));
+
+  reg(server, 'real_click', {
+    description: 'GENUINE OS-level click (SendInput) at VIEWPORT coords (x,y) — bypasses synthetic-click-ignoring submit buttons (React/Lit/CustomElement). Title-gated: gate must match the active Chrome tab title or the click is refused (multi-agent churn protection). Get coords from inspect{kind:"geometry"}. origin: override doc-origin Y if the auto-measure fails (default measured via UIA).',
+    inputSchema: {
+      x: z.number().describe('Viewport X (from inspect geometry: vp.x + vp.w/2)'),
+      y: z.number().describe('Viewport Y (from inspect geometry: vp.y + vp.h/2)'),
+      gate: z.string().describe('Expected active-tab title substring (gate)'),
+      origin: z.number().optional().describe('Override page Document origin Y (default: auto-measured ~121)'),
+    },
+  }, async (o) => textResult(runRealInput(`click-xy --x ${Math.round(o.x)} --y ${Math.round(o.y)} --gate "${(o.gate||'').replace(/"/g,'\\"')}"${o.origin ? ` --origin ${Math.round(o.origin)}` : ''}`)));
+
+  reg(server, 'real_paste', {
+    description: 'GENUINE paste into a focused editor (click at VIEWPORT coords + system clipboard + real Ctrl+V) — for Lexical/Draft.js/ProseMirror editors that revert synthetic paste events. text: content to paste; x,y: viewport coords of the editor (inspect geometry center); gate: expected active-tab title substring. Verify after with evaluate extract:"html".',
+    inputSchema: {
+      x: z.number().describe('Editor viewport X center'),
+      y: z.number().describe('Editor viewport Y center'),
+      text: z.string().describe('Text to paste'),
+      gate: z.string().describe('Expected active-tab title substring (gate)'),
+    },
+  }, async (o) => textResult(runRealInput(`paste-text --x ${Math.round(o.x)} --y ${Math.round(o.y)} --gate "${(o.gate||'').replace(/"/g,'\\"')}" --text "${String(o.text).replace(/"/g,'\\"')}"`)));
+
+  // Slim tool schemas on the wire (Ali directive 2026-08-18)
   installSchemaMinifier(server);
 }
 

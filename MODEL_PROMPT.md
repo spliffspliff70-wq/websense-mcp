@@ -38,6 +38,7 @@ TOOLS (21 — consolidated from 65, nothing lost):
   Control  evaluate (script|query), screenshot, dialog (accept|dismiss|keystroke)
   Session  session (reset|map|mermaid), network_log, clipboard (copy|read)
   AX       ax (state|read|click|type) — canvas SPAs & chrome:// pages (needs tabId)
+  Real     real_activate_tab, real_click, real_paste — GENUINE OS input (UIA + SendInput)
 
 KEY PATTERNS:
 - Forms:    form action:"state" → fill with type_text / form action:"select" → click submit ref
@@ -57,6 +58,16 @@ KEY PATTERNS:
             (icon-font glyphs, counters) that innerText misses
 - Effect verdict: after click/type_text, if effect:"suspected_noop" do NOT retry blind —
             escalate (OS-level click via windows-control) or try an alternate path
+- REAL INPUT (synthetic events ignored): if click returns effect:"unverifiable" with
+            escalation.recommended="real_click" on a React/Lit/CustomElement submit
+            (shreddit, Lexical/Draft.js/ProseMirror editors, faceplate), climb the ladder:
+            1) real_activate_tab({match}) to foreground the tab (cold-background-tab fix)
+            2) inspect{kind:"geometry"} on the target → viewport center (x,y)
+            3) real_click({x, y, gate:"<expected tab title>"}) OR
+               real_paste({x, y, text, gate}) for rich-text editors that revert
+               synthetic paste — genuine OS click + clipboard + Ctrl+V
+            Always gate: the active-tab title must match or the click is refused
+            (multi-agent tab churn protection).
 
 NATIVE DIALOGS (the one thing DOM can't reach — handled here):
 - JS dialogs (alert/confirm/prompt): captured, NOT blocking. status kind:"page" shows
