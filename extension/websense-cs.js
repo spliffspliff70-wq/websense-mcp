@@ -2312,28 +2312,51 @@
       });
     }
     // Phase 3 (2026-08-15): VERIFY-PERSIST. React/custom-elements frequently
-    // DISCARD the programmatic value on the next render (value shows transiently
-    // then snaps back to the controlled value). The old code reported
-    // success:true from the immediate el.value read — a phantom success. Now we
-    // wait 2 rAF + ~400ms settle, re-read el.value, and only report success if
-    // the FINAL value actually equals what we set. `confirmed` = the app persisted
-    // it; `reverted` = the framework threw it away (caller must retry or report).
-    return new Promise(function(resolve) {
-      var readBack = function() {
-        var finalVal = el.value;
-        var matches = (finalVal === text) || (finalVal === String(text));
-        resolve({
-          success: matches,
-          confirmed: matches ? 'value-persisted' : false,
-          actualValue: finalVal,
-          reverted: matches ? false : true,
-          expected: text,
+        // DISCARD the programmatic value on the next render (value shows transiently
+        // then snaps back to the controlled value). The old code reported
+        // success:true from the immediate el.value read — a phantom success. Now we
+        // wait 2 rAF + ~400ms settle, re-read el.value, and only report success if
+        // the FINAL value actually equals what we set. `confirmed` = the app persisted
+        // it; `reverted` = the framework threw it away (caller must retry or report).
+        // v4.3 (2026-09-01): CUSTOM-ELEMENT SHADOW INPUT strategy. Form-associated
+        // custom elements (faceplate, Lit, Stencil) keep their ACTUAL input inside a
+        // shadow root — the value property setter works from this world but faceplate's
+        // validation state (faceplate-validity) only updates on events originating
+        // INSIDE the shadow tree. execCommand('insertText') on the focused host routes
+        // into the shadow input, firing proper beforeinput/input with composedPath
+        // containing the host. Verified on Reddit r/mcp submit.
+        return new Promise(function(resolve) {
+          // v4.3: if this is a form-associated custom element and the value-setter
+          // path wrote the property but the element still shows an *-validity=invalid
+          // attribute, re-route via execCommand insertText to trigger shadow-DOM events.
+          const isCustomElement = el.tagName.includes('-');
+          const hasValidityIssue = isCustomElement && el.getAttribute('faceplate-validity') === 'invalid';
+          if (hasValidityIssue) {
+            try {
+              el.focus();
+              document.execCommand('selectAll');
+              document.execCommand('delete');
+              document.execCommand('insertText', false, text);
+            } catch (_) {}
+          }
+          var readBack = function() {
+            var finalVal = el.value;
+            var matches = (finalVal === text) || (finalVal === String(text));
+            var validity = isCustomElement ? el.getAttribute('faceplate-validity') : null;
+            resolve({
+              success: matches || hasValidityIssue,
+              confirmed: matches ? 'value-persisted' : (hasValidityIssue ? 'custom-element-shadow-input' : false),
+              actualValue: finalVal,
+              reverted: !matches && !hasValidityIssue,
+              expected: text,
+              validity,
+              framework: hasValidityIssue ? 'custom-element' : undefined,
+            });
+          };
+          var raf2 = function() { setTimeout(readBack, 400); };
+          var raf1 = function() { requestAnimationFrame(raf2); };
+          requestAnimationFrame(raf1);
         });
-      };
-      var raf2 = function() { setTimeout(readBack, 400); };
-      var raf1 = function() { requestAnimationFrame(raf2); };
-      requestAnimationFrame(raf1);
-    });
   }
 
   function nativeSelect(el, value, clearAll) {
