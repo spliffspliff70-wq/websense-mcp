@@ -201,7 +201,7 @@ async function handleTabOperation(message) {
     }
     case 'navigate': {
       // Reuse the current tab by default (no tab spam). newTab:true forces a fresh tab.
-      // BACKGROUND-ONLY (2026-08-13, project directive): never activate — activation
+      // BACKGROUND-ONLY (2026-08-13, Ali directive): never activate — activation
       // raises the Chrome window and hijacks the user's foreground.
       if (message.newTab) {
         var r3 = await sendTabControl('open_new_tab', { url: message.url, active: false });
@@ -220,6 +220,22 @@ async function handleTabOperation(message) {
     case 'download_op': { return await sendTabControl('download_op', message); }
     case 'cookie_op': { return await sendTabControl('cookie_op', message); }
     case 'respawn_offscreen': { return await sendTabControl('respawn_offscreen', {}); }
+    case 'main_world_exec': {
+      // MAIN-world insider op (2026-09-01): relay straight to the SW —
+      // chrome.scripting.executeScript({world:'MAIN'}) runs a compiled
+      // function in the page's JS universe (framework state access,
+      // CSP-immune, no eval, no CDP). Swallows SW-restart transients.
+      try {
+        var mw = await sendTabControl('main_world_exec', { tabId: parseInt(message.tabId, 10), func: message.func, args: message.args || [], allFrames: !!message.allFrames });
+        if (mw && mw.error && /Extension context invalidated|Receiving end does not exist/i.test(mw.error)) {
+          await new Promise(function (r) { setTimeout(r, 800); });
+          mw = await sendTabControl('main_world_exec', { tabId: parseInt(message.tabId, 10), func: message.func, args: message.args || [], allFrames: !!message.allFrames });
+        }
+        return mw || { error: 'main_world_exec: no response from background' };
+      } catch (mwe) {
+        return { error: 'main_world_exec relay failed: ' + (mwe && mwe.message ? mwe.message : String(mwe)) };
+      }
+    }
     case 'doctor_sw': { return await sendTabControl('doctor', {}); }
     default: return null;
   }

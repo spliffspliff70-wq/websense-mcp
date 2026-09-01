@@ -266,6 +266,47 @@ chrome.runtime.onConnect.addListener(function(port) {
 
 async function handleTabControl(action, payload) {
   switch (action) {
+    case 'main_world_exec': {
+      // MAIN-world toolkit (F12-insider path, 2026-09-01, Ali directive):
+      // run model-supplied function SOURCE in the page's main world via
+      // chrome.userScripts.execute({world:'MAIN'}) — arbitrary code strings,
+      // extension-injected so PAGE CSP does not apply (content-script class
+      // injection). NOT CDP (no debug port), NOT page eval.
+      // NOTE: scripting.executeScript({func}) was rejected — building a
+      // function object from source needs new Function() which MV3 SW CSP
+      // blocks (EvalError). userScripts.execute takes raw code instead.
+      const mwTabId = parseInt(payload.tabId, 10);
+      if (!mwTabId) return { error: 'main_world_exec: tabId required' };
+      if (!payload.func) return { error: 'main_world_exec: func (function expression source) required' };
+      if (!chrome.userScripts) {
+        return { error: 'main_world_exec: chrome.userScripts unavailable — requires Chrome 135+ with Developer Mode enabled (unpacked extensions have it)' };
+      }
+      try {
+        const argsJson = JSON.stringify(Array.isArray(payload.args) ? payload.args : []);
+        const code = '(function(){ try { var __args = ' + argsJson + ';'
+          + ' var __fn = (' + payload.func + ');'
+          + ' var __r = __fn.apply(null, __args);'
+          + ' return JSON.stringify({ ok: true, result: __r === undefined ? null : __r });'
+          + ' } catch (e) { return JSON.stringify({ ok: false, error: String((e && e.message) || e) }); } })()';
+        const results = await chrome.userScripts.execute({
+          target: { tabId: mwTabId, allFrames: !!payload.allFrames },
+          world: 'MAIN',
+          js: [{ code }],
+        });
+        const out = (results || []).map((r) => {
+          let parsed = null;
+          try { parsed = JSON.parse(r.result); } catch (_) { parsed = { ok: true, result: r.result }; }
+          return {
+            frameId: r.frameId === undefined ? null : r.frameId,
+            result: parsed && parsed.ok ? parsed.result : null,
+            error: (parsed && !parsed.ok && parsed.error) || r.error || null,
+          };
+        });
+        return { success: true, results: out };
+      } catch (e) {
+        return { error: 'main_world_exec failed: ' + (e && e.message ? e.message : String(e)) };
+      }
+    }
     case 'capture_visible_tab': {
       // Phase 4 (2026-08-15): browser_screenshot tool. chrome.tabs.captureVisibleTab
       // is a chrome.tabs API — no CDP, no webdriver flag, no bot-detection surface.
@@ -331,7 +372,7 @@ async function handleTabControl(action, payload) {
       const tabId = parseInt(payload.tabId, 10);
       if (!tabId || isNaN(tabId)) return { error: 'Invalid tabId: ' + payload.tabId };
       try {
-        // Bind the tab WITHOUT activating it (2026-08-13, project directive:
+        // Bind the tab WITHOUT activating it (2026-08-13, Ali directive:
         // background-only — each connected instance drives its own tab context
         // like "present one tab in Meet"; activation raises the OS window and
         // hijacks the user's foreground). `active:true` here used to steal the
@@ -417,7 +458,7 @@ async function handleTabControl(action, payload) {
         if (!read || read.success !== true) return { error: 'read failed: ' + ((read && read.error) || 'unknown') };
         const text = payload.useValue ? (read.value != null ? String(read.value) : '') : (read.text || '');
         // 2. WRITE into the destination (~10ms) — no activation needed, no OS
-        //    focus steal (2026-08-13, project directive: background-only)
+        //    focus steal (2026-08-13, Ali directive: background-only)
         boundTabId = toTab;
         // 3. WRITE into the destination (~10ms) — React-safe native setter
         const writeRaw = await chrome.tabs.sendMessage(toTab, { type: 'write_selector', selector: payload.toSelector, value: text })
@@ -442,7 +483,7 @@ async function handleTabControl(action, payload) {
       if (!tabId || isNaN(tabId)) return { error: 'Invalid tabId' };
       try {
         // B2: switch + read in ONE call — bind the tab WITHOUT activating it
-        // (background-only; activation raises the OS window — project directive 2026-08-13)
+        // (background-only; activation raises the OS window — Ali directive 2026-08-13)
         boundTabId = tabId;
         const resRaw = await chrome.tabs.sendMessage(tabId, { type: 'read_selector', selector: payload.selector || 'body' })
           .catch((e) => ({ success: false, error: 'read: ' + (e.message || e) }));
@@ -463,7 +504,7 @@ async function handleTabControl(action, payload) {
       catch (err) { return { error: 'Failed to close tab ' + tabId + ': ' + (err.message || err) }; }
     }
     case 'open_new_tab': {
-      // BACKGROUND OPEN (2026-08-13, project directive): create without activating
+      // BACKGROUND OPEN (2026-08-13, Ali directive): create without activating
       // so a new tab never steals the OS foreground. Content script injects
       // and the bound-tab routing works on background tabs.
       const tab = await chrome.tabs.create({ url: payload.url, active: false });
@@ -481,7 +522,7 @@ async function handleTabControl(action, payload) {
       if (!tab) tab = await getActiveTab();
       if (!tab) return { error: 'No active tab' };
       try {
-        // BACKGROUND NAVIGATION (2026-08-13, project directive): do NOT activate
+        // BACKGROUND NAVIGATION (2026-08-13, Ali directive): do NOT activate
         // the tab. `active:true` raises the Chrome window to the OS foreground
         // on every navigation — the #1 source of "foreground hijacking" when
         // factory workers navigate their own tabs. Content scripts inject

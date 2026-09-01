@@ -4,18 +4,19 @@
   "description": "Semantic Action Graph extraction for AI web automation — no vision, no CDP, no bot detection",
   "version": "1.0.0",
   "permissions": [
-    "tabs",
-    "storage",
-    "offscreen",
-    "scripting",
-    "webNavigation",
-    "downloads",
-    "clipboardRead",
-    "clipboardWrite",
-    "alarms",
-    "cookies",
-    "activeTab",
-    "debugger"
+   "tabs",
+   "storage",
+   "offscreen",
+   "scripting",
+   "userScripts",
+   "webNavigation",
+   "downloads",
+   "clipboardRead",
+   "clipboardWrite",
+   "alarms",
+   "cookies",
+   "activeTab",
+   "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
