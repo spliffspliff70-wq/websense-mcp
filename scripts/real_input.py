@@ -15,6 +15,65 @@ Usage:
 Each subcommand returns JSON: {"success":true/false, "title":"...", "error":"..."}
 """
 import sys, json, time, subprocess, argparse
+import ctypes
+
+_user32 = ctypes.windll.user32
+
+def _fg_hwnd():
+    return _user32.GetForegroundWindow()
+
+def _restore_focus(hwnd):
+    """Best-effort focus restore after a real-input op (co-work politeness).
+    SetForegroundWindow is blocked for background PIDs (Windows foreground
+    lock) — the AttachThreadInput trick bypasses it: attach our thread to the
+    CURRENT foreground thread (Chrome, post-input), then restore is allowed."""
+    if not hwnd:
+        return
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        # 1. AttachThreadInput to the current foreground thread
+        fg = user32.GetForegroundWindow()
+        fg_thread = user32.GetWindowThreadProcessId(fg, None)
+        this_thread = kernel32.GetCurrentThreadId()
+        attached = False
+        if fg_thread and fg_thread != this_thread:
+            attached = bool(user32.AttachThreadInput(this_thread, fg_thread, True))
+        try:
+            # 2. ALT-key trick: a synthetic ALT press grants foreground rights
+            user32.keybd_event(0x12, 0, 0, 0)   # ALT down
+            ok = bool(user32.SetForegroundWindow(hwnd))
+            user32.keybd_event(0x12, 0, 2, 0)   # ALT up
+            # 3. fallback: SwitchToThisWindow (force)
+            if not ok:
+                user32.SwitchToThisWindow(hwnd, True)
+            # 4. fallback: AppActivate via WScript.Shell — Explorer owns
+            #    foreground rights, so delegation succeeds where direct
+            #    SetForegroundWindow from a background PID is locked out
+            if not ok or user32.GetForegroundWindow() != hwnd:
+                try:
+                    import win32gui  # optional
+                except ImportError:
+                    pass
+                try:
+                    pid = ctypes.c_ulong()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    ps = ["powershell", "-NoProfile", "-Command",
+                          f"(New-Object -ComObject WScript.Shell).AppActivate({pid.value})"]
+                    subprocess.run(ps, check=False, timeout=5,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                except Exception:
+                    pass
+        finally:
+            if attached:
+                user32.AttachThreadInput(this_thread, fg_thread, False)
+        # honesty: report ACTUAL restore result, not intent
+        try:
+            return user32.GetForegroundWindow() == hwnd
+        except Exception:
+            return False
+    except Exception:
+        return False  # restore is best-effort; the input already landed
 
 def _find_chrome(gate=None):
     """Chrome window whose active-tab title contains `gate`. Returns pywinauto window or None."""
@@ -82,10 +141,12 @@ def cmd_click_xy(args):
     if args.origin is not None:
         ox, oy = 0, args.origin
     sx, sy = ox + args.x, oy + args.y
+    saved = None if args.no_restore else _fg_hwnd()
     pyautogui.moveTo(sx, sy, duration=0.25)
     time.sleep(0.3)
     pyautogui.click(sx, sy)
-    return {"success": True, "clicked_at": [sx, sy], "viewport": [args.x, args.y]}
+    restored = _restore_focus(saved) if saved else False
+    return {"success": True, "clicked_at": [sx, sy], "viewport": [args.x, args.y], "focus_restored": bool(restored)}
 
 def cmd_paste_text(args):
     """Click into the editor at VIEWPORT (x,y), set clipboard, real Ctrl+V."""
@@ -101,6 +162,7 @@ def cmd_paste_text(args):
         time.sleep(0.4)
     ox, oy = _doc_origin(chrome) if chrome else (0, 121)
     sx, sy = ox + args.x, oy + args.y
+    saved = None if args.no_restore else _fg_hwnd()
     # 1. click into the editor
     pyautogui.moveTo(sx, sy, duration=0.25)
     time.sleep(0.3)
@@ -115,7 +177,11 @@ def cmd_paste_text(args):
     # 3. real Ctrl+V (SendInput — trusted paste)
     pyautogui.hotkey('ctrl', 'v')
     time.sleep(1.0)
-    return {"success": True, "pasted_len": len(text), "target": [sx, sy]}
+    if saved:
+        restored = _restore_focus(saved)
+    else:
+        restored = False
+    return {"success": True, "pasted_len": len(text), "target": [sx, sy], "focus_restored": bool(restored)}
 
 def main():
     p = argparse.ArgumentParser()
@@ -131,6 +197,7 @@ def main():
     cx.add_argument('--y', type=int, required=True)
     cx.add_argument('--gate', default=None)
     cx.add_argument('--origin', type=int, default=None, help='Override doc origin Y (default: measured)')
+    cx.add_argument('--no-restore', action='store_true', help='Skip focus restore after input')
     cx.set_defaults(func=cmd_click_xy)
     # paste-text (viewport coords)
     pt = sub.add_parser('paste-text')
@@ -139,6 +206,7 @@ def main():
     pt.add_argument('--gate', default=None)
     pt.add_argument('--text', default=None)
     pt.add_argument('--from-stdin', action='store_true')
+    pt.add_argument('--no-restore', action='store_true', help='Skip focus restore after input')
     pt.set_defaults(func=cmd_paste_text)
     args = p.parse_args()
     if not args.command:
