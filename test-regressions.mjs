@@ -469,6 +469,8 @@ test('incr: fieldChanges truncates long values to 40 chars', () => {
 // subframes held useless hub slots, and timeout errors named no hop).
 // ─────────────────────────────────────────────────────────────────────────────
 import { readFileSync } from 'fs';
+import { readdirSync } from 'fs';
+import { build as buildCs } from './tools/build-cs.mjs';
 
 test('timeout diag: names the op, the routed client and hop state', () => {
   const hub = new HubServer({ port: 0 });
@@ -632,6 +634,208 @@ test('cs: reconnect backs off exponentially and gives up (no flat 3s forever)', 
 test('cs: a real state change can recover after give-up', () => {
   assert(CS_SRC.includes('wsResetAndRetry'), 'reset+retry helper exists');
   assert(/wsResetAndRetry\(\);/.test(CS_SRC), 'it is actually called (visibility handler)');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-09-11b — cost attribution + single-DOM-query invariants
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('cs: _collectSelectorHits does NOT walk the whole subtree (no double DOM query)', () => {
+  const m = CS_SRC.match(/function _collectSelectorHits\([\s\S]*?\n  \}/);
+  assert(m, '_collectSelectorHits exists');
+  assert(!m[0].includes("querySelectorAll('*')"),
+    '_collectSelectorHits must not do a `*` walk — the document-level walk runs once in ' +
+    'collectInteractiveCandidates and is reused for the element count (it used to run twice)');
+});
+
+test('cs: shadow-host recursion still exists via _collectShadowHits (nested shadow roots)', () => {
+  assert(CS_SRC.includes('function _collectShadowHits('), '_collectShadowHits declared');
+  const m = CS_SRC.match(/function _collectShadowHits\([\s\S]*?\n  \}/);
+  assert(m && m[0].includes("querySelectorAll('*')"), 'shadow walker still finds nested hosts');
+  assert(m[0].includes('_collectShadowHits(all[j].shadowRoot') ||
+         m[0].includes('_collectShadowHits(') , 'recurses into nested shadow roots');
+  assert(CS_SRC.includes('_collectShadowHits(all[i].shadowRoot'),
+    'document-level host discovery calls the shadow walker');
+});
+
+test('cs: explore cost is attributed (candidates/geometry/action split)', () => {
+  assert(CS_SRC.includes('sag.candidatesMs ='), 'candidatesMs reported');
+  assert(CS_SRC.includes('sag.geometryMs ='), 'geometryMs reported');
+  assert(CS_SRC.includes('sag.actionMs ='), 'actionMs reported');
+  assert(CS_SRC.includes('sag.scanMs = tAct - scanStart'), 'scanMs is the true total');
+});
+
+test('cs: the action loop (semantic work) is the bounded term via maxActions', () => {
+  const m = CS_SRC.match(/const tGeo = Date\.now\(\);[\s\S]{0,400}?const actions = \[\]/);
+  assert(m, 'geometry mark precedes the action loop');
+  assert(m[0].includes('DEFAULT_MAX_ACTIONS'),
+    'the action loop is capped by DEFAULT_MAX_ACTIONS (measured ~0.65ms/accepted action)');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-09-11c — modular content-script build (source of truth = extension/cs-src)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('cs-src: modular sources exist, are numbered so they sort in build order', () => {
+  const files = readdirSync(new URL('./extension/cs-src/', import.meta.url))
+    .filter(f => f.endsWith('.js')).sort();
+  assert(files.length >= 8, `expected the content script split into 8+ parts, got ${files.length}`);
+  assert(files[0].startsWith('00-'), 'first part is 00- (bridge/transport)');
+  for (const f of files) {
+    assert(/^\d\d-[a-z0-9-]+\.js$/.test(f), `part name follows NN-slug.js: ${f}`);
+  }
+  // Sorting the names must reproduce the original top-to-bottom order.
+  assert(files.join(',') === files.slice().sort().join(','), 'lexical sort is the build order');
+});
+
+test('cs-src: the artifact is IN SYNC with a fresh build (hand-edits fail here)', () => {
+  const built = buildCs();
+  const onDisk = readFileSync(new URL('./extension/websense-cs.js', import.meta.url), 'utf8');
+  assert(built === onDisk,
+    'extension/websense-cs.js differs from a build of extension/cs-src/*.js — ' +
+    'edit the sources and run `node tools/build-cs.mjs`');
+});
+
+test('cs-src: the built artifact carries a navigable banner per part', () => {
+  const onDisk = readFileSync(new URL('./extension/websense-cs.js', import.meta.url), 'utf8');
+  const files = readdirSync(new URL('./extension/cs-src/', import.meta.url))
+    .filter(f => f.endsWith('.js')).sort();
+  for (const f of files) {
+    const src = readFileSync(new URL('./extension/cs-src/' + f, import.meta.url), 'utf8');
+    const firstLine = src.split('\r\n')[0];
+    assert(firstLine.startsWith('/* '), `${f} starts with its banner`);
+    assert(onDisk.includes(firstLine), `artifact includes the banner for ${f}`);
+  }
+  assert(onDisk.includes('(function () {') && onDisk.trimEnd().endsWith('})();'),
+    'artifact is still a single IIFE (runtime shape unchanged)');
+});
+
+test('manifest: still loads ONE content script file (no runtime-scope change)', () => {
+  const mf = JSON.parse(readFileSync(new URL('./extension/manifest.json', import.meta.url), 'utf8'));
+  const js = mf.content_scripts[0].js;
+  assert(Array.isArray(js) && js.length === 1 && js[0] === 'websense-cs.js',
+    'manifest must load the single built file — multiple entries would change ' +
+    'hoisting/scope semantics across files');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-09-11d — hub census, tabId hardening, and extension tab-hop guards
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('hub: census() reports the hub + clients and is REACHABLE with zero clients', () => {
+  const hub = new HubServer({ port: 0 });
+  const c = hub.census();
+  assert(c && typeof c === 'object', 'census returns an object');
+  assert(c.status === 'ok', 'census.status is ok');
+  assert(Array.isArray(c.clients), 'census.clients is an array');
+  assert(c.clients.length === 0 && c.clientsRegistered === 0, 'no clients connected on a fresh hub');
+  assert(c.hub && c.hub.uptimeMs != null, 'census.hub.uptimeMs present (read-only uptime)');
+  assert(typeof c.hub.uptime === 'string', 'census.hub.uptime is human-readable');
+  assert(c.inFlightCount === 0 && Array.isArray(c.inFlight), 'in-flight requests are itemised');
+  assert(c.contentTabs === 0, 'contentByTab registry is reported');
+  assert('offscreenClient' in c && 'mainFrameClient' in c, 'routing targets are reported');
+});
+
+test('hub: census() is strictly READ-ONLY (never sends / closes / mutates)', () => {
+  const m = HUB_SRC.match(/^  census\(\) \{[\s\S]*?\n  \}/m);
+  assert(m, 'census() found');
+  const body = m[0];
+  for (const forbidden of ['.send(', '.close(', '.delete(', '.set(', 'clients.set', 'sendResponse']) {
+    assert(!body.includes(forbidden), `census() must not call ${forbidden} — it is diagnostics only`);
+  }
+});
+
+test('hub: /health serves the census, other paths keep the friendly one-liner', () => {
+  assert(HUB_SRC.includes("path === '/health'"), '/health route exists');
+  assert(HUB_SRC.includes("return reply(200, this.census())"), '/health returns census()');
+  assert(HUB_SRC.includes('census_failed'), 'a census failure is reported, not thrown');
+  assert(HUB_SRC.includes('_handleHttp(req, res'), 'http handler is shared by TLS + plain');
+});
+
+test('hub: activeClient() is TOTAL — no-arg callers cannot throw on tabId', () => {
+  const m = HUB_SRC.match(/^  activeClient\(cmd\) \{[\s\S]*?\n  \}/m);
+  assert(m, 'activeClient found');
+  assert(m[0].includes('cmd = cmd || {}'),
+    'activeClient normalizes cmd so a no-arg call (healthCheck) cannot throw ' +
+    "the historical `Cannot read properties of undefined (reading 'tabId')`");
+  // And the page-op read must stay guarded.
+  assert(/\(cmd && cmd\.tabId != null\)/.test(m[0]), 'cmd.tabId read stays null-guarded');
+});
+
+test('hub: healthCheck passes an explicit cmd (no-arg shape removed)', () => {
+  assert(HUB_SRC.includes("this.activeClient({ type: 'health_ping' })"),
+    'healthCheck no longer calls activeClient() with no argument');
+});
+
+test('bg: sendMessage rejections are recognised and converted to a NAMED hop', () => {
+  assert(BG_SRC.includes('function isNoReceivingEnd('), 'isNoReceivingEnd() exists');
+  assert(BG_SRC.includes('function sendMsgError('), 'sendMsgError() exists');
+  const m = BG_SRC.match(/function sendMsgError\([\s\S]*?\n\}/);
+  assert(m && m[0].includes("error: 'no-receiving-end'"), 'classifies the receiving-end class');
+  assert(m && m[0].includes('hop:'), 'names the hop in the error');
+  assert(m && m[0].includes('hint:'), 'carries an actionable hint');
+});
+
+test('bg: every chrome.tabs.sendMessage call site cannot leak an unhandled rejection', () => {
+  const lines = BG_SRC.split('\r\n');
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].includes('chrome.tabs.sendMessage(')) continue;
+    // Look at a window: an awaited call inside try/catch, or a .catch further on.
+    const win = lines.slice(Math.max(0, i - 3), i + 5).join('\n');
+    const guarded = win.includes('await chrome.tabs.sendMessage') && win.includes('catch') ||
+                    win.includes('.catch(');
+    if (!guarded) offenders.push(i + 1);
+  }
+  assert(offenders.length === 0,
+    `tabs.sendMessage at line(s) ${offenders.join(', ')} is not awaited-in-try/catch and has no .catch`);
+});
+
+test('bg: fast-fail guard exists, is cheap, and does NOT hard-block on tab-loading', () => {
+  assert(BG_SRC.includes('async function checkContentScriptReady('), 'guard exists');
+  const m = BG_SRC.match(/async function checkContentScriptReady\([\s\S]*?\n\}/);
+  const body = m[0];
+  assert(body.includes('chrome.tabs.get('), 'uses tabs.get (robust after SW context loss)');
+  assert(!body.includes('tabs.query'), 'avoids tabs.query (throws after context invalidated)');
+  assert(!body.includes('executeScript'), 'no script injection — the guard must stay cheap');
+  assert(body.includes("reason: 'no-such-tab'"), 'hard-fails a closed tab');
+  assert(body.includes("reason: 'restricted-url'"), 'hard-fails restricted URLs');
+  // The loading case must be a WARNING, never a block: long-polling/streaming pages
+  // can report status='loading' indefinitely while their content script works.
+  assert(body.includes('loadingWarning'), 'loading is surfaced as a warning');
+  assert(!/if \(tab && tab\.status !== 'complete'\) \{[\s\S]*?return \{ success: false/.test(body),
+    'must not return a hard failure for tab-loading');
+});
+
+test('bg: tab listing exposes status (attribution for an unregistered content script)', () => {
+  assert(/status: t\.status \|\| null/.test(BG_SRC), 'getAllTabs includes tab.status');
+});
+
+test('hub: a failed op PRESERVES its structured detail (no collapsing to a bare string)', () => {
+  const hub = new HubServer({ port: 0 });
+  // Simulate the summary-side of a settled failure response.
+  let rejected = null;
+  const fakePending = { timer: setTimeout(() => {}, 1000), resolve: () => {}, reject: (e) => { rejected = e; } };
+  const fakeId = 'rTEST';
+  hub.pending.set(fakeId, fakePending);
+  hub._settlePending(fakeId, null, {
+    id: fakeId, success: false,
+    data: { success: false, error: 'content-script-not-ready', reason: 'restricted-url',
+            hop: 'bg->chrome.tabs', tabId: 42, hint: 'navigate to an http(s) page' },
+  });
+  assert(rejected instanceof Error, 'rejects with an Error');
+  assert(rejected.message === 'content-script-not-ready', 'message is still the error string');
+  assert(rejected.detail && rejected.detail.reason === 'restricted-url', 'detail payload attached');
+  assert(rejected.reason === 'restricted-url', 'top-level fields hoisted onto the error');
+  assert(rejected.hop === 'bg->chrome.tabs' && rejected.tabId === 42, 'hop + tabId survive');
+});
+
+test('server: safeHandler folds hub detail back into the tool result', () => {
+  const m = SRV_SRC.match(/function safeHandler\(fn\) \{[\s\S]*?\n\}/);
+  assert(m, 'safeHandler found');
+  assert(m[0].includes('err.detail'), 'reads the preserved detail');
+  assert(m[0].includes('textResult(out)'), 'returns the augmented object');
+  assert(/success: false, error: err && err\.message/.test(m[0]), 'still returns `error` for existing callers');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

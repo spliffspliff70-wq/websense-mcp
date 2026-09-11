@@ -7,3 +7,6 @@ __pycache__/
 .DS_Store
 # local safety backups (never publish)
 *.bak-*
+
+# generated benchmark fixtures (regenerate with bench/gen_*.py)
+bench/pages/*.html

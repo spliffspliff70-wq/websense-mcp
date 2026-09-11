@@ -1,230 +1,119 @@
 # WebSense MCP
 
-**Non-vision, AI-native web automation** via the Semantic Action Graph. Drive a real Chrome
-from any MCP client — **no screenshots, no CDP, no bot detection, no headless**.
+> Non-vision, AI-native web automation via the Semantic Action Graph. No screenshots, no CDP, no bot detection.
 
-Built to be the browser tool an AI agent actually *wants*: every element is classified by
-action type with a predicted effect, every form is fully introspected, every click returns a
-before/after state diff. Works on LinkedIn, GitHub, Google, Gmail — any strict-CSP site,
-including React/Vue/Angular SPAs.
+## Quick Start
 
-**v4: types into anything.** One `type_text` call auto-detects the editor engine —
-Draft.js (x.com), Lexical, ProseMirror, Slate, Quill, Trix, CKEditor, TinyMCE, plain
-inputs — and picks the right insertion strategy (synthetic paste event with real
-DataTransfer → beforeinput → execCommand), then verifies the app's *state truth*:
-the dependent submit button must actually enable. Disabled buttons are refused with a
-reason (adjacent char counter included), never silently swallowed. Uploads auto-route:
-file input → dropzone → rich-editor paste. New: `form special` (date/color/range/number/
-checkbox/radio), multi-select with JSON arrays, self-reload (`extension_reload`), and a
-local test harness covering the whole matrix (`test/harness/`).
-
----
-
-## WebSense in plain language
-
-**What it is:** a tool that lets an AI assistant (like Claude, or any MCP-capable agent)
-use a normal Chrome browser the way a person would — clicking buttons, filling forms,
-reading pages — but *seeing* the page as a clean structured map instead of pixels.
-
-**How it works, without the jargon:**
-
-1. You install a small **Chrome extension** (this is the eyes and hands — it lives inside
-   your real Chrome, with your real logins, on your machine). Chrome-only today.
-2. A tiny helper program (the **server**) runs on your computer and connects the assistant
-   to the extension. Nothing ever leaves your machine — it's all localhost.
-3. When the assistant asks "what's on this page?", the extension doesn't send a screenshot.
-   Instead it reads the page and answers: *"there's a login form with an email field, a
-   password field, a 'Remember me' checkbox, and a Log In button."* Every element gets a
-   name tag (`E0`, `E1`, …) the assistant can refer to later.
-4. When the assistant wants to act — "type the email into the form" — it says *type into
-   E1*, and the extension does it the same way your keyboard would, inside the page itself.
-   The site can't tell the difference: no robot flag, no fake browser, no second profile.
-5. After every action the assistant gets a **before/after diff**: "the modal opened," "the
-   form submitted," "nothing changed — try something else." That last honest verdict is
-   what makes agents reliable instead of guessy.
-
-**Why that matters:** other approaches either spin up a *fake* browser (which sites detect
-and block, and which has none of your logins) or take *screenshots* and have a vision model
-squint at pixels (slow, expensive, error-prone). WebSense does neither. Your assistant uses
-your real browser, sees structure instead of pixels, and acts like a human — because the
-extension operates inside the page exactly where your clicks and keystrokes land.
-
----
-
-## Why WebSense
-
-| | WebSense | CDP / Puppeteer | Vision-based (computer-use) |
-|---|---|---|---|
-| **Bot detection** | None (real profile) | Often flagged | None |
-| **Screenshots / vision model** | No — pure structured JSON | No | Yes (expensive, error-prone) |
-| **CSP-strict sites** | ✅ Native setters in isolated world | ✅ | ✅ |
-| **React controlled inputs** | ✅ Native prototype setters + event dispatch | Partial | ✅ |
-| **`navigator.webdriver`** | Never set | Set | Never |
-| **What the agent sees** | Typed actions, forms, states, diffs | Raw DOM/JS | Pixels |
-| **Cost per read** | ~0 tokens (summarized, incremental) | Full DOM dump | 1 vision call |
-
----
-
-## How it works
-
+1. `npm install` in `E:\local_memstore\websense`
+2. Load the extension: `chrome://extensions` → Developer mode → Load unpacked → select `E:\local_memstore\websense\extension`. It auto-connects to the WebSocket hub (no launcher page).
+3. Register the MCP server in your client. **Cline** (`C:\Users\Ali\.cline\cline_mcp_settings.json`):
+```json
+{ "mcpServers": { "websense": { "command": "node", "args": ["E:/local_memstore/websense/src/server.js"], "env": { "PORT": "38401" } } } }
 ```
-MCP Client (Claude / Cline / Cursor / any MCP host)
-    ↔ stdio or HTTP (StreamableHTTP)
+4. Call any tool (e.g. `explore_page`). Flow: `MCP → WS → Extension → Content Script → DOM`.
+
+**Bridge port:** default `38401`. Override with `--port <n>` (server) and the matching
+`PORT` constant in `extension/offscreen.js` (extension). If the port is already taken, the
+hub logs a warning and the server keeps running (MCP still works) — the bridge just isn't
+claimed. Run multiple isolated servers with different `--port` values.
+
+## Firefox (permanent install)
+Firefox's "Load Temporary Add-on" is **removed on every restart** (dev-only, unsigned). To make WebSense permanent:
+1. Use **Firefox Developer Edition / Nightly** — regular release rejects unsigned add-ons.
+2. `about:config` → set `xpinstall.signatures.required` = `false`.
+3. `about:addons` → gear icon → **Install Add-on From File** → select `E:\local_memstore\websense\websense.xpi`.
+4. It now persists across restarts and auto-connects to the same `ws://localhost:38401`.
+
+The Firefox extension lives in `extension-firefox/` — its `manifest.json` is the Firefox MV3 version
+(`background.scripts`, **no** `chrome.offscreen`; the WebSocket lives in the persistent background script
+`background-firefox.js`). After editing those files, re-zip the folder contents to `websense.xpi` (manifest at root).
+Chrome uses `extension/` (with `background.service_worker` + `offscreen.js`) — separate on purpose.
+
+## Architecture
+```
+MCP Client (Claude / Cline / Cursor / Hermes)
+    ↔ stdio
 WebSense MCP Server (src/server.js)
     ↔ WebSocket localhost:38401
 Chrome Extension (extension/)
-    ├── background.js    service worker, tab management, binding
+    ├── background.js    service worker, tab management
     ├── offscreen.js     WebSocket client, auto-reconnect
-    └── websense-cs.js   Semantic Action Graph extraction + native DOM interaction
+    └── websense-cs.js   SAG extraction + native DOM interaction (CSP-safe)
     ↔ chrome.runtime.sendMessage
 Live DOM
 ```
 
-The content script extracts a **Semantic Action Graph (SAG)** — every interactive element with a
-stable ref (`E0`, `E1`, …), action type (`navigation`, `form_input`, `form_submit`, `toggle`, …),
-predicted effect, and live state (`value`, `checked`, `disabled`, `expanded`, …). The agent
-plans against the graph, then acts by ref. No coordinates, no pixels, no eval.
+## Tools (29) — call `websense_guide` first
 
----
+> **Count verified 2026-09-11** by `tools/list` against the RUNNING server
+> (`POST http://127.0.0.1:9222/mcp`, streamable HTTP JSON-RPC): **29 tools**.
+> The same 29 `reg(server, …)` names are in `src/server.js`. Anything in these
+> docs that says 21/43/61 tools is stale.
 
-## Credits — ideas borrowed from other projects
+### Guide & Status
+`websense_guide` · `status` (kind:page|bridge|doctor|downloads)
+### Exploration
+`explore_page` (compact:list, intent:find, goal:goal-filter, preload:lazy, incremental:delta-since-last-scan)
+### Read
+`read` (format:text|content|markdown|diff|scrollextract|preload)
+### Interact
+`click` (ref|xy, mode:click|hover|rightclick|drag) · `type_text` (ref+text|fields:[]) · `form` (state|select|toggle|upload) · `scroll` (direction|y|intoView) · `press_key`
+### Element Intel
+`reveal` (kind:dropdown|tabs|accordion) · `inspect` (kind:element|geometry|relation)
+### Tabs & Navigation
+`navigate` · `tabs` (list|switch|close|bind|frames|windows|focus|move|transfer|switchread)
+### Wait
+`wait` (conditions ANDed | event mode)
+### Page Control
+`evaluate` (script|query) · `main_world` (compiled fn in the page MAIN world — F12-insider path for reads/writes the isolated world can't do) · `screenshot` · `dialog` (accept|dismiss|keystroke)
+### Session & Network
+`session` (reset|map|mermaid) · `network_log` · `console_log` (captured console + JS errors) · `cookies` (list/get/set/clear metadata — never values) · `clipboard` (copy|read)
+### AX Bridge
+`ax` (state|read|click|type) — for canvas SPAs & chrome:// pages
+### REAL Input (genuine OS-level, for synthetic-ignoring widgets)
+`real_activate_tab` (UIA tab-pill click) · `real_click` (SendInput at viewport x,y) · `real_paste` (OS click + clipboard + Ctrl+V)
+### Extension maintenance
+`respawn_offscreen` (recreate the offscreen doc so current on-disk code loads) · `extension_reload` (chrome.runtime.reload + reconnect wait)
 
-WebSense is original code, but several design ideas were adapted from projects we studied
-and admired. Full credit where due:
+> **Each tool absorbed 2-10 old one-verb tools.** Full absorption table in `websense_guide`. All 65 original capabilities are callable — just through the consolidated tool with a `mode`/`format`/`action`/`kind` parameter instead of a separate tool name.
 
-| From | What we borrowed |
-|---|---|
-| **[agentreach](https://github.com/Panniantong/Agent-Reach)** (tenlifejosh/agentreach & Panniantong/Agent-Reach, MIT) | The upload-confirmation doctrine — multi-strategy file-drop + *positive-only* confirmation (`input-has-file` / `preview-visible` / `unconfirmed` — never claim success without evidence); the idea of a self-diagnostics tool (`websense_doctor`); the per-site quirks registry pattern |
-| **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** (Nous Research) | The event-push supervisor pattern (push dialogs/navigation to a ring buffer instead of polling — `wait{event:}`); goal-aware read auto-summarization (threshold + goal extraction); inline after-action verification (the `capture_after` idea → our before/after click diff) |
-| **Computer-use / cua-driver ecosystem** | The verify-then-escalate ladder — structured effect verdicts (`confirmed` / `unverifiable` / `suspected_noop`) with a recommended escalation path instead of silent retries |
-| **Playwright / Puppeteer** | The locator-chain idea (data-testid → id → aria-label → name → CSS path → role+text) that powers re-targeting after re-renders — reimplemented for our ref system |
+## Native dialog handling (the one gap vs. a human — now closed)
+- **JS dialogs** (`alert` / `confirm` / `prompt`): the content script overrides `window.alert/confirm/prompt` and captures them into a queue. `status` reports `pendingDialogs`; resolve them programmatically with `dialog action:"accept"|"dismiss"` — CSP-safe, no OS interaction.
+- **OS-level dialogs** (HTTP basic-auth, proxy-auth, print): can't be intercepted by JS. `dialog keystroke:true key:"enter"|"escape"` injects a global keystroke through Windows control (PowerShell `SendKeys`). This is the windows-control bridge.
+- **File picker:** handled by `form action:"upload"` (DataTransfer API) — no OS dialog.
 
-Everything listed was re-implemented for WebSense's extension-based architecture — no code
-copied, ideas and proven patterns only. Thank you to those projects. 🙏
+## Iframes / frames (the other gap vs. a human — now closed)
+- `tabs action:"frames"` returns every frame in the active tab with its `frameId` and URL.
+- Pass `frameId` to any element tool (`explore_page({frameId})`, `click({ref, frameId})`, `type_text({ref, frameId})`, …) to target a specific iframe. This unlocks **Gmail compose**, **Notion**, **Figma**, and any site that renders key UI inside child frames.
+- `read` (format:"text") and element labels now include CSS `::before`/`::after` content (icon-font glyphs, counters) that `innerText` misses.
 
----
+## Cross-browser
+- **Chrome / Edge / Opera:** load `extension/manifest.json` (MV3, offscreen WS bridge).
 
-## Quick start
-
-### Prerequisites
-- Node.js **18+**
-- Chrome / Edge / Opera (the extension is MV3)
-
-### 1. Install & load the extension
-```bash
-npm install
-```
-Open `chrome://extensions` → **Developer mode** → **Load unpacked** → select the
-`extension/` folder. The extension auto-connects to the WebSocket hub — no launcher page needed.
-
-### 2. Register the MCP server in your client
-
-**Claude Desktop** (`claude_desktop_config.json`):
-```json
-{ "mcpServers": { "websense": { "command": "node", "args": ["/path/to/websense-mcp/src/server.js"], "env": { "PORT": "38401" } } } }
-```
-
-**Cline** / **Cursor** / any stdio MCP client: same shape — point `args` at
-`src/server.js` with `PORT=38401`.
-
-**Multiple clients at once** (Hermes + Cline + Cursor simultaneously):
-```bash
-node src/server.js --http --http-port 9222
-```
-then point each client at `http://localhost:9222/mcp` (StreamableHTTP, multi-session).
-
-### 3. Call any tool
-Start with `websense_guide` — it returns the full usage guide. The core loop:
-
-```
-explore_page → pick a ref → click/type/form by ref → read the before/after diff → repeat
-```
-
----
-
-## Tools
-
-`websense_guide` first. 24 consolidated tools covering the whole surface:
-
-| Area | Tools |
-|---|---|
-| **Guide & Status** | `websense_guide`, `status` (bridge/page/doctor/downloads) |
-| **Exploration** | `explore_page` (compact / intent / goal / preload / **incremental**) |
-| **Read** | `read` (text / content / markdown / diff / scrollextract / preload) |
-| **Interact** | `click` (click/hover/rightclick/drag, auto-climb), `type_text`, `form` (state/select/toggle/upload), `scroll`, `press_key` |
-| **Element Intel** | `reveal` (dropdown/tabs/accordion), `inspect` (element/geometry/relation) |
-| **Tabs & Navigation** | `navigate`, `tabs` (list/switch/close/bind/frames/windows/focus/move/transfer) |
-| **Wait** | `wait` (conditions ANDed, event mode) |
-| **Page Control** | `evaluate`, `screenshot`, `dialog`, `session` (reset/map/mermaid/task), `console_log`, `network_log` |
-| **Clipboard & AX** | `clipboard`, `ax` (canvas SPAs, chrome:// pages), `cookies`, `downloads` |
-
-**Highlights**
-- **`explore_page {incremental:true}`** — after any action, returns *only* what changed
-  (added/changed/removed with per-field diffs) instead of re-dumping the whole page. Refs stay
-  stable across incremental calls.
-- **`click` auto-climb** — if a synthetic click produces no state change (stubborn React
-  submits), it can escalate to a genuine OS-level click. *Windows-only enhancement, off by
-  default* (`WEBSENSE_AUTOCLIMB=1` env or `autoClimb:true`).
-- **`read {format:"diff"}`** — only the text that changed since the last read.
-- **Reddit composer speed run** (see `docs/reddit-speed-run-2026-09-01.md`) — full post fill
-  in ~2s using `main_world` component internals (title shadow-key 0.02s, flair modal
-  0.03s) + the `type_text` paste rung for the Lexical body (1.8-2.3s). Documents the hard
-  wall: Lexical silently reverts ALL `main_world` writes (execCommand insertText, synthetic
-  ClipboardEvent) — the extension paste pipeline is the only accepted path — plus the
-  per-tab content-script wedge recovery (close tab + fresh tab; navigate/reload don't fix it).
-
----
-
-## Platform support
-
-| Feature | Windows | macOS / Linux |
-|---|---|---|
-| Core browsing (explore/read/click/type/form/tabs/wait) | ✅ | ✅ |
-| OS-level dialog keystroke (`dialog keystroke:true`) | ✅ (PowerShell SendKeys) | ❌ (graceful error) |
-| Auto-climb real-click | ✅ (PowerShell user32) | ❌ (graceful error) |
-| `scripts/native_upload.py` (native file picker) | ✅ (pywinauto + cua-driver) | ❌ |
-
-Everything marked ❌ degrades gracefully — the tool returns an honest error message, never
-crashes. Core browsing is fully cross-platform.
-
----
-
-## Security & privacy
-
-- **Runs in YOUR Chrome profile** — your cookies, sessions, and fingerprint. It never leaves
-  your machine: everything is localhost.
-- **Manifest permissions**: `tabs`, `offscreen`, `scripting`, `webNavigation`, `downloads`,
-  `clipboardRead/Write`, `cookies`, `activeTab`, `debugger` (used only by the optional `ax`
-  tool for canvas SPAs), plus `<all_urls>` host access.
-- **`cookies` tool** can read/clear cookie *values* for the current tab — treat it as
-  sensitive; it exists for session-transplant workflows.
-- **No telemetry. No network calls** from the server other than the localhost WebSocket hub.
-
----
+## Key Features
+- **CSP-Safe (28/29 tools):** native DOM functions in the content script's isolated world. No eval, no string-to-code. Works on LinkedIn, GitHub, Google — any strict-CSP site. (`evaluate` is the only eval-based tool; `dialog keystroke:true` is a Windows-control keystroke, and `main_world` uses Chrome's userScripts MAIN-world path.)
+- **React-Compatible:** native prototype value setters bypass React's value tracker, then `input`/`change` events are dispatched.
+- **No Bot Detection:** real Chrome profile, cookies, fingerprint. No CDP, no `navigator.webdriver`, no headless.
+- **No Vision:** all structured JSON; no screenshots, no vision model.
+- **Action-Typed Elements:** every element classified by action type with predicted effects.
+- **Exploration Graph:** persistent navigation map with Mermaid export.
+- **Frame-Aware:** targets iframes via `frameId`; no DOM region is unreachable.
 
 ## Known limitations
+- **Native browser dialogs** (alert/confirm, OS file picker): captured/resolved via `dialog action:"accept"|"dismiss"` (JS) and `dialog keystroke:true` (OS, Windows-control keystroke). Not a blocker.
+- **`evaluate`** uses `new Function` (eval) → blocked by strict page CSP (LinkedIn, HN). Power-user utility; not for CSP sites.
+- **Logged-in sites (LinkedIn etc.):** must already be authenticated in that Chrome profile; `navigate` opens a fresh tab that needs an existing session cookie.
+- **Canvas/WebGL content** (Telegram web, TradingView, chrome:// pages): use `ax action:"read"` to see the native accessibility tree, then `ax action:"click"|"type"` to interact. Fallback: `screenshot` + vision.
+- **`ax` tool uses chrome.debugger** — stable Chrome compatible, shows a warning banner while attached. Requires explicit tabId.
 
-*(All previously listed limitations were re-verified during a full 24-tool audit on
-2026-08-31. One was fixed — see below — the rest are inherent design trade-offs.)*
+## v2.1-latchproof (2026-08-15)
+- **Multi-slot concurrency** (`hub.js`): request correlator is now `Map<id,entry>` — concurrent sessions no longer clobber each other.
+- **Latch-proof routing** (`background.js`): `chrome.tabs.onActivated/onRemoved` events keep the tab registry live; 0×0 viewport self-heal.
+- **Honest interaction** (`websense-cs.js`): `type_text` verify-persist — reports `confirmed`/`reverted` instead of phantom success.
+- **AX bridge** (`offscreen.js`): `ax` tool (`state`/`read`/`click`/`type`) via `chrome.debugger` (CDP Accessibility domain). Stable Chrome compatible, no dev-channel flags.
+- **windows-control DPI-aware** (`uia_common.py`): physical→logical coordinate scaling fixes clicks on scaled displays.
 
-- ~~**Screenshots fail on background tabs**~~ → **FIXED (v1.1.1)**: `screenshot` now falls
-  back to `chrome.debugger` `Page.captureScreenshot` on the bound tab when the tab isn't the
-  visible one. A brief "started debugging" infobar appears during fallback captures.
-- **Chrome-only** — the extension targets Chrome (Chromium builds like Edge/Brave generally
-  work but are untested). There is deliberately no headless mode and no CDP path.
-- **Logged-in sites** must already be authenticated in the Chrome profile the extension runs
-  in (`navigate` opens a fresh tab that uses existing session cookies).
-- **`evaluate`** uses `new Function` (eval) → blocked by strict page CSP (LinkedIn, HN). It's a
-  power-user utility; the rest of the surface is CSP-safe.
-- **Canvas / WebGL content** (Telegram web, TradingView): use the `ax` tool (native accessibility
-  tree via `chrome.debugger`) or `screenshot` + vision.
-- **Native OS dialogs** (basic-auth, print): `dialog keystroke:true` (Windows) or your platform's
-  native automation.
-
----
-
-## Development
-
+## Testing
 ```bash
 # Regression suite (hub-level, no Chrome needed)
 node test-regressions.mjs
@@ -233,33 +122,22 @@ node test-regressions.mjs
 node test/mcp-client-test.js
 ```
 
-### File structure
+## File Structure
 ```
-websense-mcp/
+websense/
+├── package.json
 ├── src/
-│   ├── server.js       # MCP server, 24 consolidated tools
-│   ├── hub.js          # WebSocket hub (multi-slot, latch-proof)
-│   ├── session.js      # Exploration map + task state machine
-│   ├── incr.js         # Incremental explore diff engine
-│   ├── climb.js        # Auto-climb decision logic (pure)
-│   ├── summarize.js    # Goal-aware read summarization (pure)
-│   ├── upload.js       # Upload verdict logic (pure)
-│   └── mermaid.js      # Mermaid journey export
+│   ├── server.js       # MCP server with 29 consolidated tools
+│   ├── hub.js          # WebSocket hub
+│   ├── session.js      # Exploration map + diff engine
+│   └── mermaid.js      # Mermaid export
 ├── extension/
 │   ├── manifest.json   # Chrome MV3
-│   ├── background.js   # Service worker
-│   ├── offscreen.js    # WS client, auto-reconnect, watchdog
-│   └── websense-cs.js  # SAG extraction + native interaction
-├── scripts/
-│   ├── native_upload.py    # Windows native-file-picker helper (optional)
-│   └── kill-server.ps1     # Windows dev utility (optional)
-└── test/               # Regression + E2E + fixture pages
+│   ├── background.js    # Service worker (tab mgmt, offscreen lifecycle)
+│   ├── offscreen.js     # WebSocket client (auto-reconnect)
+│   ├── offscreen.html
+│   └── websense-cs.js   # SAG extraction + native DOM interaction
+└── test/
+    └── mcp-client-test.js   # End-to-end MCP client test
 ```
 
----
-
-## License & support
-
-**MIT** — use it, fork it, ship it. If WebSense saves you hours, a coffee is appreciated ☕
-
-[GitHub Sponsors](https://github.com/sponsors/spliffspliff70-wq)

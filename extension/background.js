@@ -58,7 +58,82 @@ function isContentScriptAllowed(url) {
   return ![/^chrome:\/\//, /^chrome-extension:\/\//, /^about:/, /^edge:\/\//, /^file:\/\//].some(function (p) { return p.test(url); });
 }
 
-// Invalidate the binding when the bound tab is closed (SW single source —
+// ═══ 2026-09-11c: TAB-HOP GUARDS (unhandled-rejection fix + fast-fail) ═══
+// chrome.tabs.sendMessage rejects with "Could not establish connection.
+// Receiving end does not exist." whenever the target tab has no LIVE content
+// script (never injected / page navigated away / tab closed). If any call site
+// lets that rejection escape, the SW console fills with `Uncaught (in promise)`
+// noise that masks real errors. isNoReceivingEnd() recognises the class;
+// sendMsgError() turns ANY sendMessage rejection into a structured, hop-naming
+// object so the caller learns WHICH hop broke instead of a bare message.
+function isNoReceivingEnd(err) {
+  var m = String((err && err.message) || err || '');
+  return /receiving end does not exist|could not establish connection|message port closed|no tab with id|tab was closed/i.test(m);
+}
+
+function sendMsgError(err, tabId, hop) {
+  var m = String((err && err.message) || err || 'unknown error');
+  var tid = (tabId === undefined) ? null : tabId;
+  if (isNoReceivingEnd(err)) {
+    return {
+      success: false,
+      error: 'no-receiving-end',
+      tabId: tid,
+      hop: hop || 'bg->content-script',
+      hint: 'No live content script in tab ' + tid + ' (not injected, page navigated away, or tab closed). Reload the page or rebind the tab (tabs{action:"switch"}), then retry.',
+      message: m,
+    };
+  }
+  return { success: false, error: 'send-failed', tabId: tid, hop: hop || 'bg->content-script', message: m };
+}
+
+// FAST-FAIL pre-flight for page/content ops. Cheap: ONE chrome.tabs.get — no
+// script injection, no poll loop. It fails a page op in ~1ms with the NAMED hop
+// when the target tab cannot possibly answer, instead of hanging for the hub's
+// 30s (90s for some ops) timeout. tabs.get is used deliberately: tab enumeration
+// via tabs.query has been observed to throw 'Extension context invalidated'
+// after a SW context loss, while tabs.get stays robust.
+// Returns { ok:true, tab } on success, else
+//   { success:false, error:'content-script-not-ready', tabId, url, status, reason, hop, hint }.
+async function checkContentScriptReady(tabId) {
+  var id = (tabId === undefined || tabId === null || tabId === '') ? null : Number(tabId);
+  if (!id || isNaN(id)) {
+    return { success: false, error: 'content-script-not-ready', tabId: id, url: null, status: null,
+             reason: 'no-tab-id', hop: 'bg->chrome.tabs',
+             hint: 'No target tab id — bind a tab first (tabs{action:"switch"}).' };
+  }
+  var tab = null;
+  try {
+    tab = await chrome.tabs.get(id);
+  } catch (e) {
+    return { success: false, error: 'content-script-not-ready', tabId: id, url: null, status: null,
+             reason: 'no-such-tab', hop: 'bg->chrome.tabs',
+             hint: 'Tab ' + id + ' no longer exists (closed). List tabs (tabs{action:"list"}) and rebind.' };
+  }
+  var url = (tab && tab.url) || '';
+  // (b) URLs where a content script can NEVER run. isContentScriptAllowed covers
+  // chrome:// chrome-extension:// edge:// about: file://; add the Web Store.
+  var webStore = /^https?:\/\/(chromewebstore\.google\.com|chrome\.google\.com\/webstore)/.test(url);
+  if (!isContentScriptAllowed(url) || webStore) {
+    return { success: false, error: 'content-script-not-ready', tabId: id, url: url, status: (tab && tab.status) || null,
+             reason: 'restricted-url', hop: 'bg->chrome.tabs',
+             hint: 'Content scripts never run on ' + url + ' (chrome://, chrome-extension://, edge://, about:, file:// or the Web Store). Navigate to an http(s) page first.' };
+  }
+  // (c) tab still loading — DO NOT hard-fail here (2026-09-11c).
+  // A tab reports status='loading' until its load event fires, and a page with a
+  // long-polling / streaming / never-finishing subresource can sit at 'loading'
+  // indefinitely WHILE its content script is perfectly usable. Hard-blocking would
+  // turn working page ops into failures, so this is returned as a WARNING the
+  // caller surfaces only if the sendMessage actually fails. The status is still
+  // captured, so a real failure names both the hop and the tab state.
+  var warning = null;
+  if (tab && tab.status && tab.status !== 'complete') {
+    warning = { tabStatus: tab.status, note: 'tab reported status=' + tab.status + ' at op time' };
+  }
+  return { ok: true, tab: tab, loadingWarning: warning };
+}
+
+// Invalidate the binding when the bound tab is closed
 // the offscreen's cached id used to survive closes and route ops to a dead
 // tab, PITFALL 26 class).
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -66,7 +141,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   // Phase 2 (2026-08-15): tell the offscreen → hub so the hub's tab registry
   // drops the dead content-script client (no routing into a dead tab).
   try {
-    chrome.runtime.sendMessage({ type: 'tab_event', event: 'removed', tabId: tabId });
+    chrome.runtime.sendMessage({ type: 'tab_event', event: 'removed', tabId: tabId }).catch(() => {});
   } catch (_) { /* offscreen may not be ready — harmless */ }
 });
 
@@ -77,7 +152,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onActivated.addListener((activeInfo) => {
   boundTabId = activeInfo.tabId;
   try {
-    chrome.runtime.sendMessage({ type: 'tab_event', event: 'activated', tabId: activeInfo.tabId, windowId: activeInfo.windowId });
+    chrome.runtime.sendMessage({ type: 'tab_event', event: 'activated', tabId: activeInfo.tabId, windowId: activeInfo.windowId }).catch(() => {});
   } catch (_) { /* offscreen may not be ready — harmless */ }
 });
 
@@ -252,7 +327,15 @@ async function getAllTabs() {
   return tabs.filter((t) => {
     const url = t.url || '';
     return !url.startsWith('chrome://') && !url.startsWith('chrome-extension://') && !url.startsWith('edge://') && !url.startsWith('about:');
-  }).map((t) => ({ id: t.id, url: t.url || '', title: t.title || '', active: t.active }));
+  }).map((t) => ({
+    id: t.id, url: t.url || '', title: t.title || '', active: t.active,
+    // 2026-09-11c: `status` is exposed for attribution. A tab stuck at 'loading'
+    // explains a content script that has not registered yet — and it is ALSO why
+    // the fast-fail guard must not hard-block on 'loading': pages with
+    // long-polling/streaming requests can report 'loading' indefinitely while
+    // their content script is perfectly usable.
+    status: t.status || null,
+  }));
 }
 
 // ═══ Message Routing ═══
@@ -272,9 +355,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabId = targetTabId || sender.tab?.id;
     if (!tabId) { sendResponse({ error: 'No target tab ID' }); return true; }
     const frameId = (payload && payload.frameId !== undefined) ? payload.frameId : undefined;
-    chrome.tabs.sendMessage(tabId, { type: action, ...payload }, frameId !== undefined ? { frameId } : undefined).then(sendResponse).catch((err) => {
-      sendResponse({ error: err instanceof Error ? err.message : String(err) });
-    });
+    const hop = 'bg->content-script (PAGE_CONTROL:' + action + ')';
+    // FAST-FAIL (2026-09-11c): pre-flight the hop so a page op into a dead /
+    // restricted / still-loading tab returns content-script-not-ready in ~1ms
+    // instead of hanging for the hub timeout. sendMessage is then always
+    // awaited inside try/catch → no unhandled rejection can escape the SW.
+    (async () => {
+      const ready = await checkContentScriptReady(tabId);
+      if (!ready.ok) { sendResponse(ready); return; }
+      try {
+        const resp = await chrome.tabs.sendMessage(tabId, { type: action, ...payload }, frameId !== undefined ? { frameId } : undefined);
+        sendResponse(resp);
+      } catch (err) {
+        const e = sendMsgError(err, tabId, hop);
+        // Surface the tab's load state when it was not 'complete' — that is the
+        // most common reason a content script is not answering yet.
+        if (ready.loadingWarning) { e.tabStatus = ready.tab && ready.tab.status; e.note = ready.loadingWarning.note; }
+        sendResponse(e);
+      }
+    })();
     return true;
   }
 
@@ -495,27 +594,33 @@ async function handleTabControl(action, payload) {
       if (!payload.fromSelector || !payload.toSelector) return { error: 'fromSelector and toSelector required' };
       try {
         const t0 = Date.now();
+        // FAST-FAIL (2026-09-11c): guard BOTH hops before touching them so a
+        // dead/restricted/loading tab fails in ~1ms with the named hop.
+        const fromReady = await checkContentScriptReady(fromTab);
+        if (!fromReady.ok) return Object.assign({ op: 'transfer_text' }, fromReady);
+        const toReady = await checkContentScriptReady(toTab);
+        if (!toReady.ok) return Object.assign({ op: 'transfer_text' }, toReady);
         // NOTE: chrome.tabs.sendMessage resolves with the content-script's
         // envelope {type,id,success,data} — always unwrap .data (the v2
         // read_selector/write_selector helpers put their result there).
         const unwrap = (r) => (r && typeof r === 'object' && r.data && typeof r.data === 'object' && 'success' in r.data) ? r.data : (r || {});
         // 1. READ from the source tab (~10ms)
         const readRaw = await chrome.tabs.sendMessage(fromTab, { type: 'read_selector', selector: payload.fromSelector })
-          .catch((e) => ({ success: false, error: 'read: ' + (e.message || e) }));
+          .catch((e) => sendMsgError(e, fromTab, 'bg->cs:read_selector (fromTab)'));
         const read = unwrap(readRaw);
-        if (!read || read.success !== true) return { error: 'read failed: ' + ((read && read.error) || 'unknown') };
+        if (!read || read.success !== true) return (read && read.error === 'no-receiving-end') ? read : { error: 'read failed: ' + ((read && read.error) || 'unknown') };
         const text = payload.useValue ? (read.value != null ? String(read.value) : '') : (read.text || '');
         // 2. WRITE into the destination (~10ms) — no activation needed, no OS
         //    focus steal (2026-08-13, Ali directive: background-only)
         boundTabId = toTab;
         // 3. WRITE into the destination (~10ms) — React-safe native setter
         const writeRaw = await chrome.tabs.sendMessage(toTab, { type: 'write_selector', selector: payload.toSelector, value: text })
-          .catch((e) => ({ success: false, error: 'write: ' + (e.message || e) }));
+          .catch((e) => sendMsgError(e, toTab, 'bg->cs:write_selector (toTab)'));
         const write = unwrap(writeRaw);
-        if (!write || write.success !== true) return { error: 'write failed: ' + ((write && write.error) || 'unknown') };
+        if (!write || write.success !== true) return (write && write.error === 'no-receiving-end') ? write : { error: 'write failed: ' + ((write && write.error) || 'unknown') };
         // 4. VERIFY (~10ms) — read back the destination value
         const verifyRaw = await chrome.tabs.sendMessage(toTab, { type: 'read_selector', selector: payload.toSelector })
-          .catch((e) => ({ success: false, error: 'verify: ' + (e.message || e) }));
+          .catch((e) => sendMsgError(e, toTab, 'bg->cs:read_selector (verify,toTab)'));
         const verify = unwrap(verifyRaw);
         const actual = verify && verify.success ? (verify.value != null ? String(verify.value) : (verify.text || '')) : '';
         const ok = actual === text;
@@ -533,8 +638,10 @@ async function handleTabControl(action, payload) {
         // B2: switch + read in ONE call — bind the tab WITHOUT activating it
         // (background-only; activation raises the OS window — Ali directive 2026-08-13)
         boundTabId = tabId;
+        const ready = await checkContentScriptReady(tabId);
+        if (!ready.ok) return Object.assign({ op: 'switch_tab_and_read' }, ready);
         const resRaw = await chrome.tabs.sendMessage(tabId, { type: 'read_selector', selector: payload.selector || 'body' })
-          .catch((e) => ({ success: false, error: 'read: ' + (e.message || e) }));
+          .catch((e) => sendMsgError(e, tabId, 'bg->cs:read_selector (switch_tab_and_read)'));
         const unw = (r) => (r && typeof r === 'object' && r.data && typeof r.data === 'object' && 'success' in r.data) ? r.data : (r || {});
         return { success: true, tabId, ...(unw(resRaw) || {}) };
       } catch (err) {
@@ -612,12 +719,16 @@ async function handleTabControl(action, payload) {
       // tab's content script via PAGE_CONTROL (same relay PAGE ops use).
       const tab = await getActiveTab();
       if (!tab) return { error: 'No active tab for ' + action };
+      // FAST-FAIL (2026-09-11c): name the hop instead of hanging on a dead /
+      // restricted / still-loading tab; and consume any sendMessage rejection.
+      const ready = await checkContentScriptReady(tab.id);
+      if (!ready.ok) return Object.assign({ op: action }, ready);
       try {
         const resRaw = await chrome.tabs.sendMessage(tab.id, { type: action });
         const unw = (r) => (r && typeof r === 'object' && r.data && typeof r.data === 'object' && 'success' in r.data) ? r.data : (r || {});
         return unw(resRaw);
       } catch (err) {
-        return { error: action + ' failed: ' + (err.message || err) };
+        return sendMsgError(err, tab.id, 'bg->cs:' + action);
       }
     }
     case 'download_state': {

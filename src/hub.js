@@ -15,6 +15,16 @@ const REQUEST_TIMEOUT = 30000;       // default for most ops
 const EXPLORE_TIMEOUT = 90000;       // heavy DOMs (x.com, lemonsqueezy) need more time
 const HEAVY_OPS = new Set(['explore_page', 'discover_actions']);
 const TLS_PORT = 38411;
+// Human-readable WebSocket readyState (read-only diagnostics).
+const READY_STATE_NAMES = { 0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED' };
+// ms -> "1d 02h 03m 04s" (read-only diagnostics).
+function formatUptime(ms) {
+  const s = Math.max(0, Math.floor((ms || 0) / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+    m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return (d ? d + 'd ' : '') + (d || h ? pad(h) + 'h ' : '') + pad(m) + 'm ' + pad(sec) + 's';
+}
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // cert.pem/key.pem live in the project root (parent of src/)
@@ -54,27 +64,48 @@ export class HubServer {
     this.contentByTab = new Map(); // tabId -> main-frame content-script ws
     this.selectedTabId = null;     // last tab the bridge explicitly selected
     this.clientSeq = 0;
+    this.startedAt = Date.now();   // hub uptime (read-only diagnostics)
     this.eventRing = [];    // ring buffer (P1#1, max 50 page_event entries)
     this.eventRingMax = 50;
     this.eventSeq = 0;
 
     if (this.useTls) {
       const tlsOpts = { cert: fs.readFileSync(CERT), key: fs.readFileSync(KEY) };
-      this.http = https.createServer(tlsOpts, (_req, res) => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', message: 'WebSense MCP Hub (TLS). The extension connects automatically via WebSocket.' }));
-      });
+      this.http = https.createServer(tlsOpts, (req, res) => this._handleHttp(req, res, 'TLS'));
       console.error(`[websense] ${this.label} hub: TLS (wss://) on 0.0.0.0:${this.port}`);
     } else {
-      this.http = http.createServer((_req, res) => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', message: 'WebSense MCP Hub. The extension connects automatically via WebSocket.' }));
-      });
+      this.http = http.createServer((req, res) => this._handleHttp(req, res, 'plain'));
       console.error(`[websense] ${this.label} hub: plain (ws://) on 0.0.0.0:${this.port}`);
     }
 
     this.wss = new WebSocketServer({ server: this.http });
     this.wss.on('connection', (ws) => this.onConnection(ws));
+  }
+
+  // ── Hub HTTP surface (2026-09-11) ──
+  // GET /health → the client census (census()). Every other path keeps the
+  // original friendly one-liner so nothing that probed this listener breaks.
+  // Strictly read-only: this handler never sends on a client socket, never
+  // touches a map, and cannot throw (census() is total, and this wraps it).
+  _handleHttp(req, res, flavor) {
+    let path = req.url || '/';
+    const q = path.indexOf('?');
+    if (q !== -1) path = path.slice(0, q);
+    const reply = (code, body) => {
+      try {
+        res.writeHead(code, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body, null, 2));
+      } catch (_) { try { res.end(); } catch (_) {} }
+    };
+    if (path === '/health') {
+      try { return reply(200, this.census()); }
+      catch (err) { return reply(500, { status: 'census_failed', error: String((err && err.message) || err) }); }
+    }
+    return reply(200, {
+      status: 'ok',
+      message: 'WebSense MCP Hub' + (flavor ? ' (' + flavor + ')' : '') +
+        '. The extension connects automatically via WebSocket. GET /health for the client census.',
+    });
   }
 
   async start() {
@@ -83,7 +114,7 @@ export class HubServer {
         if (err.code === 'EADDRINUSE') {
           // Hard fail: do NOT swallow EADDRINUSE. If we resolve() here the
           // server process stays alive as a zombie holding no port while the
-          // parent (MCP client) waits forever for a stdio
+          // parent (Hermes/Kimi MCP client) waits forever for a stdio
           // handshake that never completes. Exiting lets the client's retry
           // bind the port cleanly instead of piling up dead nodes.
           console.error(`[websense] ${this.label} hub: Port ${this.port} in use — another WebSense server is already running. Exiting so the parent can retry.`);
@@ -103,6 +134,7 @@ export class HubServer {
     ws.clientSource = null; // 'content-script' | 'offscreen' — set on 'ready'
     ws.isMainFrame = false; // set on 'ready'
     ws.clientUrl = null;
+    ws.connectedAt = Date.now(); // diagnostics only (never read by routing)
     this.clients.set(cid, ws);
     this.lastClient = ws;
     this.connected = this.clients.size > 0;
@@ -277,6 +309,21 @@ export class HubServer {
   //    relay (which does PAGE_CONTROL → SW → tabs.sendMessage) when the target
   //    tab's content script WS is down (CSP-blocked ws://, not yet injected).
   activeClient(cmd) {
+    // TABID-CRASH HARDENING (2026-09-11): callers may pass NOTHING — healthCheck()
+    // does exactly that on a 30s interval, and the page-op branch below reads
+    // cmd.tabId. Normalizing cmd here makes the method TOTAL: no caller, now or
+    // later, can reintroduce that throw.
+    //
+    // EVIDENCE (what is actually verified): hub.log contains 4,981 occurrences of
+    // `Uncaught exception (suppressed): Cannot read properties of undefined
+    // (reading 'tabId')`, and that is the log's LAST line — so it was still firing
+    // when that log was captured. 4,981 x the 30s health interval ~= 41.5 hours,
+    // which matches a ping that threw on every tick and was swallowed by
+    // process.on('uncaughtException').
+    // NOT VERIFIED: which revision had the unguarded read. The immediately
+    // preceding code already wrote `cmd && cmd.tabId`, so this revision is
+    // belt-and-braces against a regression rather than the fix for a live throw.
+    cmd = cmd || {};
     // P2 respawn_offscreen (2026-08-31): route through a CONTENT SCRIPT, never
     // the offscreen — the op kills the offscreen, so a request riding on the
     // offscreen's own WS dies with it ('Extension disconnected' for a
@@ -303,7 +350,7 @@ export class HubServer {
       cmd.type === 'close_tab' || cmd.type === 'list_frames' || cmd.type === 'download_state' ||
       cmd.type === 'bind_tab' || cmd.type === 'transfer_text' || cmd.type === 'switch_tab_and_read' ||
       cmd.type === 'list_windows' || cmd.type === 'focus_window' || cmd.type === 'move_tab_to_window' || cmd.type === 'ax_state' ||
-      cmd.type === 'browser_screenshot' || cmd.type === 'get_active_tab' || cmd.type === 'cookie_op' || cmd.type === 'download_op' || cmd.type === 'respawn_offscreen');
+      cmd.type === 'browser_screenshot' || cmd.type === 'get_active_tab' || cmd.type === 'cookie_op' || cmd.type === 'download_op' || cmd.type === 'respawn_offscreen' || cmd.type === 'main_world_exec');
     if (isTabOp || HubServer.SW_REQUIRED_OPS.has(cmd && cmd.type)) {
       const primary = this.offscreenClient || this.contentClient || this.mainFrameClient;
       if (primary && primary.readyState === 1) return primary;
@@ -340,6 +387,7 @@ export class HubServer {
   // the request was routed through and the state of every other layer, so the
   // failure can be attributed instead of guessed at.
   _timeoutDiag(cmd, client, timeout) {
+    cmd = cmd || {}; // TABID-CRASH HARDENING: same no-arg hazard as activeClient()
     const type = (cmd && cmd.type) || '?';
     const targetTab = (cmd && cmd.tabId != null) ? Number(cmd.tabId) : this.selectedTabId;
     const src = (client && client.clientSource) || 'unknown';
@@ -365,7 +413,7 @@ export class HubServer {
         'page navigated (CS torn down) or the tab was backgrounded. The offscreen relay is the ' +
         'fallback path; a repeat here means the tab binding went stale.');
     } else {
-      lines.push('  likely      : client type is ' + src + ' — check the hub stats for hop state.');
+      lines.push('  likely      : client type is ' + src + ' — check websense_doctor for hop state.');
     }
     return new Error(lines.join('\n'));
   }
@@ -383,7 +431,22 @@ export class HubServer {
     this.pending.delete(id);
     if (err) p.reject(err);
     else if (msg.success) p.resolve(msg.data);
-    else p.reject(new Error(msg.data && msg.data.error ? msg.data.error : (typeof msg.data === 'string' ? msg.data : 'Unknown error')));
+    else {
+      const d = msg.data;
+      const text = (d && d.error) ? d.error : (typeof d === 'string' ? d : 'Unknown error');
+      const e = new Error(text);
+      // PRESERVE STRUCTURED DETAIL (2026-09-11c). This used to reject with a bare
+      // `new Error(msg.data.error)`, which destroyed every OTHER field of a failure
+      // payload — so an error that carefully named its hop / reason / hint / tabId
+      // arrived at the caller as a single anonymous string. That is precisely the
+      // loss this codebase keeps paying for (see the hop-naming timeout work).
+      // server.js safeHandler() folds `detail` back into the tool result.
+      if (d && typeof d === 'object') {
+        e.detail = d;
+        for (const k of Object.keys(d)) { if (!(k in e)) e[k] = d[k]; }
+      }
+      p.reject(e);
+    }
     return true;
   }
 
@@ -407,12 +470,114 @@ export class HubServer {
       inFlight: this.pending.size,
       eventRing: this.eventRing, // P1#1: live events for wait{event:…}
       clients: Array.from(this.clients.values()).map((c) => ({
-        source: c.clientSource || 'unknown',
-        isMainFrame: !!c.isMainFrame,
-        url: c.clientUrl || null,
-        tabId: c.tabId != null ? c.tabId : null,
-        readyState: c.readyState,
+        // TABID-CRASH HARDENING: every field read through a null-guard — a
+        // diagnostics call must never be the thing that throws.
+        source: (c && c.clientSource) || 'unknown',
+        isMainFrame: !!(c && c.isMainFrame),
+        url: (c && c.clientUrl) || null,
+        tabId: (c && c.tabId != null) ? Number(c.tabId) : null,
+        readyState: c ? c.readyState : null,
       })),
+    };
+  }
+
+  // ═══ Client census (2026-09-11) ═══
+  // The relay's single biggest time-sink was that "who is actually connected,
+  // and which client owns which tab" could only be inferred from a timeout
+  // error message. This is the answer, as a plain JSON snapshot, exposed over
+  // HTTP by BOTH listeners (hub :38401 and MCP server :9222 — see
+  // _handleHttp() below and the GET /health route in src/server.js).
+  //
+  // CONTRACT — do not weaken it:
+  //   * STRICTLY READ-ONLY. No timers, no eviction, no cleanup, no sends.
+  //   * TOTAL. It may not throw: it is called while clients are churning, and a
+  //     census that throws is worse than no census. Every field is guarded.
+  //   * Pure snapshot: safe to call as often as you like.
+  census() {
+    const now = Date.now();
+    const describe = (c) => {
+      const raw = (c && c.clientSource) || null;
+      return {
+        id: (c && c.cid) || null,
+        // normalized type: 'offscreen' | 'content-script' | 'unknown'
+        type: raw === 'offscreen' ? 'offscreen' : (raw === 'content-script' ? 'content-script' : 'unknown'),
+        clientSource: raw,
+        isMainFrame: !!(c && c.isMainFrame),
+        url: (c && c.clientUrl) || null,
+        tabId: (c && c.tabId != null) ? Number(c.tabId) : null,
+        readyState: (c && c.readyState != null) ? c.readyState : null,
+        readyStateName: (c && c.readyState != null) ? (READY_STATE_NAMES[c.readyState] || String(c.readyState)) : 'n/a',
+        connectedAt: (c && c.connectedAt) || null,
+        connectedForMs: (c && c.connectedAt) ? (now - c.connectedAt) : null,
+      };
+    };
+
+    const clients = [];
+    for (const c of this.clients.values()) {
+      try { if (c) clients.push(describe(c)); } catch (_) { /* never throw */ }
+    }
+
+    // Which main-frame content-script client owns each tab (and which one the
+    // hub is currently routing unbound page ops to).
+    const contentByTab = {};
+    for (const [tabId, c] of this.contentByTab) {
+      if (!c) continue;
+      contentByTab[String(tabId)] = {
+        id: c.cid || null,
+        url: c.clientUrl || null,
+        isMainFrame: !!c.isMainFrame,
+        readyState: (c.readyState != null) ? c.readyState : null,
+      };
+    }
+    let selectedMainFrame = null;
+    if (this.selectedTabId != null) {
+      const c = this.contentByTab.get(Number(this.selectedTabId));
+      if (c) selectedMainFrame = describe(c);
+    }
+    const off = this.offscreenClient;
+    const mf = this.mainFrameClient;
+
+    const inFlight = [];
+    for (const [id, p] of this.pending) {
+      if (!p) continue;
+      inFlight.push({
+        id,
+        op: p.type || '?',
+        ageMs: p.startedAt ? (now - p.startedAt) : null,
+        startedAt: p.startedAt || null,
+        clientId: (p.client && p.client.cid) || null,
+        clientType: (p.client && p.client.clientSource) || null,
+      });
+    }
+
+    const uptimeMs = now - (this.startedAt || now);
+    return {
+      status: 'ok',
+      timestamp: now,
+      isoTime: new Date(now).toISOString(),
+      hub: {
+        port: (typeof this.port === 'number') ? this.port : null,
+        uptimeMs,
+        uptimeSec: Math.floor(uptimeMs / 1000),
+        uptime: formatUptime(uptimeMs),
+        startedAt: this.startedAt || null,
+      },
+      clientsRegistered: clients.length,
+      connected: clients.length > 0,
+      clients,
+      // e.g. { "2072383081": { id: "c10", url: "...", isMainFrame: true, readyState: 1 } }
+      contentByTab,
+      contentTabs: this.contentByTab.size,
+      selectedTabId: (this.selectedTabId != null) ? Number(this.selectedTabId) : null,
+      selectedMainFrameClient: selectedMainFrame,
+      offscreenClient: off ? describe(off) : null,
+      mainFrameClient: mf ? describe(mf) : null,
+      inFlightCount: inFlight.length,
+      inFlight,
+      eventRingSize: Array.isArray(this.eventRing) ? this.eventRing.length : 0,
+      eventSeq: this.eventSeq,
+      requestSeq: this.requestId,
+      clientSeq: this.clientSeq,
     };
   }
 
@@ -440,6 +605,8 @@ export class HubServer {
         this._storePending(id, {
           client: targetClient,
           resolve, reject,
+          type: (cmd && cmd.type) || '?', // /health census: op name
+          startedAt: Date.now(),          // /health census: in-flight age
           timer: setTimeout(() => {
             this._settlePending(id, this._timeoutDiag(cmd, targetClient, timeout));
           }, timeout),
@@ -506,7 +673,12 @@ export class HubServer {
   // No browser tab or launcher page is needed.
 
   healthCheck() {
-    const c = this.activeClient();
+    // Explicit cmd object: calling this with NO argument is the shape that threw
+    // `Cannot read properties of undefined (reading 'tabId')` on the 30s interval
+    // (see the TABID-CRASH note in activeClient). Routing is identical either way —
+    // 'health_ping' is neither a tab op nor in SW_REQUIRED_OPS — but passing it
+    // documents the intent and keeps the no-arg shape out of the codebase.
+    const c = this.activeClient({ type: 'health_ping' });
     if (c) {
       try { c.send(JSON.stringify({ type: 'ping', id: 'health' })); }
       catch (_) { this.lastClient = null; }

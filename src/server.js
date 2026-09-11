@@ -90,7 +90,17 @@ function classifyEffect(result) {
 function safeHandler(fn) {
   return async (args) => {
     try { return await fn(args); }
-    catch (err) { return textResult({ success: false, error: err.message }); }
+    catch (err) {
+      const out = { success: false, error: err && err.message };
+      // Fold back the structured failure detail the hub preserved (2026-09-11c),
+      // so a failure keeps the hop / reason / hint / tabId it was diagnosed with
+      // instead of collapsing to a single opaque string. Additive: existing
+      // consumers still read `error`.
+      if (err && err.detail && typeof err.detail === 'object') {
+        for (const k of Object.keys(err.detail)) { if (!(k in out)) out[k] = err.detail[k]; }
+      }
+      return textResult(out);
+    }
   };
 }
 // ═══ PER-SESSION TAB BINDING (Ali directive 2026-08-12 — concurrency fix) ═══
@@ -118,7 +128,7 @@ function withSessionTab(cmd) {
       'list_frames','download_state','tab_contents','bind_tab','transfer_text',
       'switch_tab_and_read','list_windows','focus_window','move_tab_to_window',
       'ax_state','ax_read','ax_click','ax_type',
-      'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen','extension_reload']);
+      'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen','extension_reload','main_world_exec']);
     // NOTE: 'navigate' was REMOVED from TAB_OPS (2026-08-13, Ali directive —
     // session isolation). Each session's navigate is stamped with ITS OWN
     // bound tabId so a worker's navigate never steals another session's tab.
@@ -290,9 +300,9 @@ function registerAllTools(server) {
 
   // ═══ 1. GUIDE ═══
   reg(server, 'websense_guide', {
-    description: 'START HERE. Full usage guide for the 21 consolidated WebSense tools: explore, read, click, type, form, scroll, tabs, wait, evaluate, ax, status. Call once before using other tools.',
+    description: 'START HERE. Full usage guide for the 29 consolidated WebSense tools: explore, read, click, type, form, scroll, tabs, wait, evaluate, main_world, ax, real input, status. Call once before using other tools.',
   }, async () => {
-    return textResult(`WebSense MCP — Guide (21 consolidated tools)
+    return textResult(`WebSense MCP — Guide (29 consolidated tools)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
@@ -1066,6 +1076,28 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     catch (e) { return { success: false, error: 'parse failed: ' + out.slice(0, 300) }; }
   }
 
+  // ═══ 21b. MAIN-WORLD INSIDER TOOLKIT (v4.5 — 2026-09-01, Ali directive) ═══
+  // The F12-equivalent: run a COMPILED function inside the page's own JS
+  // universe (world:'MAIN') where React fibers / Lexical instances / Lit
+  // internals are reachable. The page sees page-context code — isTrusted is
+  // irrelevant because we call the app's OWN API (editor.update(), native
+  // setters on real instances). 100% background, CSP-immune (no eval — the
+  // function is serialized by Chrome itself), no CDP, no webdriver surface.
+  // Ladder position: BEFORE real-input (this removes most foreground need).
+  reg(server, 'main_world', {
+    description: 'Run a COMPILED function in the page MAIN world (F12-insider path). Reads/writes framework state isolated-world code cannot see: React fiber props/state, Lexical editor instances (window.__lexicalEditor etc), Lit custom-element internals, window globals. func: a function expression string e.g. "(el) => el.textContent" — args are JSON-serializable, first arg may be a selector string to resolve to an element. 100% background, CSP-immune, no CDP. Use when synthetic type/click is ignored AND you need state-truth beyond the DOM (e.g. call editor.update() on a Lexical instance, read component state, click through framework APIs).',
+    inputSchema: {
+      func: z.string().describe('Function expression string, e.g. "() => window.location.href" or "(el, txt) => { el.textContent = txt; el.dispatchEvent(new Event(\'input\', {bubbles:true})); return el.textContent; }"'),
+      args: z.array(z.any()).optional().describe('JSON-serializable args. If args[0] is a string, it is treated as a CSS selector and resolved to the element before your function runs.'),
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
+      allFrames: z.boolean().optional().describe('Run in all frames (default main frame only)'),
+    },
+  }, async (o) => {
+    const tabId = o.tabId || sessionTabOf();
+    if (!tabId) return textResult({ success: false, error: 'no tab bound — bind/navigate first or pass tabId' });
+    return textResult(await getActiveHub().send({ type: 'main_world_exec', tabId, func: o.func, args: o.args || [], allFrames: !!o.allFrames }));
+  });
+
   reg(server, 'real_activate_tab', {
     description: 'REAL OS click on a Chrome tab pill via UIA (pywinauto click_input) — activates the tab so its content script injects (cold-background-tab fix) and gates on the window title. match: substring of the tab title; gate: expected title after activation (default match). Use when navigate(newTab:true) leaves the tab backgrounded and content-script ops hang.',
     inputSchema: {
@@ -1120,10 +1152,25 @@ async function main() {
         return;
       }
 
-      // Health check
-      if (req.url === '/health') {
+      // Health check — REAL client census (2026-09-11): who is connected, which
+      // content-script client owns which tab, what is in flight, hub uptime.
+      // STRICTLY READ-ONLY (census() never mutates hub state). The legacy
+      // fields (status/hubConnected/extensionConnected) are kept for existing
+      // consumers; everything else is the census.
+      if (req.url === '/health' || (req.url || '').startsWith('/health?')) {
+        let census = {};
+        try {
+          census = (typeof hubChrome.census === 'function') ? hubChrome.census() : {};
+        } catch (err) {
+          census = { status: 'census_failed', error: String((err && err.message) || err) };
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', hubConnected: getActiveHub().connected, extensionConnected: getActiveHub().connected }));
+        res.end(JSON.stringify({
+          status: 'ok',
+          hubConnected: hubChrome.connected,
+          extensionConnected: hubChrome.connected,
+          ...census,
+        }, null, 2));
         return;
       }
 

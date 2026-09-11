@@ -3,6 +3,162 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.0] — 2026-09-11
+
+Closes out the "remaining issues" list from the 1.3.x audit. Every claim below was
+verified against the RUNNING extension and hub, not just the source.
+
+### Added
+
+- **`GET /health` on the hub is now a REAL client census** (it was a stub one-liner).
+  Returns: hub uptime; every registered client with id / type
+  (offscreen | content-script) / isMainFrame / url / tabId / readyState / connectedAt;
+  the `contentByTab` registry; which client each tab routes to; the currently selected
+  main-frame client; and every in-flight request with its op and age. Strictly
+  read-only — it never sends on a socket and never mutates a map. Sample:
+
+  ```json
+  { "status": "ok", "hub": { "uptime": "00m 15s" }, "clientsRegistered": 2,
+    "clients": [ { "id": "c1", "type": "offscreen", "readyStateName": "OPEN" },
+                 { "id": "c2", "type": "content-script", "isMainFrame": true,
+                   "tabId": 328024153, "connectedForMs": 13052 } ],
+    "contentTabs": 1, "selectedTabId": 328024153, "inFlightCount": 0 }
+  ```
+
+- **Failure payloads keep their structured detail.** See "Fixed" — this one change
+  improves the diagnosis of EVERY failing tool call in the project.
+
+- **`status` on every tab in the tab list** — attribution for "why hasn't the content
+  script registered yet".
+
+- **Modular content-script sources** — `extension/websense-cs.js` (3,767 lines) is now
+  built from nine files under `extension/cs-src/`, in filename order:
+
+  ```
+  00-bridge-and-transport.js   453 lines   bridge, wsLog, connect/backoff, dispatch
+  10-refs-and-locators.js      177         ref assignment, locators, self-healing
+  20-dom-semantics.js          442         visibility, interactivity, classify, intent
+  30-content-and-geometry.js   416         markdown dump, scroll+extract, geometry
+  40-site-quirks-and-sections.js 111       per-site quirks, sections, page type
+  50-candidates.js             710         candidate collection + shadow DOM
+  60-native-actions.js         937         SAG build + every native* action primitive
+  70-capture-and-readers.js    363         network/console capture, readers, state
+  80-op-dispatch-and-boot.js   147         the op dispatcher, diff/event observers
+  ```
+
+  `node tools/build-cs.mjs` regenerates the shipped file; `node tools/build-cs.mjs --check`
+  fails if the two are out of sync, and the test suite asserts they match — so a
+  hand-edit of the built file fails loudly instead of being silently reverted.
+
+  **Why a build step and not several manifest `js:` entries:** each content-script
+  file is parsed independently, so splitting the runtime across files would stop
+  function declarations being hoisted ACROSS files, and any top-level statement calling
+  a function declared in a later file would break at load. The shipped artifact stays a
+  single IIFE. A test asserts the manifest still lists exactly one file.
+
+- **`tools/reload-extension.py`** — reloads the extension in the background with no
+  human click. See "Fixed" for the three bugs that made this necessary.
+
+- **`bench/curve_now.py`, `bench/probe_sweep.py`, `bench/gen_heavycss.py`,
+  `bench/verify_140.py`** — the benchmark/verification harnesses behind the numbers in
+  `bench/BENCH_REPORT.md`.
+
+### Fixed
+
+- **Structured failure detail was destroyed at the hub boundary — for every tool.**
+  `hub._settlePending()` rejected a failed op with a bare
+  `new Error(msg.data.error)`, discarding every other field; `server.safeHandler()` then
+  returned only `{success:false, error}`. So a failure that carefully named its hop,
+  reason, hint and tabId arrived at the caller as one anonymous string. That is the same
+  attribution loss the hop-naming timeout work set out to fix, reintroduced one layer up.
+  A failing call now returns the whole payload:
+
+  ```json
+  { "success": false, "error": "content-script-not-ready", "tabId": 328024472,
+    "url": "https://chromewebstore.google.com/", "status": "complete",
+    "reason": "restricted-url", "hop": "bg->chrome.tabs",
+    "hint": "Content scripts never run on … Navigate to an http(s) page first." }
+  ```
+
+  Additive — existing consumers still read `error`.
+
+- **`real_input.py activate-tab` could never activate the tab it was asked for.**
+  It required the `--gate` string to already be in the Chrome window title in order to
+  FIND the window — circular, because the gate only matches AFTER activation. So
+  `activate-tab --match popup.html --gate popup.html` always failed with
+  "Chrome window not found" while the tab sat there backgrounded. It now prefers a window
+  already satisfying the gate, falls back to any Chrome window, activates, then verifies
+  (as its own docstring always said).
+
+- **`chrome.tabs.sendMessage` rejections no longer escape as unhandled promises** in the
+  service worker. A rejection is recognised (`isNoReceivingEnd`) and converted into a
+  structured, hop-naming object (`sendMsgError`); every call site is now awaited inside
+  try/catch or has `.catch()`.
+
+- **Fast-fail pre-flight for page ops.** One `chrome.tabs.get` (no injection, no poll)
+  rejects a page op in ~1ms with a named hop when the target tab is gone or on a URL
+  where a content script can never run — instead of hanging for the hub's 30s (90s for
+  heavy ops) timeout. Deliberately uses `tabs.get`, not `tabs.query`, which has been
+  observed to throw "Extension context invalidated" after a service-worker context loss.
+
+  **Deliberately does NOT hard-fail on `tab.status !== 'complete'`.** A tab reports
+  `loading` until its load event, and a page with long-polling/streaming/never-finishing
+  subresources can sit at `loading` indefinitely while its content script is perfectly
+  usable. Blocking there would turn working ops into failures, so the load state is
+  carried as a warning and surfaced only if the sendMessage actually fails.
+
+- **`healthCheck()` no longer calls `activeClient()` with no argument**, and
+  `activeClient()` normalises `cmd` so a no-arg call can never throw
+  `Cannot read properties of undefined (reading 'tabId')` again. Evidence: `hub.log`
+  contains 4,981 occurrences of exactly that error and it is the log's last line;
+  4,981 × the 30s health interval ≈ 41.5 hours, consistent with a ping that threw on
+  every tick and was swallowed by `process.on('uncaughtException')`. Which revision
+  carried the unguarded read is NOT verified — the immediately preceding revision already
+  guarded it, so this is hardening against a regression.
+
+- **Content script: one full-DOM query instead of two.** `_collectSelectorHits()` did a
+  `querySelectorAll('*')` walk for shadow-host discovery, and the caller then did the same
+  walk again just to count elements. The document-level walk now happens once and is
+  reused for both; shadow subtrees keep their own recursion (`_collectShadowHits`) so
+  nested shadow roots still work.
+
+- **Content script: explore cost is now attributed.** `scanMs` alone conflated candidate
+  collection, geometry and per-action semantic work, and only the last of those scales
+  with `maxActions` — which made the earlier profiling misleading. Now reported separately
+  as `candidatesMs` / `geometryMs` / `actionMs` alongside the total.
+
+### Measured
+
+Live, over the MCP transport (no LLM overhead), against the running extension:
+
+| page | elements | before | after |
+|---|---|---|---|
+| Wikipedia *World War II* | 13,187 | **TIMEOUT, 4/4 runs @ 90s** | **0.084–0.107s**, 87–108 actions |
+| x.com search | 2,374 | 23.3s, 1,006,657 B | **0.023s**, 75,024 B |
+| example.com | ~30 | 0.653s | 0.017s |
+
+Wikipedia cost split: `candidates 9ms / geometry 18ms / action 23ms = scan 50ms`, with
+~57ms of transport — 5,402 candidates examined, 108 returned.
+
+**IntersectionObserver geometry batching was evaluated and REJECTED.** The measurement
+says the remaining cost is the per-accepted-action semantic work (~0.65ms each), not
+geometry (~0.02ms/element): on a page with 3,000 in-viewport links, `maxActions=50`
+costs 78ms and `maxActions=1000` costs 824ms, while the geometry pass is a small
+fraction. An async IO rewrite would add real complexity for a gain that does not
+materialise. This is recorded so it is not re-attempted on a hunch.
+
+### Notes
+
+- Docs corrected: the runtime exposes **29 tools** (was documented as 21, and elsewhere
+  as 43/61). `websense_doctor` is **not** a tool — it is `status kind:"doctor"`;
+  `evaluate_safe` is **not** a tool — it is `evaluate {query:{…}}`. Eight tools
+  (`console_log`, `cookies`, `main_world`, `real_activate_tab`, `real_click`,
+  `real_paste`, `respawn_offscreen`, `extension_reload`) were undocumented.
+- MV3 service workers re-read their script from disk on restart, so **service-worker
+  changes go live without an extension reload** — content-script changes do not. Worth
+  knowing when testing.
+- Tests: **79** (was 42 at the start of the day), 0 failing.
+
 ## [1.3.1] — 2026-09-11
 
 ### Fixed

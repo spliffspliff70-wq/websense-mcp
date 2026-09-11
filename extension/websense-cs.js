@@ -6,6 +6,13 @@
 (function () {
   'use strict';
 
+/* Bridge + transport: page events, wsLog, WS connect/backoff, dispatch
+ * Part 00 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
+
   // ═══ Native dialog capture (alert / confirm / prompt) ═══
   // These become JS-controlled so the model can see + resolve them
   // without the page blocking on a native OS dialog.
@@ -458,6 +465,12 @@
   wsConnect();
 
   // ═══ Ref System ═══
+/* Ref/locator system: assign, resolve, heal, locator build
+ * Part 01 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
   const REF_ATTR = 'data-websense-ref';
   let refMap = new Map();
   const elementSignatures = new WeakMap();
@@ -635,6 +648,12 @@
   }
 
   // ═══ Framework Detection ═══
+/* Framework detect, visibility, interactivity, labels, classify, intent
+ * Part 02 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
   let _framework = null;
   function detectFramework() {
     if (_framework) return _framework;
@@ -1077,6 +1096,12 @@
   // ── dump_markdown (borrowed from Lightpanda's --dump markdown, 2026-08-10) ──
   // Convert a page (or a selector's subtree) to clean Markdown. CSP-safe: pure
   // DOM walk, no eval. Reuses readContent's container detection for the default.
+/* Markdown dump, scroll+extract, geometry, preload, eager
+ * Part 03 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
   function nativeDumpMarkdown(params) {
     var maxLen = (params && params.maxLen) || 20000;
     var selector = params && params.selector;
@@ -1493,6 +1518,12 @@
   // ═══ Site-quirks registry (borrowed from agentreach driver-per-platform) ═══
   // Per-site tuning without code changes: content selectors, scroll behavior,
   // label priorities. Matching is by hostname regex.
+/* Per-site quirks, section/heading/bodyText/pageType extraction
+ * Part 04 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
   var WS_SITE_QUIRKS = [
     { host: /(^|\.)x\.com$/, quirks: { name: 'x.com', scrollMode: 'auto', contentSelectors: ['[data-testid="tweetText"]', '[data-testid="cellInnerDiv"]', 'article'] } },
     { host: /(^|\.)twitter\.com$/, quirks: { name: 'twitter', scrollMode: 'auto', contentSelectors: ['[data-testid="tweetText"]', '[data-testid="cellInnerDiv"]', 'article'] } },
@@ -1604,6 +1635,12 @@
   // Fixes here: (1) narrow the candidate set with a selector instead of walking
   // every node; (2) one native checkVisibility() call instead of getComputedStyle;
   // (3) read each rect exactly once and pass it forward.
+/* Interactive candidate collection (selector prefilter + shadow)
+ * Part 05 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
   const INTERACTIVE_SELECTOR = [
     'a[href]', 'button', 'input', 'select', 'textarea', 'details', 'summary',
     'label', 'option', 'optgroup',
@@ -1641,6 +1678,11 @@
     } catch (_) { _domObserver = null; }
   }
 
+  // Selector hits only — no full-subtree walk.
+  // 2026-09-11: the document-level `*` walk used to live IN here, so it ran twice
+  // per call (once for shadow-host discovery, once again just to count elements) —
+  // two full-DOM queries on every explore. The document-level walk now happens
+  // once in collectInteractiveCandidates and is reused for both purposes.
   function _collectSelectorHits(root, out, seen) {
     try {
       const hits = root.querySelectorAll(INTERACTIVE_SELECTOR);
@@ -1648,10 +1690,15 @@
         if (!seen.has(hits[i])) { seen.add(hits[i]); out.push(hits[i]); }
       }
     } catch (_) {}
+  }
+
+  // Shadow subtrees still need their own walk to find NESTED shadow hosts.
+  function _collectShadowHits(root, out, seen) {
+    _collectSelectorHits(root, out, seen);
     try {
       const all = root.querySelectorAll('*');
       for (let j = 0; j < all.length; j++) {
-        if (all[j].shadowRoot) _collectSelectorHits(all[j].shadowRoot, out, seen);
+        if (all[j] && all[j].shadowRoot) _collectShadowHits(all[j].shadowRoot, out, seen);
       }
     } catch (_) {}
   }
@@ -1660,10 +1707,17 @@
     options = options || {};
     const out = [];
     const seen = new Set();
-    _collectSelectorHits(document, out, seen);
-    const selectorHits = out.length;
+    // ONE full-DOM query, reused for the element count AND shadow-host discovery.
+    let all = null;
     let totalElements = 0;
-    try { totalElements = document.querySelectorAll('*').length; } catch (_) {}
+    try { all = document.querySelectorAll('*'); totalElements = all.length; } catch (_) { all = null; }
+    _collectSelectorHits(document, out, seen);
+    if (all) {
+      for (let i = 0; i < all.length; i++) {
+        if (all[i] && all[i].shadowRoot) _collectShadowHits(all[i].shadowRoot, out, seen);
+      }
+    }
+    const selectorHits = out.length;
 
     let cursorSweepSkipped = false;
     let cursorScanned = 0;
@@ -1846,6 +1900,7 @@
 
     // ── 2. Candidates: selector prefilter instead of walking every node ─────
     const cand = collectInteractiveCandidates(options);
+    const tCand = Date.now();
     wsLog('EAG:candidates=' + cand.nodes.length + ' selectorHits=' + cand.selectorHits +
           ' totalEls=' + cand.totalElements +
           (cand.cursorSweepSkipped ? ' CURSOR_SWEEP_SKIPPED' : ''));
@@ -1892,6 +1947,13 @@
     // finally bounds real work. DEFAULT_MAX_ACTIONS also means the *default* call
     // is bounded — it used to be 0 (unbounded), which is why explore_page's
     // default hard-stalled at 90s on any page over ~5,000 elements.
+    //
+    // Measured 2026-09-11: this loop costs ~0.65ms per accepted action and is the
+    // dominant term once a page has many in-viewport interactives (3,000 links:
+    // 190ms wall, ~130ms of it here). Geometry is cheap by comparison
+    // (~0.02ms/element) — which is why an IntersectionObserver rewrite was
+    // measured and REJECTED as not worth the async complexity.
+    const tGeo = Date.now();
     const maxActions = options.maxActions > 0 ? options.maxActions : DEFAULT_MAX_ACTIONS;
     const actions = [];
     for (let i = 0; i < geo.length; i++) {
@@ -1924,6 +1986,7 @@
       } catch (_) { /* skip broken element */ }
     }
     wsLog('EAG:loop done, ' + actions.length + ' actions (geo=' + geo.length + ')');
+    const tAct = Date.now();
 
     const truncated = geo.length > actions.length;
 
@@ -1944,8 +2007,15 @@
     sag.totalElements = cand.totalElements;
     if (cand.cursorSweepSkipped) sag.cursorSweepSkipped = true;
     if (cand.capped) sag.candidateCeilingHit = true;
-    sag.scanMs = Date.now() - scanStart;
-    wsLog('EAG:scanMs=' + sag.scanMs + ' returned=' + actions.length + ' geo=' + geo.length);
+    sag.scanMs = tAct - scanStart;
+    // Split attribution (2026-09-11). `scanMs` alone was misleading: it conflated
+    // candidate collection, geometry and the per-action semantic work, and only the
+    // last of those scales with maxActions. Reported separately so a slow call can
+    // be attributed without guessing.
+    sag.candidatesMs = tCand - scanStart;
+    sag.geometryMs = tGeo - tCand;
+    sag.actionMs = tAct - tGeo;
+    wsLog('EAG:scanMs=' + sag.scanMs + ' (cand=' + sag.candidatesMs + ' geo=' + sag.geometryMs + ' act=' + sag.actionMs + ') returned=' + actions.length + ' geo=' + geo.length);
 
     if (cheapShape && !options.fresh) {
       _sagCache = { key: cacheKey, domVersion: _domVersion, ts: Date.now(), sag: sag };
@@ -2281,6 +2351,12 @@
   }
 
   // Build the full SAG result from collected actions + page metadata
+/* SAG build, native value setters, and every native* action primitive
+ * Part 06 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
   function _buildSAG(actions, options) {
     wsLog('EAG:buildSAG actions=' + actions.length);
     try {
@@ -3218,6 +3294,12 @@
   }
 
   // ═══ Network Request Capture ═══
+/* Network/console capture, dropdown/accordion/tab readers, page state
+ * Part 07 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
   var networkLog = [];
   var networkCapturing = false;
   function startNetworkCapture() {
@@ -3455,7 +3537,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.5.0',csBuild:'v4.5.0-bounded-scan',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.0-cost-attribution',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;
@@ -3581,6 +3663,12 @@ function handleReadClipboard() {
   chrome.runtime.onMessage.addListener(handleMessage);
 
   // Re-extract on SPA navigation
+/* handleMessage op dispatcher, diff/event observers, boot
+ * Part 08 of 9 — source of truth for extension/websense-cs.js.
+ * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.
+ * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
+ * VERBATIM from the pre-split file; only this banner is added.
+ */
   let lastUrl = window.location.href;
   const navObserver = new MutationObserver(() => {
     if (window.location.href !== lastUrl) { lastUrl = window.location.href; refMap = new Map(); refCounter = 0; locatorByRef.clear(); }
@@ -3729,5 +3817,3 @@ function handleReadClipboard() {
 
   window.__WEBSENSE_LOADED__ = true;
 })();
-
-

@@ -100,14 +100,22 @@ def _doc_origin(chrome):
     return (r.left, r.top + 121)
 
 def cmd_activate_tab(args):
-    """Activate a Chrome tab by matching its title substring; gate after."""
+    """Activate a Chrome tab by matching its title substring; gate after.
+
+    FINDING vs GATING (fixed 2026-09-11): this used to require `gate` to already be
+    in the window title in order to FIND the window — which is circular, because the
+    gate only matches AFTER the tab is activated. That made the tool unable to
+    activate the very tab it was asked for: e.g.
+    `activate-tab --match popup.html --gate popup.html` always failed with
+    "Chrome window not found (gate: popup.html)" while the tab was sitting there
+    backgrounded. Now: prefer a window that already satisfies the gate, else fall
+    back to any Chrome window, then activate, then VERIFY the gate (as documented).
+    """
     from pywinauto import Desktop
-    chrome = None
-    for w in Desktop(backend='uia').windows():
-        t = w.window_text()
-        if t.endswith('Google Chrome') and (not args.gate or args.gate in t):
-            chrome = w
-            break
+    windows = [w for w in Desktop(backend='uia').windows()
+               if w.window_text().endswith('Google Chrome')]
+    gated = [w for w in windows if args.gate and args.gate in w.window_text()]
+    chrome = (gated or windows or [None])[0]
     if not chrome:
         return {"success": False, "error": f"Chrome window not found (gate: {args.gate})"}
     tabs = chrome.descendants(control_type="TabItem")
