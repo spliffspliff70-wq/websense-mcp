@@ -3,6 +3,110 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.3.0] — 2026-09-11
+
+### Why this release exists
+
+A live benchmark of the MCP transport (no LLM overhead) found the DOM work
+itself was fine but the **defaults routed every call into an unbounded scan**,
+and that the extension could not reload itself. Measured before this release:
+
+| page | explore_page default | payload |
+|---|---|---|
+| example.com (~30 els) | 0.65s | 2 KB |
+| x.com search | 14.6–23.3s (max 90s) | **1,006,657 B** (~275k tokens) |
+| Wikipedia WWII | **TIMEOUT 90s, 4/4 runs** | error |
+
+Scaling law: 556 els = 0.44s · 2,206 els = **11.0s** · 5,506 els = **90s timeout**
+· 11,006 els = **90s timeout**. That is ~5 ms per element — the signature of
+forced synchronous layout, not of a slow relay.
+
+### Fixed — the defaults were the bug
+
+- **`maxActions` never bounded WORK, only output.** The loop broke when it had
+  *accepted* N actions, so on a page with few in-viewport interactives it never
+  broke and walked the entire DOM. **Proven:** on the same 2,206-element page,
+  `maxActions=5` and `maxActions=200` both cost **11.0s** — a 40× change in the
+  cap produced 0% change in time.
+- **The default call had NO cap at all.** `explore_page` passed no `maxActions`,
+  so the code fell to `options.maxActions || 0` = unbounded. `DEFAULT_MAX_ACTIONS`
+  is now 200 and the legacy sync path is bounded too. `maxActions:0` still means
+  unbounded for anyone who wants the old behaviour.
+- **Two forced-layout reads and one computed-style resolution per element.** The
+  old loop ran `isVisible` (→ `getComputedStyle` + `getBoundingClientRect`) then
+  `isInViewport` (→ `getBoundingClientRect` again) for every element, in document
+  order. Each rect is now read exactly once and passed forward; visibility uses
+  native `checkVisibility()` where available instead of `getComputedStyle`.
+
+### Changed — performance
+
+- **Candidates come from a selector, not a walk of every node.** `getAllElements`
+  pushed *every* element; an `INTERACTIVE_SELECTOR` list (tags, roles, tabindex,
+  contenteditable, aria-haspopup…) plus shadow-root recursion replaces it. The
+  `cursor:pointer` sweep — the single most expensive check — is kept for DOMs
+  under `CURSOR_SWEEP_MAX_ELEMENTS` (1,800) and skipped above, where it cost more
+  than it found; when skipped, the result says `cursorSweepSkipped: true`.
+- **Viewport-first ordering.** Old traversal was document order, so the elements
+  an agent actually needs could sit hundreds of entries down the list. In-viewport
+  elements now sort first, then top-to-bottom.
+- **Hard `SCAN_CEILING`** (8,000 elements examined) bounds the worst case even
+  when nothing else does.
+- **Settle is skipped when the DOM is already quiet.** `waitForSettle` always
+  paid a 400 ms quiet window; it now only waits if a mutation happened within
+  `SETTLE_SKIP_IF_QUIET_MS` (150 ms). `settle:false` skips it entirely.
+- **Unchanged-DOM reuse.** A `MutationObserver` maintains a DOM version; a repeat
+  call with identical options inside `SAG_CACHE_TTL_MS` (1.5 s) returns the
+  previous map with `cached: true`. Our own `data-websense-ref` writes are
+  excluded from the filter so bookkeeping never invalidates the cache.
+  `fresh: true` forces a real scan.
+- **Content is trimmed on big pages** (`CONTENT_MAX_CHARS`, 6,000) — the other
+  half of the 1 MB payload problem.
+
+### Fixed — the extension could not reload itself
+
+- **`extension_reload` had no handler in the offscreen document.** Only the
+  service worker had one, but the hub routes an op to whichever client is live —
+  and on strict-CSP sites the direct content-script bridge is dead, so the
+  *offscreen* is the client that receives it. The message fell through the switch
+  and nothing happened, while the tool still reported `reloadSent: true` — a flag
+  that only ever meant "the WS send succeeded". All three clients handle it now,
+  and the hub routes it explicitly (preferring the offscreen, which calls
+  `chrome.runtime.reload()` directly and never dies mid-request).
+
+### Fixed — two correctness bugs found along the way
+
+- **`navigate` did not wait for the navigation to commit.** `chrome.tabs.update`
+  resolves when navigation *starts*, so a read issued immediately after returned
+  the **old page** — which reads as a flaky tool and provokes retries. `navigate`
+  now waits for the tab to reach `complete` on the requested URL (bounded,
+  default 10 s) and reports `committed` / `committedUrl`, or `timeout: true` when
+  it did not, instead of implying success.
+- **The style cache was never cleared.** A module-level `WeakMap` meant a style
+  read during one call could be reused in a later one after the element changed —
+  an element inside a modal that had since been shown stayed `display:none`
+  forever, so dialog controls never appeared in the map. Now rebuilt per
+  extraction.
+
+### Added
+- `explore_page` exposes `contentMaxLen`, `fresh` and `settle`; `maxActions` is
+  actually forwarded (it used to be dropped on the default path).
+- Results carry `truncated`, `returnedActions`, `viewportCandidates`,
+  `candidatesExamined`, `candidatesFound`, `totalElements`, `scanMs`, and
+  `cached`/`cacheAgeMs` when reuse occurred.
+- Regression tests: **49 → 60**. The new ones lock the bounded default, the scan
+  ceiling, selector-based collection, viewport-first order, single-geometry-read,
+  style-cache clearing, settle skipping, versioned reuse, the reload path across
+  all three clients + hub routing, and the navigation-commit wait.
+
+### Notes
+- **`maxActions` is now a real bound.** A caller who wants the old
+  walk-everything behaviour must pass `maxActions: 0` explicitly.
+- **A module split of `websense-cs.js` (3,400+ lines, 130+ op branches) was
+  deliberately NOT done in this release.** Bundling a mechanical refactor of that
+  size with behaviour changes makes a regression unattributable — and there is no
+  build step, so a split has to be done with care around how MV3 content scripts
+  load. It deserves its own commit with the suite green on both sides.
+
 ## [1.2.0] — 2026-09-11
 
 ### Why this release exists

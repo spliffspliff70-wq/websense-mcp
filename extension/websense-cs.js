@@ -165,6 +165,25 @@
   var WS_BACKOFF_MIN_MS = 3000;
   var WS_BACKOFF_MAX_MS = 60000;
 
+  // ═══ Extraction budget (2026-09-11) ═══
+  // Measured baseline before these existed: explore_page's DEFAULT call (no
+  // maxActions) walked the entire DOM, cost ~5ms per element, and hard-stalled
+  // at the 90s hub timeout on pages over ~5,000 elements. 556 els = 0.44s,
+  // 2,206 els = 11s, 11,006 els = TIMEOUT. The three constants below are the
+  // difference between "unbounded walk" and "bounded, useful answer".
+  //
+  // A cap on RETURNED actions (what maxActions always was) is not a cap on WORK:
+  // the old loop only broke once it had ACCEPTED N actions, so on a page with
+  // few in-viewport interactives it never broke and walked everything. PROVEN:
+  // maxActions=5 and maxActions=200 both cost 11.0s on the same 2,206-el page.
+  var DEFAULT_MAX_ACTIONS = 200;   // was: unbounded (0) on the explore_page path
+  var SCAN_CEILING = 8000;         // hard cap on ELEMENTS EXAMINED (bounds worst case)
+  var CURSOR_SWEEP_MAX_ELEMENTS = 1800; // above this, skip the cursor:pointer sweep
+  var AUTO_COMPACT_CANDIDATES = 400;    // auto-trim content extraction above this
+  var CONTENT_MAX_CHARS = 6000;    // default bodyText cap (was 8000, payload-heavy)
+  var SETTLE_SKIP_IF_QUIET_MS = 150;    // skip waitForSettle if DOM has been quiet
+  var SAG_CACHE_TTL_MS = 1500;          // reuse a SAG when DOM is provably unchanged
+
   function wsConnect() {
     if (WS_BRIDGE_UNUSABLE) return;
     if (wsFailStreak >= WS_MAX_FAIL_STREAK) {
@@ -330,8 +349,12 @@
   async function wsDispatchPage(msg) {
     var params = msg;
     switch (msg.type) {
-      case 'explore_page': return await extractActionGraph({ full: !!params.full, includeContent: params.includeContent !== false, includeHidden: !!params.includeHidden, frameId: params.frameId, incremental: !!params.incremental });
-      case 'discover_actions': { const sag = await extractActionGraph({ includeContent: false, full: false, includeHidden: false, maxActions: params.maxActions || 250, frameId: params.frameId }); return sag.actions; }
+      case 'explore_page': return await extractActionGraph({ full: !!params.full, includeContent: params.includeContent !== false, includeHidden: !!params.includeHidden, frameId: params.frameId, incremental: !!params.incremental, maxActions: params.maxActions, contentMaxLen: params.contentMaxLen, settle: params.settle, quietMs: params.quietMs, fresh: params.fresh });
+      // Only reached when the hub routes here (a live direct bridge). Relay to the
+      // SW, which performs chrome.runtime.reload(). Fire-and-forget on purpose:
+      // the SW dies mid-call, so awaiting its response would hang. 2026-09-11.
+      case 'extension_reload': { try { chrome.runtime.sendMessage({ type: 'extension_reload' }); } catch (_) {} return { success: true, message: 'reload relayed to the service worker' }; }
+      case 'discover_actions': { const sag = await extractActionGraph({ includeContent: false, full: false, includeHidden: false, maxActions: params.maxActions || DEFAULT_MAX_ACTIONS, frameId: params.frameId }); return sag.actions; }
       case 'click': { var b = getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); return { success: true, ref: params.ref, ...(cr && typeof cr === 'object' ? cr : {}), beforeState: b, afterState: getQuickState() }; }
       case 'type_text': { var r = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); r.ref = params.ref; return r; }
       case 'select_option': { var s = nativeSelect(await resolveRefHealed(params.ref), params.value, params.clearAll); s.ref = params.ref; return s; }
@@ -657,9 +680,14 @@
   const INTERACTIVE_ROLES = new Set(['button','link','menuitem','menuitemradio','menuitemcheckbox','radio','checkbox','tab','switch','option','combobox','searchbox','textbox','slider','spinbutton','treeitem']);
   const INTERACTIVE_CURSORS = new Set(['pointer','move','text','grab','grabbing','cell','copy','alias','context-menu','crosshair','zoom-in','zoom-out']);
 
-  function isInteractive(el) {
+  function isInteractive(el, pre) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
-    if (!isVisible(el)) return false;
+    // `pre` may carry visibility already computed by the caller's single geometry
+    // pass (2026-09-11). Without it we would force layout again here — the old
+    // code read getBoundingClientRect twice per element (once in isVisible, once
+    // in isInViewport) which is a large part of the ~5ms/element cost.
+    if (pre && pre.vis !== undefined) { if (!pre.vis) return false; }
+    else if (!isVisible(el)) return false;
     const tag = el.tagName.toLowerCase();
     if (el.disabled) return false;
     if (el.getAttribute('aria-disabled') === 'true') return false;
@@ -1565,6 +1593,134 @@
   }
 
   // ═══ Shadow DOM + Iframe Traversal ═══
+  // ═══ Candidate collection + DOM versioning (2026-09-11) ═══
+  // The old path called getAllElements(document.body) — pushing EVERY element
+  // node — then per element ran isInteractive (→ isVisible → getComputedStyle +
+  // getBoundingClientRect) and isInViewport (→ getBoundingClientRect AGAIN).
+  // Two forced-layout reads and one full computed-style resolution per element
+  // in DOCUMENT ORDER. Measured ~5ms/element, so 2,206 elements ≈ 11s and
+  // >5,000 elements blew the 90s budget.
+  //
+  // Fixes here: (1) narrow the candidate set with a selector instead of walking
+  // every node; (2) one native checkVisibility() call instead of getComputedStyle;
+  // (3) read each rect exactly once and pass it forward.
+  const INTERACTIVE_SELECTOR = [
+    'a[href]', 'button', 'input', 'select', 'textarea', 'details', 'summary',
+    'label', 'option', 'optgroup',
+    '[role="button"]', '[role="link"]', '[role="menuitem"]', '[role="menuitemradio"]',
+    '[role="menuitemcheckbox"]', '[role="radio"]', '[role="checkbox"]', '[role="tab"]',
+    '[role="switch"]', '[role="option"]', '[role="combobox"]', '[role="searchbox"]',
+    '[role="textbox"]', '[role="slider"]', '[role="spinbutton"]', '[role="treeitem"]',
+    '[contenteditable=""]', '[contenteditable="true"]', '[tabindex]', '[onclick]',
+    '[aria-haspopup]', '[data-toggle]', '[data-bs-toggle]', '.dropdown-toggle'
+  ].join(',');
+
+  var _domVersion = 0;
+  var _lastMutationTs = Date.now();
+  var _domObserver = null;
+  var _sagCache = null;
+
+  // One always-on observer per tab. Counting mutations is what lets us (a) skip
+  // the settle wait on a quiet DOM and (b) reuse a previous SAG when nothing
+  // changed — both otherwise-free savings on every call.
+  // attributeFilter deliberately EXCLUDES data-websense-ref: assignRef() writes
+  // that attribute on every element it touches, and watching it would make our
+  // own bookkeeping look like a page mutation and defeat the cache.
+  function ensureDomObserver() {
+    if (_domObserver) return;
+    try {
+      _domObserver = new MutationObserver(function () {
+        _domVersion++;
+        _lastMutationTs = Date.now();
+      });
+      _domObserver.observe(document.documentElement || document.body, {
+        childList: true, subtree: true, attributes: true,
+        attributeFilter: ['class', 'disabled', 'hidden', 'style',
+                          'aria-expanded', 'aria-hidden', 'aria-disabled']
+      });
+    } catch (_) { _domObserver = null; }
+  }
+
+  function _collectSelectorHits(root, out, seen) {
+    try {
+      const hits = root.querySelectorAll(INTERACTIVE_SELECTOR);
+      for (let i = 0; i < hits.length; i++) {
+        if (!seen.has(hits[i])) { seen.add(hits[i]); out.push(hits[i]); }
+      }
+    } catch (_) {}
+    try {
+      const all = root.querySelectorAll('*');
+      for (let j = 0; j < all.length; j++) {
+        if (all[j].shadowRoot) _collectSelectorHits(all[j].shadowRoot, out, seen);
+      }
+    } catch (_) {}
+  }
+
+  function collectInteractiveCandidates(options) {
+    options = options || {};
+    const out = [];
+    const seen = new Set();
+    _collectSelectorHits(document, out, seen);
+    const selectorHits = out.length;
+    let totalElements = 0;
+    try { totalElements = document.querySelectorAll('*').length; } catch (_) {}
+
+    let cursorSweepSkipped = false;
+    let cursorScanned = 0;
+    if (options.includeCursorSweep !== false) {
+      if (totalElements > CURSOR_SWEEP_MAX_ELEMENTS) {
+        // getComputedStyle per element is the single most expensive thing in the
+        // old loop. Above this size the cursor sweep costs more than it finds,
+        // and on such pages the old code simply timed out — so declining it is
+        // strictly better, and the result says so rather than hiding it.
+        cursorSweepSkipped = true;
+      } else {
+        try {
+          const all = document.querySelectorAll('*');
+          for (let i = 0; i < all.length && cursorScanned < SCAN_CEILING; i++) {
+            const el = all[i];
+            cursorScanned++;
+            if (seen.has(el)) continue;
+            let cur = '';
+            try { cur = cachedStyle(el).cursor || ''; } catch (_) { cur = ''; }
+            if (cur && INTERACTIVE_CURSORS.has(cur)) { seen.add(el); out.push(el); }
+          }
+        } catch (_) {}
+      }
+    }
+
+    let capped = false;
+    if (out.length > SCAN_CEILING) { out.length = SCAN_CEILING; capped = true; }
+    return {
+      nodes: out, totalElements: totalElements, selectorHits: selectorHits,
+      cursorScanned: cursorScanned, cursorSweepSkipped: cursorSweepSkipped, capped: capped,
+    };
+  }
+
+  // Visibility using one native checkVisibility() call when available (Chrome
+  // 105+), falling back to computed style. Takes an already-read rect so we
+  // never call getBoundingClientRect twice for the same element.
+  function _isVisibleRect(el, rect) {
+    try {
+      if (typeof el.checkVisibility === 'function') {
+        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+      } else {
+        const s = cachedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+      }
+    } catch (_) {
+      try {
+        const s2 = cachedStyle(el);
+        if (s2.display === 'none' || s2.visibility === 'hidden' || s2.opacity === '0') return false;
+      } catch (_) {}
+    }
+    if (el.getAttribute('aria-hidden') === 'true') return false;
+    if (el.hidden) return false;
+    const r = rect || el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return false;
+    return true;
+  }
+
   function getAllElements(root) {
     // Phase 4 (2026-08-15): OPTIONAL iframe recursion. With all_frames:true
     // every frame runs its own content script, but the model can't always
@@ -1645,6 +1801,30 @@
     // full-SAG fallback on first call / churn (see exploreIncremental).
     if (options.incremental) return await exploreIncremental(options);
     wsLog('EAG:start opts=', JSON.stringify(options));
+
+    ensureDomObserver();
+
+    // ── 0. Reuse the last SAG when the DOM provably has not changed ──────────
+    // Only for the cheap (viewport-only) shape, identical options, and inside a
+    // short TTL. The TTL is the backstop for the one case the mutation counter
+    // cannot see: a layout change driven by JS/canvas with no DOM mutation.
+    // {fresh:true} forces a real scan.
+    const cheapShape = !options.full && !options.includeHidden;
+    const cacheKey = [!!options.full, options.includeContent !== false,
+                      !!options.includeHidden, options.maxActions || '',
+                      options.contentMaxLen || ''].join('|');
+    if (cheapShape && !options.fresh && _sagCache &&
+        _sagCache.key === cacheKey && _sagCache.domVersion === _domVersion &&
+        (Date.now() - _sagCache.ts) < SAG_CACHE_TTL_MS) {
+      wsLog('EAG:cache HIT age=' + (Date.now() - _sagCache.ts) + 'ms');
+      const hit = Object.assign({}, _sagCache.sag);
+      hit.cached = true;
+      hit.cacheAgeMs = Date.now() - _sagCache.ts;
+      return hit;
+    }
+
+    const scanStart = Date.now();
+
     // REF STABILITY (2026-08-31, OSS smoke-test finding): refCounter is NOT
     // reset here. Resetting it made refs from a previous explore silently
     // re-point at DIFFERENT elements after a re-scan (silent wrong-click
@@ -1652,69 +1832,135 @@
     // are only reset on SPA navigation (navObserver) — within one page they
     // are stable for the tab's lifetime. refMap is still rebuilt (bounded).
     refMap = new Map(); locatorByRef.clear();
-    // On heavy pages, wait briefly for SPA hydration to settle (don't capture
-    // a half-rendered tree). Skips quickly when the DOM is already quiet.
-    await waitForSettle(options.settleMs || 2500, 400);
-    wsLog('EAG:getAllElements...');
-    const allElements = getAllElements(document.body);
-    wsLog('EAG:got ' + allElements.length + ' elements');
+    _styleCacheClear();
 
-    // For small DOMs (< 300 elements) do it synchronously — faster, no round-trips.
-    if (allElements.length < 300) {
-      return _doExtractFromList(allElements, options);
+    // ── 1. Settle — only when the page actually changed recently ────────────
+    // The old code always paid a full 400ms quiet window even on a page that had
+    // been idle for minutes. That is pure added latency on every call.
+    const sinceMutation = Date.now() - _lastMutationTs;
+    if (options.settle !== false && sinceMutation < SETTLE_SKIP_IF_QUIET_MS) {
+      await waitForSettle(options.settleMs || 2500, options.quietMs || 200);
+    }
+    wsLog('EAG:settle skipped=' + (sinceMutation >= SETTLE_SKIP_IF_QUIET_MS) +
+          ' sinceMutation=' + sinceMutation + 'ms');
+
+    // ── 2. Candidates: selector prefilter instead of walking every node ─────
+    const cand = collectInteractiveCandidates(options);
+    wsLog('EAG:candidates=' + cand.nodes.length + ' selectorHits=' + cand.selectorHits +
+          ' totalEls=' + cand.totalElements +
+          (cand.cursorSweepSkipped ? ' CURSOR_SWEEP_SKIPPED' : ''));
+
+    // ── 3. Cheap attribute pass (property reads only — never forces layout) ──
+    const pass1 = [];
+    for (let i = 0; i < cand.nodes.length && pass1.length < SCAN_CEILING; i++) {
+      const el = cand.nodes[i];
+      if (el.disabled) continue;
+      if (el.getAttribute('aria-disabled') === 'true') continue;
+      if (el.getAttribute('inert') !== null) continue;
+      if (el.tagName === 'INPUT' && el.getAttribute('type') === 'hidden') continue;
+      pass1.push(el);
     }
 
-    // For heavy DOMs: chunked processing with yields.
+    // ── 4. ONE geometry + visibility pass; each rect read exactly once ───────
+    const vw = window.innerWidth || document.documentElement.clientWidth;
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    const wantOffscreen = !!options.full || !!options.includeHidden;
+    const geo = [];
+    for (let i = 0; i < pass1.length; i++) {
+      const el = pass1[i];
+      let rect;
+      try { rect = el.getBoundingClientRect(); } catch (_) { continue; }
+      const vis = _isVisibleRect(el, rect);
+      if (options.includeHidden === false && !vis) continue;
+      const inVp = rect.bottom > 0 && rect.top < vh && rect.right > 0 && rect.left < vw;
+      if (!wantOffscreen && !inVp) continue;
+      geo.push({ el: el, rect: rect, vis: vis, inVp: inVp });
+    }
+
+    // ── 5. Viewport-first order ─────────────────────────────────────────────
+    // Old traversal was document order, so on a long page the elements the agent
+    // actually needs (near the viewport, or in an open dialog) could sit hundreds
+    // of entries down the list. In-viewport first, then top-to-bottom.
+    geo.sort(function (a, b) {
+      if (a.inVp !== b.inVp) return a.inVp ? -1 : 1;
+      return a.rect.top - b.rect.top;
+    });
+
+    // ── 6. Enrich ONLY what we will return ──────────────────────────────────
+    // classify/label/locator/intent/predictEffect are the expensive per-element
+    // work, so the cap is applied AFTER geometry + viewport filtering where it
+    // finally bounds real work. DEFAULT_MAX_ACTIONS also means the *default* call
+    // is bounded — it used to be 0 (unbounded), which is why explore_page's
+    // default hard-stalled at 90s on any page over ~5,000 elements.
+    const maxActions = options.maxActions > 0 ? options.maxActions : DEFAULT_MAX_ACTIONS;
     const actions = [];
-    const maxActions = options.maxActions || 0;
-    let i = 0;
-    while (i < allElements.length) {
-      const end = Math.min(i + BATCH_SIZE, allElements.length);
-      for (let j = i; j < end; j++) {
-        if (maxActions > 0 && actions.length >= maxActions) break;
-        const el = allElements[j];
-        if (!isInteractive(el)) continue;
-        if (options.includeHidden === false && !isVisible(el)) continue;
-        if (!options.includeHidden && !isInViewport(el) && !options.full) continue;
-        try {
-          const ref = assignRef(el);
-          const classification = _cachedClassify(el);
-          const attrs = getAttrs(el);
-          const state = extractState(el);
-          const label = getLabel(el);
-          const effect = predictEffect(el, classification, attrs);
-          const action = { ref, type: classification.type, subtype: classification.subtype, label, predictedEffect: effect, ...state };
+    for (let i = 0; i < geo.length; i++) {
+      if (actions.length >= maxActions) break;
+      const el = geo[i].el;
+      if (!isInteractive(el, geo[i])) continue;
+      try {
+        const ref = assignRef(el);
+        const classification = _cachedClassify(el);
+        const attrs = getAttrs(el);
+        const state = extractState(el);
+        const label = getLabel(el);
+        const effect = predictEffect(el, classification, attrs);
+        const action = { ref, type: classification.type, subtype: classification.subtype, label, predictedEffect: effect, ...state };
         // Phase 4 (2026-08-15): surface frameId from explore_page iframe recursion.
         if (el.__wsFrameId != null && el.__wsFrameId !== 0) action.frameId = el.__wsFrameId;
-          // A2 (2026-08-10): expose the semantic locator so the agent can
-          // re-target after re-render (locator survives; ref E# may die).
-          const loc = buildLocator(el);
-          if (loc && loc.length) action.locator = loc[0];
-          // A3 (2026-08-10): intent tag — the element's semantic purpose.
-          action.intent = detectIntent(el, classification);
-          if (classification.href) action.href = classification.href;
-          if (classification.target) action.target = classification.target;
-          if (classification.formRef) action.formRef = classification.formRef;
-          if (classification.expanded !== undefined) action.expanded = classification.expanded;
-          if (classification.selected !== undefined) action.selected = classification.selected;
-          if (classification.pressed !== undefined) action.pressed = classification.pressed;
-          actions.push(action);
-        } catch (_) { /* skip broken element */ }
-      }
-      if (maxActions > 0 && actions.length >= maxActions) { wsLog('EAG:capped at maxActions=' + maxActions); break; }
-      wsLog('EAG:chunk ' + i + '-' + end + ' done, ' + actions.length + ' actions so far');
-      i = end;
-      // Yield to event loop so the WS bridge doesn't block
-      await new Promise(function (r) { setTimeout(r, CHUNK_YIELD_MS); });
+        // A2 (2026-08-10): expose the semantic locator so the agent can
+        // re-target after re-render (locator survives; ref E# may die).
+        const loc = buildLocator(el);
+        if (loc && loc.length) action.locator = loc[0];
+        // A3 (2026-08-10): intent tag — the element's semantic purpose.
+        action.intent = detectIntent(el, classification);
+        if (classification.href) action.href = classification.href;
+        if (classification.target) action.target = classification.target;
+        if (classification.formRef) action.formRef = classification.formRef;
+        if (classification.expanded !== undefined) action.expanded = classification.expanded;
+        if (classification.selected !== undefined) action.selected = classification.selected;
+        if (classification.pressed !== undefined) action.pressed = classification.pressed;
+        actions.push(action);
+      } catch (_) { /* skip broken element */ }
     }
-    wsLog('EAG:loop done, ' + actions.length + ' actions');
+    wsLog('EAG:loop done, ' + actions.length + ' actions (geo=' + geo.length + ')');
 
-    // Build the rest of the SAG from the collected actions
-    return _buildSAG(actions, options);
+    const truncated = geo.length > actions.length;
+
+    // Trim content extraction on big pages unless the caller asked for more —
+    // the other half of the payload problem (explore_page on x.com returned
+    // 1,006,657 bytes ≈ 275k tokens, unusable as agent context).
+    const opt2 = Object.assign({}, options);
+    if (actions.length >= AUTO_COMPACT_CANDIDATES && options.contentMaxLen === undefined) {
+      opt2.contentMaxLen = CONTENT_MAX_CHARS;
+    }
+
+    const sag = _buildSAG(actions, opt2);
+    sag.truncated = truncated;
+    sag.returnedActions = actions.length;
+    sag.viewportCandidates = geo.length;
+    sag.candidatesExamined = pass1.length;
+    sag.candidatesFound = cand.nodes.length;
+    sag.totalElements = cand.totalElements;
+    if (cand.cursorSweepSkipped) sag.cursorSweepSkipped = true;
+    if (cand.capped) sag.candidateCeilingHit = true;
+    sag.scanMs = Date.now() - scanStart;
+    wsLog('EAG:scanMs=' + sag.scanMs + ' returned=' + actions.length + ' geo=' + geo.length);
+
+    if (cheapShape && !options.fresh) {
+      _sagCache = { key: cacheKey, domVersion: _domVersion, ts: Date.now(), sag: sag };
+    }
+    return sag;
   }
 
-  // Style cache — prevents calling getComputedStyle multiple times per element
-  const _styleCache = new WeakMap();
+  // Style cache — prevents calling getComputedStyle multiple times per element.
+  // NOTE (2026-09-11): this used to be a module-level WeakMap that was NEVER
+  // cleared, so a cached style from an earlier call could be reused after the
+  // element's style had changed — e.g. an element inside a modal that has since
+  // been shown stayed "display:none" forever, and dialog controls never appeared
+  // in the SAG. It is now rebuilt at the start of every extraction.
+  let _styleCache = new WeakMap();
+  function _styleCacheClear() { _styleCache = new WeakMap(); }
   function cachedStyle(el) {
     if (_styleCache.has(el)) return _styleCache.get(el);
     var s;
@@ -1769,7 +2015,10 @@
     const actions = [];
     let step = 'loop-start';
     try {
-      const maxActions = options.maxActions || 0;
+      // Bounded default here too (2026-09-11) — the legacy sync path had the same
+      // `|| 0` unbounded default, so a caller reaching it could still walk a
+      // whole page. Consistency matters more than the micro-difference.
+      const maxActions = options.maxActions > 0 ? options.maxActions : DEFAULT_MAX_ACTIONS;
       for (const el of allElements) {
         if (maxActions > 0 && actions.length >= maxActions) break;
         step = 'isInteractive';
@@ -3169,7 +3418,7 @@
     try {
       switch (type) {
         case 'explore_page': try { result = params.incremental ? await exploreIncremental(params) : await extractActionGraph(params); } catch(e) { result = { success: false, error: 'explore_page failed: ' + e.message, stack: (e.stack||'').slice(0, 500) }; } break;
-        case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||250}); result = sag.actions; break; }
+        case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||DEFAULT_MAX_ACTIONS}); result = sag.actions; break; }
         case 'click': { const before=getQuickState(); nativeClick(await resolveRefHealed(params.ref)); result={success:true,ref:params.ref,beforeState:before,afterState:getQuickState()}; break; }
                 case 'type_text': { result = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); result.ref = params.ref; break; }
                 case 'select_option': { result=nativeSelect(await resolveRefHealed(params.ref),params.value, params.clearAll); result.ref=params.ref; break; }
@@ -3206,7 +3455,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.4.0',csBuild:'v4.4.0-bridge-gate',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.5.0',csBuild:'v4.5.0-bounded-scan',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

@@ -342,17 +342,20 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       full: z.boolean().optional().describe('Include offscreen elements'),
       includeContent: z.boolean().optional().describe('Include body text (default true)'),
       includeHidden: z.boolean().optional().describe('Include hidden elements'),
-      maxActions: z.number().optional().describe('Cap for compact mode (default 250)'),
+      maxActions: z.number().optional().describe('Cap on RETURNED actions (default 200). 0 = unbounded (NOT recommended: an unbounded scan is what used to time out at 90s on heavy pages).'),
       incremental: z.boolean().optional().describe('Return only added/changed/removed since the last scan (cheap — no settle, no content). First call or >60% churn auto-falls back to full. Ideal after click/type to see what the action did.'),
+      contentMaxLen: z.number().optional().describe('Cap on extracted body text (default 8000; auto-lowered to 6000 when the action list is large)'),
+      fresh: z.boolean().optional().describe('Force a real re-scan. Without it, a repeated call on an unchanged DOM inside ~1.5s returns the cached map (cached:true)'),
+      settle: z.boolean().optional().describe('false = skip the SPA hydration settle wait entirely'),
     },
   }, async (o) => {
     if (o.intent) return textResult(await getActiveHub().send({ type: 'find_intent', intent: o.intent, frameId: o.frameId }));
     if (o.goal) return textResult(await getActiveHub().send({ type: 'explore_intent', goal: o.goal, frameId: o.frameId }));
-    if (o.compact) return textResult(await getActiveHub().send({ type: 'discover_actions', maxActions: o.maxActions === undefined ? 250 : o.maxActions, frameId: o.frameId }));
+    if (o.compact) return textResult(await getActiveHub().send({ type: 'discover_actions', maxActions: o.maxActions === undefined ? 200 : o.maxActions, frameId: o.frameId }));
     if (o.preload) {
       await getActiveHub().send({ type: 'preload_content', maxSteps: 8, settleMs: 250, restore: true });
     }
-    const sag = await getActiveHub().send({ type: 'explore_page', full: o.full || false, includeContent: o.includeContent !== false, includeHidden: o.includeHidden || false, incremental: o.incremental || false, frameId: o.frameId });
+    const sag = await getActiveHub().send({ type: 'explore_page', full: o.full || false, includeContent: o.includeContent !== false, includeHidden: o.includeHidden || false, incremental: o.incremental || false, maxActions: o.maxActions, contentMaxLen: o.contentMaxLen, fresh: o.fresh || false, settle: o.settle, frameId: o.frameId });
     if (!sag || sag.success === false) return textResult(sag || { success: false, error: 'No response from content script' });
     if (sag.meta && sag.meta.url) session.recordPage(sag.meta.url, sag);
     // Incremental results are partial deltas — only full SAGs (including the

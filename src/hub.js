@@ -286,6 +286,19 @@ export class HubServer {
       const cs = this.mainFrameClient || this.contentClient || this.lastClient;
       if (cs && cs.readyState === 1) return cs;
     }
+    // extension_reload must reach a client that can actually PERFORM it. Both the
+    // offscreen and the content script handle it now (2026-09-11); prefer the
+    // offscreen because it calls chrome.runtime.reload() directly and never dies
+    // mid-request. Before this routing existed the op fell through to the
+    // "page op" branch and landed on a client with no handler for it, so the
+    // reload silently never happened while the tool still reported
+    // reloadSent:true — that flag only ever meant "the WS send succeeded".
+    if (cmd && cmd.type === 'extension_reload') {
+      const off = this.offscreenClient;
+      if (off && off.readyState === 1) return off;
+      const cs2 = this.mainFrameClient || this.contentClient || this.lastClient;
+      if (cs2 && cs2.readyState === 1) return cs2;
+    }
     const isTabOp = cmd && (cmd.type === 'navigate' || cmd.type === 'list_tabs' || cmd.type === 'switch_tab' ||
       cmd.type === 'close_tab' || cmd.type === 'list_frames' || cmd.type === 'download_state' ||
       cmd.type === 'bind_tab' || cmd.type === 'transfer_text' || cmd.type === 'switch_tab_and_read' ||

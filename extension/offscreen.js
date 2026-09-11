@@ -215,6 +215,22 @@ async function handleTabOperation(message) {
       notifyTabSelected(nid);
       return { success: true, tabId: nid, reused: !!(r4 && r4.reused) };
     }
+    case 'extension_reload': {
+      // 2026-09-11: THIS CASE WAS MISSING and is why `extension_reload` never
+      // worked. Only background.js (the SW) had this case, but the hub routes
+      // ops to whichever client is live — and on strict-CSP sites the direct
+      // content-script bridge is dead, so the OFFSCREEN is the client that
+      // receives the request. The message fell through this switch, nothing
+      // happened, and the hub still reported `reloadSent: true` because that
+      // only ever meant "the WS send succeeded".
+      //
+      // chrome.runtime.reload() is available in any extension context, so do it
+      // directly here rather than relaying to the SW: no round-trip, and no
+      // awaiting a worker that dies mid-call. Delay slightly so this response
+      // can flush over the WS before the context tears down.
+      setTimeout(function () { try { chrome.runtime.reload(); } catch (_) {} }, 50);
+      return { success: true, message: 'reloading extension from offscreen in 50ms' };
+    }
     case 'list_frames': { return await sendTabControl('list_frames', {}); }
     case 'download_state': { return await sendTabControl('download_state', {}); }
     case 'download_op': { return await sendTabControl('download_op', message); }

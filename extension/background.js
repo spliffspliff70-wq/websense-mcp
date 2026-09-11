@@ -183,6 +183,54 @@ async function setupOffscreen() {
 
 // ═══ Tab Management ═══
 
+// ═══ Await navigation commit (2026-09-11) ═══
+// chrome.tabs.update() resolves when the navigation is STARTED, not when the new
+// document is live. Callers that read immediately therefore saw the OLD page —
+// measured: a `status` call issued right after `navigate` still returned the
+// previous URL. That reads as a flaky tool and invites a retry loop, when it is
+// really just a race. Wait for the tab to reach 'complete' on the requested URL,
+// bounded so a slow page or an unload-blocked one can never hang the call.
+function waitForTabCommit(tabId, wantUrl, timeoutMs) {
+  return new Promise(function (resolve) {
+    var settled = false;
+    var timer = null;
+    function done(res) {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try { chrome.tabs.onUpdated.removeListener(onUpd); } catch (_) {}
+      resolve(res);
+    }
+    function statusOk(tab) {
+      var url = (tab && tab.url) || '';
+      if (!wantUrl) return true;
+      var base = String(wantUrl).split('#')[0];
+      return url === wantUrl || url.indexOf(base) === 0;
+    }
+    function onUpd(id, info, tab) {
+      if (id !== tabId || info.status !== 'complete') return;
+      if (!statusOk(tab)) return;
+      done({ ok: true, url: (tab && tab.url) || null });
+    }
+    timer = setTimeout(function () {
+      chrome.tabs.get(tabId).then(function (t) {
+        done({ ok: false, reason: 'timeout', url: (t && t.url) || null });
+      }).catch(function () { done({ ok: false, reason: 'timeout', url: null }); });
+    }, timeoutMs || 10000);
+    try { chrome.tabs.onUpdated.addListener(onUpd); } catch (_) {
+      done({ ok: false, reason: 'no-onUpdated', url: null }); return;
+    }
+    // Fast path: already there (same-URL navigation). Only resolves when the URL
+    // ALREADY matches what was requested, so it can never short-circuit a real
+    // A→B navigation that is still sitting on A.
+    chrome.tabs.get(tabId).then(function (t) {
+      if (t && t.status === 'complete' && statusOk(t)) {
+        done({ ok: true, url: t.url || null });
+      }
+    }).catch(function () {});
+  });
+}
+
 async function getActiveTab() {
   // Phase 2 (2026-08-15): sanitized active-tab pick. The old
   // {active:true, currentWindow:true} could be hijacked by a STRAY second
@@ -530,7 +578,16 @@ async function handleTabControl(action, payload) {
         // tabId — activation is NEVER required for navigation to work.
         await chrome.tabs.update(tab.id, { url: payload.url });
         boundTabId = tab.id; // B1
-        return { success: true, tabId: tab.id, reused: true, background: true };
+        // AWAIT COMMIT (2026-09-11): tabs.update resolves when the navigation is
+        // STARTED, not when the new document is live. Reading immediately after
+        // returned the OLD page, which reads as a flaky tool and provokes retries.
+        // Bounded wait; when it does not commit we say so (committed:false +
+        // timeout) rather than implying success.
+        const commit = await waitForTabCommit(tab.id, payload.url, payload.commitTimeoutMs || 10000);
+        const result = { success: true, tabId: tab.id, reused: true, background: true,
+                         committed: !!commit.ok, committedUrl: commit.url || null };
+        if (!commit.ok) { result.timeout = true; result.reason = commit.reason || 'not-committed'; }
+        return result;
       } catch (err) {
         return { error: 'Failed to navigate tab: ' + (err.message || err) };
       }

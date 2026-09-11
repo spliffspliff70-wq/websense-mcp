@@ -501,6 +501,105 @@ test('timeout diag: works with no client at all', () => {
 // (it needs a DOM), so these assert the invariants that fix the failure loop.
 // If someone removes the gate, the 1006 loop comes back — fail loudly here.
 const CS_SRC = readFileSync(new URL('./extension/websense-cs.js', import.meta.url), 'utf8');
+const OFF_SRC = readFileSync(new URL('./extension/offscreen.js', import.meta.url), 'utf8');
+const BG_SRC = readFileSync(new URL('./extension/background.js', import.meta.url), 'utf8');
+const HUB_SRC = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
+const SRV_SRC = readFileSync(new URL('./src/server.js', import.meta.url), 'utf8');
+
+// ── 2026-09-11b: performance + reload-path guards ───────────────────────────
+// Measured baseline these exist to prevent from returning: explore_page's DEFAULT
+// call had no action cap, walked every DOM node in document order, read
+// getBoundingClientRect twice and getComputedStyle once PER ELEMENT, and
+// hard-stalled at the 90s hub timeout above ~5,000 elements (556 els = 0.44s,
+// 2,206 = 11s, 11,006 = TIMEOUT). Separately, `extension_reload` was handled by
+// the service worker only, so whenever the hub routed it to the offscreen (the
+// client that is live on strict-CSP sites) it fell through a switch and did
+// nothing — while still reporting reloadSent:true.
+
+test('cs: default action cap is BOUNDED (an unbounded default is the 90s bug)', () => {
+  assert(/var DEFAULT_MAX_ACTIONS = \d+;/.test(CS_SRC), 'DEFAULT_MAX_ACTIONS is defined numerically');
+  const m = CS_SRC.match(/var DEFAULT_MAX_ACTIONS = (\d+);/);
+  assert(Number(m[1]) > 0, 'default cap must be > 0 (0 = unbounded = the regression)');
+  assert(CS_SRC.includes('options.maxActions > 0 ? options.maxActions : DEFAULT_MAX_ACTIONS'),
+    'the extraction path actually falls back to the bounded default');
+  // The old code was `options.maxActions || 0` — that is the unbounded form.
+  assert(!/const maxActions = options\.maxActions \|\| 0;/.test(CS_SRC),
+    'the unbounded `maxActions || 0` default must not come back');
+});
+
+test('cs: work is bounded by an elements-SCANNED ceiling, not only returned actions', () => {
+  assert(/var SCAN_CEILING = \d+;/.test(CS_SRC), 'SCAN_CEILING defined');
+  assert(CS_SRC.includes('pass1.length < SCAN_CEILING'), 'attribute pass respects the ceiling');
+  assert(CS_SRC.includes('cursorScanned < SCAN_CEILING'), 'cursor sweep respects the ceiling');
+});
+
+test('cs: candidates come from a SELECTOR, not a walk of every node', () => {
+  assert(CS_SRC.includes('INTERACTIVE_SELECTOR'), 'selector list exists');
+  assert(CS_SRC.includes('collectInteractiveCandidates'), 'collector is wired in');
+  assert(CS_SRC.includes('_collectSelectorHits'), 'shadow-root-aware collection present');
+});
+
+test('cs: viewport-first ordering (not document order)', () => {
+  assert(CS_SRC.includes('if (a.inVp !== b.inVp) return a.inVp ? -1 : 1;'),
+    'in-viewport elements sort ahead of offscreen ones');
+  assert(CS_SRC.includes('geo.sort('), 'the geometry list is ordered before enrichment');
+});
+
+test('cs: each element geometry read at most once (no double getBoundingClientRect)', () => {
+  assert(CS_SRC.includes('isInteractive(el, pre)'), 'isInteractive accepts precomputed visibility');
+  assert(CS_SRC.includes('if (pre && pre.vis !== undefined)'), 'and uses it instead of re-reading');
+  assert(CS_SRC.includes('_isVisibleRect'), 'visibility has a rect-aware fast path');
+  assert(CS_SRC.includes('checkVisibility'), 'uses native checkVisibility when available');
+});
+
+test('cs: style cache is cleared per extraction (stale-style regression)', () => {
+  assert(/let _styleCache = new WeakMap\(\);/.test(CS_SRC),
+    '_styleCache must be reassignable so it can be cleared');
+  assert(CS_SRC.includes('function _styleCacheClear()'), 'clear helper exists');
+  assert(CS_SRC.includes('_styleCacheClear();'), 'and is actually called by the extraction');
+});
+
+test('cs: settle is skipped when the DOM has been quiet', () => {
+  assert(CS_SRC.includes('SETTLE_SKIP_IF_QUIET_MS'), 'quiet threshold defined');
+  assert(CS_SRC.includes('sinceMutation < SETTLE_SKIP_IF_QUIET_MS'), 'settle is conditional');
+  assert(CS_SRC.includes('_lastMutationTs'), 'mutation timestamp is tracked');
+});
+
+test('cs: unchanged-DOM reuse is versioned and TTL-bounded', () => {
+  assert(CS_SRC.includes('ensureDomObserver'), 'observer is installed');
+  assert(CS_SRC.includes('_domVersion'), 'DOM version counter exists');
+  assert(CS_SRC.includes('SAG_CACHE_TTL_MS'), 'cache has a TTL backstop');
+  assert(CS_SRC.includes('options.fresh'), 'callers can force a real scan');
+  // Our own ref attribute writes must not count as page mutations, or the cache
+  // invalidates itself on every extraction.
+  assert(!/attributeFilter:[^\]]*webref/i.test(CS_SRC), 'ref attribute is not in the filter');
+});
+
+test('reload: extension_reload is handled by EVERY client the hub can route to', () => {
+  assert(OFF_SRC.includes("case 'extension_reload'"), 'offscreen handles it (the live client on CSP sites)');
+  assert(OFF_SRC.includes('chrome.runtime.reload()'), 'offscreen can perform the reload itself');
+  assert(CS_SRC.includes("case 'extension_reload'"), 'content script handles it');
+  assert(BG_SRC.includes("case 'extension_reload'"), 'service worker still handles it');
+  assert(HUB_SRC.includes("cmd.type === 'extension_reload'"), 'hub routes it explicitly');
+  assert(HUB_SRC.includes('if (cmd && cmd.type === \'extension_reload\')'),
+    'routing happens before the generic page-op branch that used to swallow it');
+});
+
+test('navigate: waits for the navigation to COMMIT', () => {
+  assert(BG_SRC.includes('function waitForTabCommit'), 'commit waiter exists');
+  assert(BG_SRC.includes('chrome.tabs.onUpdated.addListener(onUpd)'), 'listens for the complete event');
+  assert(BG_SRC.includes('await waitForTabCommit('), 'navigate actually awaits it');
+  assert(BG_SRC.includes('committed: !!commit.ok'), 'result reports whether it committed');
+  assert(BG_SRC.includes('result.timeout = true'),
+    'and says so when it did not, instead of implying success');
+});
+
+test('server: new exploration knobs are reachable from the MCP tool', () => {
+  for (const k of ['contentMaxLen', 'fresh', 'settle']) {
+    assert(SRV_SRC.includes(k), `explore_page exposes ${k}`);
+  }
+  assert(SRV_SRC.includes('maxActions: o.maxActions'), 'maxActions is forwarded (was dropped)');
+});
 
 test('cs: direct bridge is main-frame-only (ad frames + subframes excluded)', () => {
   assert(CS_SRC.includes('WS_BRIDGE_UNUSABLE'), 'gate variable exists');

@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .pyc
 .DS_Store
+# local safety backups (never publish)
+*.bak-*
