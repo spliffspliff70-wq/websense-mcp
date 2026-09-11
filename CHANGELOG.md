@@ -3,6 +3,62 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.3.1] — 2026-09-11
+
+### Fixed
+
+- **`ax` click/type NEVER WORKED — the name matcher threw on every real page.**
+  CDP AX values arrive either as a plain string or as an `AXValue` object
+  (`{type:'computedString', value:'…', sources:[…]}`). The matcher used
+  `v.value || v`, which returned the **object** whenever `value` was the empty
+  string, so `.toLowerCase()` threw
+  `"(n.name.value || n.name || \"\").toLowerCase is not a function"` and
+  matching aborted on the first name-less node — which every page has many of.
+  `ax read`/`state` worked (they never called the matcher), so the breakage was
+  invisible until a click was attempted. Fixed with an `axStr()` extractor used
+  by `axNodeToObj`, `axRead` and `axFindNode`.
+  *Side effect of the bug: `ax state` emitted objects instead of strings for
+  every node whose computed name was empty.*
+
+- **`extension_reload` could never reach the handler that performs it.**
+  The service worker has had an `extension_reload` case since 2026-08-31 that
+  calls `chrome.runtime.reload()`. But the SW is not a WebSocket client, and
+  nothing forwarded the op to it — `offscreen.js` only relays `ax_*`, and
+  `SW_REQUIRED_OPS` contains only `upload_file`/`network_log`. So the command
+  fell through every client and silently did nothing, while the tool still
+  reported `reloadSent: true` (that flag only ever meant "the WS send
+  succeeded"). Routing added for the offscreen doc and the content script, plus
+  explicit hub routing.
+
+### Verified live (2026-09-11, real Chrome, no CDP)
+
+Measured over the MCP transport directly, so the numbers are pure tool latency
+with no LLM turn overhead. "Before" = pre-1.3.0 code.
+
+| page | elements | before | after | notes |
+|---|---|---|---|---|
+| Wikipedia *World War II* | 13,187 total | **TIMEOUT, 4/4 runs @ 90 s** | **0.084 s** (87 actions) | the common case: default `explore_page` on a big page |
+| x.com search | 2,374 total | 23.3 s, **1,006,657 B** | **0.023 s**, 75,024 B | ≈1,000× faster, 13× smaller |
+| example.com | ~30 | 0.653 s, 2,058 B | 0.017 s, 1,907 B | light page |
+
+Per-scan detail after the fix:
+
+```
+Wikipedia: scanMs=70   totalElements=13187  candidatesExamined=3502  viewportCandidates=87   returnedActions=87
+x.com:     scanMs=13   totalElements=2374   candidatesExamined=192   viewportCandidates=61   returnedActions=61
+```
+
+`viewportCandidates` is the tell: viewport-first collection locates the handful
+of actionable elements directly instead of crossing the whole document to find
+them. Before this release the same scan cost ~5 ms **per element** (2,206
+elements ≈ 11 s) because per-element `getBoundingClientRect()` interleaved with
+`getComputedStyle()` thrashed layout.
+
+**Kill-test:** the same fix was verified to be a real result, not a
+short-circuit — the Wikipedia response returns 87 actions with genuine labels
+("Search Wikipedia", "Donate", "View the content page [c]") and 8,770 chars of
+content.
+
 ## [1.3.0] — 2026-09-11
 
 ### Why this release exists

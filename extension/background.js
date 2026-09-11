@@ -796,10 +796,24 @@ async function axGetTree(tabId) {
   }
 }
 
+// ═══ 2026-09-11 FIX: ax click/type NEVER WORKED ═══
+// CDP AX values arrive either as a plain string or as an AXValue object
+// {type:'computedString', value:'Reconnect', sources:[...]}. The old
+// `v.value || v` fallback returned the OBJECT whenever `value` was the empty
+// string, so `.toLowerCase()` threw
+//   "(n.name.value || n.name || \"\").toLowerCase is not a function"
+// and the matcher aborted on the first name-less node — which every real page
+// has many of. Net effect: ax read worked, ax click/type were dead.
+function axStr(v) {
+  if (typeof v === 'string') return v;
+  if (v && typeof v.value === 'string') return v.value;
+  return '';
+}
+
 function axNodeToObj(node) {
   var o = {
-    role: node.role ? (node.role.value || node.role) : 'unknown',
-    name: node.name ? (node.name.value || node.name) : '',
+    role: axStr(node.role) || 'unknown',
+    name: axStr(node.name),
     backendDOMNodeId: node.backendDOMNodeId || null,
   };
   if (node.properties) {
@@ -826,8 +840,8 @@ async function axRead(tabId, opts) {
   for (var i = 0; i < nodes.length; i++) {
     if (out.length >= 500) break;
     var n = nodes[i];
-    var role = n.role ? (n.role.value || n.role || '').toLowerCase() : '';
-    var name = n.name ? (n.name.value || n.name || '').toLowerCase() : '';
+    var role = axStr(n.role).toLowerCase();
+    var name = axStr(n.name).toLowerCase();
     var hit = true;
     if (filter && role !== filter) hit = false;
     if (nameMatch && name !== nameMatch) hit = false;
@@ -843,8 +857,8 @@ async function axFindNode(nodes, match) {
   var nameContains = (match.nameContains || '').toLowerCase();
   for (var i = 0; i < nodes.length; i++) {
     var n = nodes[i];
-    var r = n.role ? (n.role.value || n.role || '').toLowerCase() : '';
-    var nm = n.name ? (n.name.value || n.name || '').toLowerCase() : '';
+    var r = axStr(n.role).toLowerCase();
+    var nm = axStr(n.name).toLowerCase();
     var okRole = !role || r === role;
     var okName = !name || nm === name;
     var okContains = !nameContains || nm.indexOf(nameContains) !== -1;
