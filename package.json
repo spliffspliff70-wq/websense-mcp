@@ -1,8 +1,8 @@
 {
   "name": "websense-mcp",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "type": "module",
-  "description": "WebSense MCP — non-vision, AI-native web automation via the Semantic Action Graph. No screenshots, no CDP, no bot detection.",
+  "description": "WebSense MCP \u2014 non-vision, AI-native web automation via the Semantic Action Graph. No screenshots, no CDP, no bot detection.",
   "license": "MIT",
   "author": "spliff70",
   "repository": {

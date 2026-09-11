@@ -191,6 +191,59 @@ def cmd_paste_text(args):
         restored = False
     return {"success": True, "pasted_len": len(text), "target": [sx, sy], "focus_restored": bool(restored)}
 
+def cmd_paste_file(args):
+    """Click into the target at VIEWPORT (x,y), put a FILE on the clipboard, real Ctrl+V.
+
+    WHY THIS EXISTS (2026-09-11): setting `input.files` from the content script's
+    ISOLATED world produces an EMPTY FileList on strict-CSP pages (the x.com
+    composer) — the DataTransfer/File are realm-local and Chrome silently filters
+    them, so `upload_file` returns `fileCount:0` / "Input rejected the file" while
+    looking like a site problem. This escalates to the genuine-input rung: copy
+    the file to the OS clipboard as CF_HDROP (exactly what Explorer's Copy does)
+    and send a real Ctrl+V, so the page receives a normal `paste` event whose
+    clipboardData.files carries the file — indistinguishable from a human paste.
+
+    `Set-Clipboard -Path` is the CF_HDROP putter. Verified working on x.com's
+    composer, which is the case the synthetic strategies cannot do.
+    """
+    import os
+    import pyautogui
+    pyautogui.FAILSAFE = False  # headless helper: explicit coords; the title gate is the safety
+    path = os.path.abspath(args.file)
+    if not os.path.isfile(path):
+        return {"success": False, "error": f"file not found: {path}"}
+    chrome = _find_chrome(args.gate)
+    if args.gate and not chrome:
+        return {"success": False, "error": f"Gate failed: no Chrome window containing '{args.gate}'"}
+    # SendInput only reaches the FOREGROUND window — raise Chrome first
+    if chrome:
+        try: chrome.set_focus()
+        except Exception: pass
+        time.sleep(0.4)
+    ox, oy = _doc_origin(chrome) if chrome else (0, 121)
+    sx, sy = ox + args.x, oy + args.y
+    saved = None if args.no_restore else _fg_hwnd()
+    # 1. focus the drop target
+    pyautogui.moveTo(sx, sy, duration=0.25)
+    time.sleep(0.3)
+    pyautogui.click(sx, sy)
+    time.sleep(0.7)
+    # 2. put the FILE on the clipboard as CF_HDROP (PS5.1: single-quote, '' escapes)
+    ps_path = "'" + path.replace("'", "''") + "'"
+    ps = ["powershell", "-NoProfile", "-Command", f"Set-Clipboard -Path {ps_path}"]
+    proc = subprocess.run(ps, capture_output=True, text=True,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+    if proc.returncode != 0:
+        return {"success": False, "error": "Set-Clipboard failed: " + (proc.stderr or "").strip()[:200]}
+    time.sleep(0.7)
+    # 3. real Ctrl+V (SendInput — trusted paste)
+    pyautogui.hotkey('ctrl', 'v')
+    time.sleep(float(args.wait))
+    restored = _restore_focus(saved) if saved else False
+    return {"success": True, "file": path, "size": os.path.getsize(path),
+            "target": [sx, sy], "focus_restored": bool(restored),
+            "note": "Real Ctrl+V sent. VERIFY the attachment appeared — do not assume."}
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest='command')
@@ -216,6 +269,15 @@ def main():
     pt.add_argument('--from-stdin', action='store_true')
     pt.add_argument('--no-restore', action='store_true', help='Skip focus restore after input')
     pt.set_defaults(func=cmd_paste_text)
+    # paste-file (viewport coords) — genuine CF_HDROP file paste for strict-CSP pages
+    pf = sub.add_parser('paste-file')
+    pf.add_argument('--file', required=True, help='absolute path of the file to paste')
+    pf.add_argument('--x', type=int, required=True, help='viewport x of the drop target')
+    pf.add_argument('--y', type=int, required=True, help='viewport y of the drop target')
+    pf.add_argument('--gate', default=None, help='Chrome window title substring gate')
+    pf.add_argument('--wait', type=float, default=8.0, help='seconds to wait after the paste')
+    pf.add_argument('--no-restore', action='store_true', help='Skip focus restore after input')
+    pf.set_defaults(func=cmd_paste_file)
     args = p.parse_args()
     if not args.command:
         p.print_help(); sys.exit(1)

@@ -1,3 +1,49 @@
+/* ═══ SHADOW-DOM PIERCING (2026-09-11d) ═══
+ * document.querySelector() cannot see into a shadow root, so any control a site
+ * builds as a web component (Lit / Stencil / FAST / faceplate — Reddit's composer,
+ * shoelace widgets) is invisible to selector resolution even though the candidate
+ * scan ALREADY pierces shadow roots (_collectShadowHits). That mismatch is what
+ * forced a fallback to pixel guessing: `inspect kind:"geometry"` answered
+ * "element not found" for Reddit's Post button, which lives in a shadow root, so
+ * the caller had nothing to click and had to estimate coordinates from a picture.
+ * These walk OPEN shadow roots only. A CLOSED root is unreachable by design from
+ * any script, so it is skipped rather than faked.
+ */
+  function deepQueryAll(selector, root) {
+    const start = root || document;
+    const out = [];
+    const queue = [start];
+    while (queue.length) {
+      const node = queue.shift();
+      try {
+        const hits = node.querySelectorAll(selector);
+        for (let i = 0; i < hits.length; i++) out.push(hits[i]);
+      } catch (_) { /* selector invalid for this root */ }
+      let all = null;
+      try { all = node.querySelectorAll('*'); } catch (_) {}
+      if (all) {
+        for (let j = 0; j < all.length; j++) {
+          const sr = all[j] && all[j].shadowRoot;
+          if (sr) queue.push(sr);
+        }
+      }
+    }
+    return out;
+  }
+
+  function deepQuery(selector, root) {
+    if (!selector) return null;
+    // Light-DOM fast path: identical behaviour on pages with no shadow roots, so
+    // this cannot regress the common case; the walk only runs on a miss.
+    try { const hit = (root || document).querySelector(selector); if (hit) return hit; } catch (_) {}
+    const all = deepQueryAll(selector, root);
+    return all.length ? all[0] : null;
+  }
+
+  function isInShadow(el) {
+    try { return !!(el && el.getRootNode && el.getRootNode() !== document); } catch (_) { return false; }
+  }
+
 /* Ref/locator system: assign, resolve, heal, locator build
  * Part 01 of 9 — source of truth for extension/websense-cs.js.
  * DO NOT edit the built file; edit here and run `node tools/build-cs.mjs`.

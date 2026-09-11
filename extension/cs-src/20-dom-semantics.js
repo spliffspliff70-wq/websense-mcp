@@ -216,7 +216,7 @@
   function findIntent(intentQuery) {
     const q = (intentQuery || '').toLowerCase().trim();
     if (!q) return { success: false, error: 'intent required (e.g. "submit", "password", "search")' };
-    const all = Array.from(document.querySelectorAll('button, a, input, textarea, select, [role="button"], [role="tab"], [role="dialog"]'));
+    const all = Array.from(deepQueryAll('button, a, input, textarea, select, [role="button"], [role="tab"], [role="dialog"]'));
     const matches = [];
     for (const el of all) {
       if (!isVisible(el)) continue;
@@ -262,7 +262,7 @@
       if (g.includes(intent)) { for (const a of aliases) keywords.add(a); }
       else { for (const a of aliases) { if (g.includes(a)) { for (const a2 of aliases) keywords.add(a2); break; } } }
     }
-    const all = Array.from(document.querySelectorAll('button, a, input, textarea, select, [role="button"], [role="tab"], [role="dialog"], form'));
+    const all = Array.from(deepQueryAll('button, a, input, textarea, select, [role="button"], [role="tab"], [role="dialog"], form'));
     const relevant = [];
     for (const el of all) {
       if (!isVisible(el)) continue;

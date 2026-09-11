@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebSense shadow-DOM fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; }
+  .row { margin: 12px 0; }
+  #wrap { padding: 10px; border: 1px dashed #999; }
+</style>
+</head>
+<body>
+<h1>WebSense shadow-DOM fixture</h1>
+<p>Deterministic target for the 2026-09-11d shadow-piercing fixes. The point is
+that <code>document.querySelectorAll</code> CANNOT find the marked controls, so a
+plain selector sees an "empty" page while the real controls are present.</p>
+
+<!-- 1. plain light-DOM control (the fast path — must keep working) -->
+<div class="row">
+  <button id="light-btn" data-testid="light-btn">light DOM button</button>
+</div>
+
+<!-- 2. one shadow root deep -->
+<div class="row">
+  <my-widget id="host-1" data-testid="host-1"></my-widget>
+</div>
+
+<!-- 3. TWO shadow roots deep (nested hosts) -->
+<div class="row">
+  <outer-shell id="host-2" data-testid="host-2"></outer-shell>
+</div>
+
+<!-- 4. an input inside a shadow root -->
+<div class="row">
+  <my-field id="host-3" data-testid="host-3"></my-field>
+</div>
+
+<script>
+  // Each host is defined as a custom element with an OPEN shadow root, which is
+  // the pattern Lit / FAST / Stencil / faceplate all produce in production.
+  class MyWidget extends HTMLElement {
+    connectedCallback() {
+      const sr = this.attachShadow({ mode: 'open' });
+      sr.innerHTML = '<button data-testid="shadow-btn">button inside a shadow root</button>';
+    }
+  }
+  customElements.define('my-widget', MyWidget);
+
+  class InnerPane extends HTMLElement {
+    connectedCallback() {
+      const sr = this.attachShadow({ mode: 'open' });
+      sr.innerHTML = '<button data-testid="deep-shadow-btn">two shadow roots deep</button>';
+    }
+  }
+  customElements.define('inner-pane', InnerPane);
+
+  class OuterShell extends HTMLElement {
+    connectedCallback() {
+      const sr = this.attachShadow({ mode: 'open' });
+      sr.innerHTML = '<inner-pane></inner-pane>';
+    }
+  }
+  customElements.define('outer-shell', OuterShell);
+
+  class MyField extends HTMLElement {
+    connectedCallback() {
+      const sr = this.attachShadow({ mode: 'open' });
+      sr.innerHTML = '<input data-testid="shadow-input" name="shadow-email" type="email" placeholder="email inside shadow root">';
+    }
+  }
+  customElements.define('my-field', MyField);
+</script>
+</body>
+</html>

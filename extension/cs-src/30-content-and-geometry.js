@@ -248,7 +248,10 @@
   function screenCenter(refOrSelector) {
     let el = null;
     if (refOrSelector && /^E\d+$/.test(refOrSelector)) el = resolveRef(refOrSelector);
-    if (!el && refOrSelector) { try { el = document.querySelector(refOrSelector); } catch (_) {} }
+    // deepQuery: a shadow-hosted target (any Lit/FAST-style widget) must resolve
+    // here, otherwise the caller is pushed into estimating coordinates from a
+    // screenshot — exactly the pixel-guessing this tool exists to remove.
+    if (!el && refOrSelector) { try { el = deepQuery(refOrSelector); } catch (_) {} }
     if (!el) return { success: false, error: 'element not found: ' + (refOrSelector || '?') };
     const rect = el.getBoundingClientRect();
     // viewport center (CSS px)
@@ -264,6 +267,7 @@
       success: true,
       ref: refOrSelector,
       tag: el.tagName.toLowerCase(),
+      inShadow: isInShadow(el),
       visible: isVisible(el),
       // viewport CSS px center (what the CS/nativeClickXY uses)
       viewport: { x: Math.round(vx), y: Math.round(vy) },
@@ -278,7 +282,10 @@
   function getGeometry(refOrSelector) {
     let el = null;
     if (refOrSelector && /^E\d+$/.test(refOrSelector)) el = resolveRef(refOrSelector);
-    if (!el && refOrSelector) { try { el = document.querySelector(refOrSelector); } catch (_) {} }
+    // deepQuery: a shadow-hosted target (any Lit/FAST-style widget) must resolve
+    // here, otherwise the caller is pushed into estimating coordinates from a
+    // screenshot — exactly the pixel-guessing this tool exists to remove.
+    if (!el && refOrSelector) { try { el = deepQuery(refOrSelector); } catch (_) {} }
     if (!el) return { success: false, error: 'element not found: ' + (refOrSelector || '?') };
     const sc = findScrollContainer();
     const rect = el.getBoundingClientRect();

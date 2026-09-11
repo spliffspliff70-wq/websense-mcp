@@ -52,10 +52,16 @@ function getActiveHub() {
   // forwarded for health checks; `stats()` exposes hub internals for
   // websense_doctor (the old doctor read hub.port/hub.clients off this thin
   // wrapper and always TypeError'd).
+  // NOTE (2026-09-11d): this wrapper is a THIN allow-list. Anything not forwarded
+  // here is invisible to every tool handler — which is exactly how the old doctor
+  // "always TypeError'd" (it read hub.port/hub.clients off this object), and how
+  // the first version of the extension_reload census probe silently fell back to
+  // its legacy path instead of engaging. `census` is forwarded explicitly now.
   return {
     connected: hubChrome.connected,
     send: (cmd) => hubChrome.send(withSessionTab(cmd)),
     stats: () => hubChrome.stats(),
+    census: () => hubChrome.census(),
   };
 }
 
@@ -84,6 +90,83 @@ function classifyEffect(result) {
     return 'suspected_noop';
   }
   return 'unverifiable';
+}
+
+// ═══ ARG GUARD (2026-09-11d) ═══
+// The MCP SDK validates the SCHEMA (types), but every action-specific parameter is
+// declared `.optional()` — so a missing one surfaces later as an opaque runtime
+// error (form upload: readFileSync(undefined) -> 'The "path" argument must be of
+// type string') or, worse, as a silent no-op. Fail HERE instead, naming the
+// parameter and echoing what WAS received — which is what exposes a typo like
+// filepath/filePath, because unknown keys are STRIPPED by the schema before the
+// handler ever runs, so the handler cannot notice them itself.
+function requireArgs(tool, o, spec) {
+  const missing = Object.keys(spec).filter((n) => o[n] === undefined || o[n] === null || o[n] === '');
+  if (missing.length) {
+    const err = new Error('missing required argument(s) for ' + tool + ': '
+      + missing.map((n) => n + ' -- ' + spec[n]).join('; '));
+    err.detail = {
+      reason: 'missing-argument',
+      tool,
+      missing,
+      expected: spec,
+      received: Object.keys(o),
+      hint: 'Parameters not in this tool\'s schema are silently dropped before the handler runs, so check "received" for a typo.',
+    };
+    throw err;
+  }
+}
+
+// Decode an image's pixel size straight from its data-URL header (no deps).
+// The two screenshot paths return DIFFERENT geometries: captureVisibleTab gives
+// the whole visible tab (2560x1271 in this environment) while the debugger
+// fallback gives the rendered page (2560x1215). A consumer mapping page
+// coordinates to pixels must not assume one, so report it instead of making
+// every caller hand-parse PNG/JPEG headers (2026-09-11).
+function imageSize(dataUrl) {
+  try {
+    const b = Buffer.from(String(dataUrl).split(',')[1] || '', 'base64');
+    if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50) {              // PNG
+      return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+    }
+    if (b.length > 4 && b[0] === 0xFF && b[1] === 0xD8) {               // JPEG
+      let i = 2;
+      while (i < b.length - 9) {
+        if (b[i] !== 0xFF) { i++; continue; }
+        const m = b[i + 1];
+        if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC) {
+          return { height: b.readUInt16BE(i + 5), width: b.readUInt16BE(i + 7) };
+        }
+        i += 2 + b.readUInt16BE(i + 2);
+      }
+    }
+  } catch (_) { /* not an image / truncated */ }
+  return {};
+}
+
+// A semantic intent search that matches NOTHING returns an empty list that is
+// indistinguishable from "this page has no interactive elements" — a false
+// negative that reads as a real result. (2026-09-11: explore_page({intent:"full"})
+// looked like an empty page; "full" is a BOOLEAN flag of explore_page, not an
+// intent.) Zero hits must say so.
+function annotateIntentResult(r, kind, q) {
+  // Results arrive EITHER bare or wrapped as {type,id,success,data:{...}} depending
+  // on the relay hop (find_intent comes back wrapped). Inspect both levels — the
+  // first version of this helper only looked at the top level, so it silently
+  // never applied, which is the same "a check nothing reads" failure it exists to
+  // prevent. Verified against a live zero-hit call (2026-09-11d).
+  const box = (r && typeof r === 'object' && r.data && typeof r.data === 'object') ? r.data : r;
+  const n = (box && typeof box === 'object')
+    ? (typeof box.count === 'number' ? box.count
+      : Array.isArray(box.matches) ? box.matches.length
+      : Array.isArray(box.actions) ? box.actions.length : null)
+    : null;
+  if (n !== 0) return r;
+  const note = 'no elements matched ' + kind + ' "' + q + '" -- this is a ZERO-HIT SEMANTIC SEARCH, not an empty page. '
+    + 'If you passed a FLAG as an intent (e.g. intent:"full" -- "full" is a BOOLEAN parameter of explore_page, not an intent), '
+    + 'call explore_page again with no intent/goal for the full page map.';
+  if (box === r) return Object.assign({}, r, { matched: 0, note });
+  return Object.assign({}, r, { data: Object.assign({}, box, { matched: 0, note }) });
 }
 
 // Wrap any tool handler so errors return a result instead of crashing the server
@@ -359,8 +442,9 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       settle: z.boolean().optional().describe('false = skip the SPA hydration settle wait entirely'),
     },
   }, async (o) => {
-    if (o.intent) return textResult(await getActiveHub().send({ type: 'find_intent', intent: o.intent, frameId: o.frameId }));
-    if (o.goal) return textResult(await getActiveHub().send({ type: 'explore_intent', goal: o.goal, frameId: o.frameId }));
+    // A zero-hit semantic search must not look like an empty page (see annotateIntentResult).
+    if (o.intent) return textResult(annotateIntentResult(await getActiveHub().send({ type: 'find_intent', intent: o.intent, frameId: o.frameId }), 'intent', o.intent));
+    if (o.goal) return textResult(annotateIntentResult(await getActiveHub().send({ type: 'explore_intent', goal: o.goal, frameId: o.frameId }), 'goal', o.goal));
     if (o.compact) return textResult(await getActiveHub().send({ type: 'discover_actions', maxActions: o.maxActions === undefined ? 200 : o.maxActions, frameId: o.frameId }));
     if (o.preload) {
       await getActiveHub().send({ type: 'preload_content', maxSteps: 8, settleMs: 250, restore: true });
@@ -535,11 +619,13 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   }, async (o) => {
     if (o.action === 'state') return textResult(await getActiveHub().send({ type: 'form_state', formRef: o.formRef, frameId: o.frameId }));
     if (o.action === 'select') {
+      requireArgs('form:select', o, { ref: 'element ref of the select', value: 'option value to select' });
       const result = await getActiveHub().send({ type: 'select_option', ref: o.ref, value: o.value, clearAll: o.clearAll, frameId: o.frameId });
       session.recordAction({ action: 'select_option', ref: o.ref, value: o.value }, result);
       return textResult(result);
     }
     if (o.action === 'special') {
+      requireArgs('form:special', o, { ref: 'element ref', value: 'target value (date / colour / range / number)' });
       const result = await getActiveHub().send({ type: 'form_special', ref: o.ref, value: o.value, frameId: o.frameId });
       session.recordAction({ action: 'form_special', ref: o.ref, value: o.value }, result);
       return textResult(result);
@@ -550,12 +636,50 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       return textResult(result);
     }
     // upload
+    // Without this, a missing filePath reached readFileSync(undefined) and threw
+    // 'The "path" argument must be of type string. Received undefined' — an error
+    // that never names the argument you actually forgot.
+    requireArgs('form:upload', o, {
+      filePath: 'absolute path of the file to upload',
+      ref: 'element ref of the file input / editor / drop zone',
+    });
     try {
       const fileBuffer = readFileSync(o.filePath);
       const base64 = fileBuffer.toString('base64');
       const fileName = o.filePath.split(/[\\/]/).pop();
       const ext = fileName.split('.').pop().toLowerCase();
-      const mimeTypes = { png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif', pdf:'application/pdf', txt:'text/plain', csv:'text/csv', json:'application/json', xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document', zip:'application/zip' };
+      // MIME map — the extension decides whether Chrome ACCEPTS the file: when a
+      // file's type does not match the input's `accept` list, Chrome filters it out
+      // and `input.files`comes back EMPTY (the `fileCount:0` / "Input rejected the
+      // file" signature). Video and audio were missing entirely before 2026-09-11,
+      // so `upload_file` silently failed on every .mp4/.mov/.mp3 (x.com video
+      // posts, YouTube uploads, etc.). Keep this list ahead of real-world accepts.
+      const mimeTypes = {
+        // images
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+        webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', ico: 'image/x-icon',
+        tif: 'image/tiff', tiff: 'image/tiff', avif: 'image/avif', heic: 'image/heic',
+        // video
+        mp4: 'video/mp4', m4v: 'video/x-m4v', mov: 'video/quicktime', webm: 'video/webm',
+        avi: 'video/x-msvideo', mkv: 'video/x-matroska', mpg: 'video/mpeg', mpeg: 'video/mpeg',
+        // audio
+        mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac',
+        ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/opus', flac: 'audio/flac',
+        weba: 'audio/webm',
+        // documents
+        pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
+        json: 'application/json', xml: 'application/xml', html: 'text/html', htm: 'text/html',
+        rtf: 'application/rtf', odt: 'application/vnd.oasis.opendocument.text',
+        doc: 'application/msword',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xls: 'application/vnd.ms-excel',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ppt: 'application/vnd.ms-powerpoint',
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        // archives
+        zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar',
+        '7z': 'application/x-7z-compressed', rar: 'application/vnd.rar',
+      };
       const result = await getActiveHub().send({ type: 'upload_file', ref: o.ref, fileContent: base64, fileName, mimeType: mimeTypes[ext] || 'application/octet-stream', frameId: o.frameId });
       return textResult(result);
     } catch (err) {
@@ -873,7 +997,21 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       format: z.enum(['png', 'jpeg']).optional().describe('Default png'),
       quality: z.number().optional().describe('JPEG quality 0-100 (default 80)'),
     },
-  }, async (o) => textResult(await getActiveHub().send({ type: 'browser_screenshot', format: o.format || 'png', quality: o.quality || 80 })));
+  }, async (o) => {
+    let r = await getActiveHub().send({ type: 'browser_screenshot', format: o.format || 'png', quality: o.quality || 80 });
+    // Normalize: a relay path can hand back a JSON STRING rather than the object
+    // (textResult passes strings through verbatim, so the client would have to
+    // parse twice). Always emit one object shape.
+    if (typeof r === 'string') { try { r = JSON.parse(r); } catch (_) { r = { success: false, error: r.slice(0, 300) }; } }
+    if (r && r.dataUrl) {
+      const d = imageSize(r.dataUrl);
+      if (d.width) { r.width = d.width; r.height = d.height; }
+      // The two capture paths differ in height (visible-tab vs rendered page), so
+      // say which produced this frame instead of leaving the caller to guess.
+      r.note = 'mode=' + (r.mode || 'unknown') + ' — visible-tab and debugger-fallback frames can differ in height; use width/height above when mapping page coords to pixels.';
+    }
+    return textResult(r);
+  });
 
   // ═══ 15. PRESS_KEY ═══
   reg(server, 'press_key', {
@@ -1003,6 +1141,20 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   }, async (o) => {
     const hub = getActiveHub();
     const timeoutMs = (o && o.timeoutMs) || 15000;
+    // Read-only hub census accessor. Declared FIRST because it is used below to
+    // snapshot client ids before the reload — a `const` arrow is in the temporal
+    // dead zone until its own line runs, so ordering here is load-bearing.
+    const censusSnap = () => {
+      try { return (typeof hub.census === 'function') ? hub.census() : null; } catch (_) { return null; }
+    };
+    // Snapshot the CLIENT IDS before reloading. Connectivity alone is not evidence
+    // that a reload happened — a client was already connected BEFORE the call, so a
+    // connectivity-only probe reports success unconditionally (measured 2026-09-11d:
+    // ids c1,c2,c3 identical before and after while chrome.runtime.reload() had in
+    // fact never run, and the on-disk content script stayed STALE). A real reload
+    // replaces clients, so require the id set to change.
+    const idSet = (c) => (Array.isArray(c && c.clients) ? c.clients.map((x) => x.id).sort().join(',') : '');
+    const beforeIds = idSet(censusSnap());
     let reloadSent = false;
     try {
       await hub.send({ type: 'extension_reload' });
@@ -1011,24 +1163,50 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       // expected: the SW dies mid-request, so the send may reject. Treat as sent.
       reloadSent = true;
     }
-    // Poll until the extension answers again
+    // LIVENESS PROBE (2026-09-11d). The old probe sent get_status through the
+    // relay and was wrong twice over: (a) right after chrome.runtime.reload() the
+    // hub can still hold the OLD offscreen socket, so a message gets accepted by a
+    // context that no longer exists (zombie) — the probe then reported a FALSE
+    // NEGATIVE while the extension was already healthy; (b) content scripts
+    // re-inject lazily, so nothing can answer yet even when the reload succeeded.
+    // Ask the hub's own READ-ONLY client census instead — a dead route cannot fool
+    // it — and keep the message probe only as a fallback for older hubs.
     const t0 = Date.now();
     let back = false;
+    let changed = false;
+    let dropped = false;
     let lastErr = null;
+    let lastCensus = null;
     while (Date.now() - t0 < timeoutMs) {
-      await new Promise((r) => setTimeout(r, 1000));
-      try {
+      await new Promise((r) => setTimeout(r, 400));
+      const c = censusSnap();
+      if (c) {
+        lastCensus = { clientsRegistered: c.clientsRegistered, offscreenConnected: c.offscreenConnected === true, ids: idSet(c) };
+        const anyOpen = Array.isArray(c.clients) && c.clients.some((x) => x.readyStateName === 'OPEN');
+        if (c.clientsRegistered === 0) dropped = true;
+        // A changed id set is the signal that a reload actually occurred.
+        if (lastCensus.ids !== beforeIds) { changed = true; if (anyOpen) { back = true; break; } }
+        if (anyOpen) back = true;      // connected, but not (yet) proven reloaded
+        continue;
+      }
+      try {   // census unavailable (older hub) — message probe
         const st = await hub.send({ type: 'get_status' }, { timeoutMs: 4000 });
         if (st && (st.hubConnected || st.connected || st.ok)) { back = true; break; }
       } catch (e) { lastErr = String(e); }
     }
+    const verified = changed || (dropped && back);
     return textResult({
       reloadSent,
       reconnected: back,
+      reloadVerified: verified,
       waitedMs: Date.now() - t0,
-      lastError: back ? undefined : (lastErr || 'timeout waiting for extension reconnect'),
-      note: back ? 'extension reloaded and reconnected — fresh code is live. Re-bind tabs before page ops.'
-                 : 'extension did not reconnect in time — check chrome://extensions for errors.',
+      probe: lastCensus ? 'hub-census' : 'get_status-fallback',
+      clientIdsBefore: beforeIds || undefined,
+      clientsSeen: lastCensus || undefined,
+      lastError: verified ? undefined : (lastErr || 'the client set never changed'),
+      note: verified
+        ? 'extension reloaded and reconnected — fresh code is live. Re-bind tabs before page ops (content scripts re-inject lazily).'
+        : 'NOT VERIFIED — the client id set never changed (' + (beforeIds || 'none') + '), so a reload probably never ran and the ON-DISK code may NOT be live even though a client is connected. Use the popup path instead: navigate a tab to chrome-extension://<id>/popup.html and click Reconnect (chrome.runtime.reload() runs directly in the popup).',
     });
   });
 
@@ -1076,6 +1254,32 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     catch (e) { return { success: false, error: 'parse failed: ' + out.slice(0, 300) }; }
   }
 
+  // Genuine OS input (click/paste) is delivered OUTSIDE the page's JS, so there is
+  // no synthetic event to inspect — the only honest check is whether page state
+  // changed. Capture it around the call and classify (2026-09-11d). Previously the
+  // escalation rung — the one that exists precisely BECAUSE synthetic input is
+  // unreliable — was the only rung returning no verdict at all.
+  // LIMIT (stated, not hidden): page_state covers url/title/readyState/scroll, so a
+  // modal or DOM-only change reads as suspected_noop. That is NOT proof of failure.
+  async function withEffect(fn) {
+    const quick = async () => { try { return await getActiveHub().send({ type: 'page_state' }); } catch (_) { return null; } };
+    const before = await quick();
+    const res = await fn();
+    if (!res || typeof res !== 'object' || res.success === false) return res;
+    await new Promise((r) => setTimeout(r, 450));   // let the handler run
+    const after = await quick();
+    res.beforeState = before;
+    res.afterState = after;
+    res.effect = classifyEffect(res);
+    if (res.effect !== 'confirmed') {
+      res.escalation = {
+        recommended: 'read',
+        reason: 'page_state (url/title/scroll) did not change after genuine OS input. This does NOT prove the click failed — a modal or DOM-only change will not show here. Verify by re-reading the DOM or taking a screenshot.',
+      };
+    }
+    return res;
+  }
+
   // ═══ 21b. MAIN-WORLD INSIDER TOOLKIT (v4.5 — 2026-09-01, Ali directive) ═══
   // The F12-equivalent: run a COMPILED function inside the page's own JS
   // universe (world:'MAIN') where React fibers / Lexical instances / Lit
@@ -1104,7 +1308,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       match: z.string().describe('Tab title substring to match (e.g. "Submit to r/mcp")'),
       gate: z.string().optional().describe('Expected window title after activation (default: match)'),
     },
-  }, async (o) => textResult(runRealInput(`activate-tab --match "${(o.match||'').replace(/"/g,'\\"')}"${o.gate ? ` --gate "${o.gate.replace(/"/g,'\\"')}"` : ''}`)));
+  }, async (o) => textResult(await withEffect(() => runRealInput(`activate-tab --match "${(o.match||'').replace(/"/g,'\\"')}"${o.gate ? ` --gate "${o.gate.replace(/"/g,'\\"')}"` : ''}`))));
 
   reg(server, 'real_click', {
     description: 'GENUINE OS-level click (SendInput) at VIEWPORT coords (x,y) — bypasses synthetic-click-ignoring submit buttons (React/Lit/CustomElement). Title-gated: gate must match the active Chrome tab title or the click is refused (multi-agent churn protection). Get coords from inspect{kind:"geometry"}. origin: override doc-origin Y if the auto-measure fails (default measured via UIA).',
@@ -1114,7 +1318,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       gate: z.string().describe('Expected active-tab title substring (gate)'),
       origin: z.number().optional().describe('Override page Document origin Y (default: auto-measured ~121)'),
     },
-  }, async (o) => textResult(runRealInput(`click-xy --x ${Math.round(o.x)} --y ${Math.round(o.y)} --gate "${(o.gate||'').replace(/"/g,'\\"')}"${o.origin ? ` --origin ${Math.round(o.origin)}` : ''}`)));
+  }, async (o) => textResult(await withEffect(() => runRealInput(`click-xy --x ${Math.round(o.x)} --y ${Math.round(o.y)} --gate "${(o.gate||'').replace(/"/g,'\\"')}"${o.origin ? ` --origin ${Math.round(o.origin)}` : ''}`))));
 
   reg(server, 'real_paste', {
     description: 'GENUINE paste into a focused editor (click at VIEWPORT coords + system clipboard + real Ctrl+V) — for Lexical/Draft.js/ProseMirror editors that revert synthetic paste events. text: content to paste; x,y: viewport coords of the editor (inspect geometry center); gate: expected active-tab title substring. Verify after with evaluate extract:"html".',
@@ -1124,7 +1328,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       text: z.string().describe('Text to paste'),
       gate: z.string().describe('Expected active-tab title substring (gate)'),
     },
-  }, async (o) => textResult(runRealInput(`paste-text --x ${Math.round(o.x)} --y ${Math.round(o.y)} --gate "${(o.gate||'').replace(/"/g,'\\"')}" --text "${String(o.text).replace(/"/g,'\\"')}"`)));
+  }, async (o) => textResult(await withEffect(() => runRealInput(`paste-text --x ${Math.round(o.x)} --y ${Math.round(o.y)} --gate "${(o.gate||'').replace(/"/g,'\\"')}" --text "${String(o.text).replace(/"/g,'\\"')}"`))));
 
   // Slim tool schemas on the wire (Ali directive 2026-08-18)
   installSchemaMinifier(server);

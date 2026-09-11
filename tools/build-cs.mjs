@@ -38,7 +38,15 @@ export function build() {
   if (!files.length) throw new Error('no sources in ' + SRCDIR);
   const chunks = files.map(f => readFileSync(join(SRCDIR, f), 'utf8'));
   // Each part file ends with CRLF; joining with '' keeps those separators exact.
-  const body = chunks.join('');
+  let body = chunks.join('');
+  // BUILD STAMP (2026-09-11d). csBuild used to be a hand-written constant, so it
+  // was useless for the one question that matters: "is the content script running
+  // the code I just wrote?" It happily reported an unchanged string while the
+  // running copy was stale. Stamp the SOURCE HASH into the artifact instead, so
+  // the live csBuild names the exact build. Deterministic: the hash is taken
+  // before substitution, and the placeholder is fixed-width-free.
+  const stamp = 'v4.6.1-' + sha(body).slice(0, 8);
+  body = body.split('__CS_BUILD__').join(stamp);
   return BANNER + '\r\n' +
     '(function () {\r\n' +
     "  'use strict';\r\n" +

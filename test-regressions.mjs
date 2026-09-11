@@ -838,5 +838,186 @@ test('server: safeHandler folds hub detail back into the tool result', () => {
   assert(/success: false, error: err && err\.message/.test(m[0]), 'still returns `error` for existing callers');
 });
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// 2026-09-11d — CONFIRMATION INTEGRITY · ARG GUARD · SHADOW-DOM PIERCING
+// Each test pins a false claim that was observed LIVE, so it cannot come back
+// quietly. Where a function is pure enough, the test runs the REAL extracted
+// source instead of grepping for a string.
+// ══════════════════════════════════════════════════════════════════════════
+const CS_CODE = CS_SRC.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+
+test('upload: never asserts failure from the isolated-world read-back', () => {
+  // Live: THREE copies of one video attached while every call reported
+  // fileCount:0 "Input rejected the file" — the File is realm-local.
+  assert(!CS_CODE.includes('Input rejected the file'), 'the false "rejected" claim is gone');
+  assert(CS_CODE.includes('unconfirmed-realm-readback'), 'reports UNCONFIRMED instead');
+  assert(CS_CODE.includes('realmReadbackUnreliable'), 'flags the read-back as unreliable');
+  assert(/success: shown === true/.test(CS_CODE), 'success now needs page-side evidence');
+});
+
+test('type_text: no phantom success granted by an attribute', () => {
+  assert(!CS_CODE.includes('success: matches || hasValidityIssue'),
+    'faceplate-validity alone can no longer grant success');
+  assert(CS_CODE.includes('unconfirmed-shadow-input-text-missing'), 'downgrades to unconfirmed');
+});
+
+test('type_text: re-reads after a settle so a framework wipe is caught', () => {
+  assert(CS_CODE.includes('var readBack = function(pass)'), 'readBack is pass-aware');
+  assert(CS_CODE.includes('if (matches && pass < 2)'), 'a second read is scheduled on a match');
+  assert(CS_CODE.includes('value-persisted-after-settle'), 'distinguishes settled persistence');
+  assert(CS_CODE.includes('el.isContentEditable === true'), 'editors read rendered text, not el.value');
+});
+
+test('shadow DOM: piercing helpers exist', () => {
+  assert(/function deepQueryAll\(selector, root\)/.test(CS_SRC), 'deepQueryAll defined');
+  assert(/function deepQuery\(selector, root\)/.test(CS_SRC), 'deepQuery defined');
+  assert(/function isInShadow\(el\)/.test(CS_SRC), 'isInShadow defined');
+});
+
+test('shadow DOM: the previously-blind paths now pierce', () => {
+  const n = (CS_SRC.match(/deepQuery\(refOrSelector\)/g) || []).length;
+  assert(n >= 2, 'getGeometry AND screenCenter pierce (got ' + n + ')');
+  assert(CS_SRC.includes('const el = deepQuery(q.selector);'), 'evaluate_safe(single) pierces');
+  assert(CS_SRC.includes('const els = deepQueryAll(q.selector);'), 'evaluate_safe(all) pierces');
+  assert(CS_SRC.includes("deepQueryAll('button, a, input, textarea, select"), 'intent search pierces');
+});
+
+test('shadow DOM: deepQueryAll really walks nested shadow roots (BEHAVIOURAL)', () => {
+  const src = CS_SRC.match(/function deepQueryAll\(selector, root\) \{[\s\S]*?\n  \}/);
+  assert(src, 'extracted deepQueryAll from the built artifact');
+  const walk = (kids) => { const out = []; for (const k of kids) { out.push(k); out.push(...walk(k.kids || [])); } return out; };
+  const mk = (sels, o) => { o = o || {}; return {
+    sels: new Set(sels || []), kids: o.kids || [], shadowRoot: o.shadowRoot || null,
+    querySelectorAll(sel) { if (sel === '*') return walk(o.kids || []); return walk(o.kids || []).filter((k) => k.sels.has(sel)); },
+  }; };
+  const btn = mk(['[data-testid="post"]']);
+  const innerHost = mk([], { kids: [btn] });
+  const outerHost = mk([], { shadowRoot: mk([], { kids: [innerHost] }) });
+  const doc = mk([], { kids: [outerHost] });
+  const fn = new Function('document', src[0] + '\n  return deepQueryAll;')(doc);
+  const hits = fn('[data-testid="post"]', doc);
+  assert(hits.length === 1 && hits[0] === btn, 'found a control nested two shadow roots deep');
+  assert(fn('[data-testid="nope"]', doc).length === 0, 'returns empty for a genuine miss');
+});
+
+test('server: requireArgs names the missing argument (BEHAVIOURAL)', () => {
+  const m = SRV_SRC.match(/function requireArgs\(tool, o, spec\) \{[\s\S]*?\n\}/);
+  assert(m, 'extracted requireArgs');
+  const fn = new Function(m[0] + '\n  return requireArgs;')();
+  let err = null;
+  try { fn('form:upload', { ref: 'E1' }, { filePath: 'absolute path', ref: 'element ref' }); }
+  catch (e) { err = e; }
+  assert(err, 'threw when filePath was missing');
+  assert(/filePath/.test(err.message), 'message names the missing parameter');
+  assert(err.detail && err.detail.reason === 'missing-argument', 'detail carries the reason');
+  assert(err.detail.received.indexOf('ref') !== -1, 'received lists what actually arrived');
+  fn('form:upload', { ref: 'E1', filePath: '/tmp/x.mp4' }, { filePath: 'p', ref: 'r' }); // must not throw
+});
+
+test('server: form upload/select/special are guarded', () => {
+  assert(SRV_SRC.includes("requireArgs('form:upload'"), 'upload guarded');
+  assert(SRV_SRC.includes("requireArgs('form:select'"), 'select guarded');
+  assert(SRV_SRC.includes("requireArgs('form:special'"), 'special guarded');
+});
+
+test('server: upload MIME map covers video + audio (the .mp4 gap)', () => {
+  assert(/mp4:\s*'video\/mp4'/.test(SRV_SRC), 'mp4 mapped (uploads of video were impossible)');
+  assert(/webm:\s*'video\/webm'/.test(SRV_SRC), 'webm mapped');
+  assert(/mp3:\s*'audio\/mpeg'/.test(SRV_SRC), 'audio mapped');
+});
+
+test('server: a zero-hit intent search says so instead of looking empty', () => {
+  assert(/function annotateIntentResult\(/.test(SRV_SRC), 'helper present');
+  assert(SRV_SRC.includes("annotateIntentResult(await getActiveHub().send({ type: 'find_intent'"),
+    'find_intent is annotated');
+  assert(SRV_SRC.includes("annotateIntentResult(await getActiveHub().send({ type: 'explore_intent'"),
+    'explore_intent is annotated');
+});
+
+test('server: screenshot result is normalized + reports pixel size', () => {
+  assert(/function imageSize\(/.test(SRV_SRC), 'imageSize helper present');
+  const m = SRV_SRC.match(/reg\(server, 'screenshot'[\s\S]*?\n  \}\);/);
+  assert(m, 'screenshot tool found');
+  assert(m[0].includes('imageSize(r.dataUrl)'), 'dimensions decoded from the dataURL');
+  assert(m[0].includes("typeof r === 'string'"), 'a bare-string relay result is parsed');
+  assert(m[0].includes('r.width = d.width'), 'width/height surfaced to the caller');
+});
+
+test('server: imageSize decodes a real PNG header (BEHAVIOURAL)', () => {
+  const m = SRV_SRC.match(/function imageSize\(dataUrl\) \{[\s\S]*?\n\}/);
+  assert(m, 'extracted imageSize');
+  const fn = new Function('Buffer', m[0] + '\n  return imageSize;')(Buffer);
+  const png = Buffer.alloc(26);
+  png[0] = 0x89; png[1] = 0x50;
+  png.writeUInt32BE(7, 16); png.writeUInt32BE(3, 20);
+  const d = fn('data:image/png;base64,' + png.toString('base64'));
+  assert(d.width === 7 && d.height === 3, 'PNG dims read: ' + JSON.stringify(d));
+  assert(Object.keys(fn('data:image/png;base64,!!!')).length === 0, 'garbage yields {} not a throw');
+});
+
+test('server: extension_reload probes the hub census, not a relay message', () => {
+  const m = SRV_SRC.match(/reg\(server, 'extension_reload'[\s\S]*?\n  \}\);/);
+  assert(m, 'tool found');
+  assert(m[0].includes('hub.census'), 'uses the read-only census');
+  assert(m[0].includes("probe: lastCensus ? 'hub-census'"), 'reports which probe ran');
+  assert(m[0].includes('offscreenConnected'), 'checks the offscreen specifically');
+});
+
+test('server: the real_* escalation rung now reports an effect verdict', () => {
+  const m = SRV_SRC.match(/async function withEffect\(fn\) \{[\s\S]*?\n  \}/);
+  assert(m, 'withEffect present');
+  assert(m[0].includes('classifyEffect(res)'), 'classifies page state after the OS input');
+  const wrapped = (SRV_SRC.match(/await withEffect\(\(\) => runRealInput\(/g) || []).length;
+  assert(wrapped === 3, 'all three real_* tools wrapped (got ' + wrapped + ')');
+  assert(m[0].includes('does NOT prove the click failed'), 'states the page_state limitation openly');
+});
+
+
+test('server: the session hub wrapper FORWARDS census (thin allow-list hazard)', () => {
+  // getActiveHub() is a thin wrapper; anything not forwarded is invisible to every
+  // handler. The first census probe silently fell back for exactly this reason.
+  const m = SRV_SRC.match(/function getActiveHub\(\) \{[\s\S]*?\n\}/);
+  assert(m, 'getActiveHub found');
+  assert(m[0].includes('census: () => hubChrome.census()'), 'census is forwarded');
+});
+
+
+test('server: annotateIntentResult handles the WRAPPED envelope (BEHAVIOURAL)', () => {
+  const m = SRV_SRC.match(/function annotateIntentResult\(r, kind, q\) \{[\s\S]*?\n\}/);
+  assert(m, 'extracted annotateIntentResult');
+  const fn = new Function(m[0] + '\n  return annotateIntentResult;')();
+  // find_intent really returns this shape — annotating only the top level missed it.
+  const wrapped = fn({ type: 'find_intent_result', id: 'r2', success: true, data: { success: true, query: 'full', count: 0, matches: [] } }, 'intent', 'full');
+  assert(wrapped.data.matched === 0, 'zero hits marked on the wrapped payload');
+  assert(/ZERO-HIT SEMANTIC SEARCH/.test(wrapped.data.note), 'note explains it is not an empty page');
+  // a real hit must pass through untouched
+  const hit = { type: 'find_intent_result', id: 'r3', success: true, data: { count: 4, matches: [1, 2, 3, 4] } };
+  assert(fn(hit, 'intent', 'submit') === hit, 'a non-zero result is returned unchanged');
+  // and the bare shape still works
+  const bare = fn({ success: true, count: 0, matches: [] }, 'goal', 'login');
+  assert(bare.matched === 0 && bare.note, 'bare shape also annotated');
+});
+
+
+test('cs: csBuild is a BUILD STAMP, not a hand-written constant', () => {
+  // The old constant could not answer "is the running copy my new code?" — it
+  // reported the same string while the live CS was stale.
+  assert(!CS_SRC.includes('__CS_BUILD__'), 'placeholder is substituted in the artifact');
+  const m = CS_SRC.match(/csBuild:'(v4\.6\.1-[0-9a-f]{8})'/);
+  assert(m, 'csBuild carries a version + source-hash stamp');
+});
+
+test('cs: the build stamp is the hash of the source that produced it', async () => {
+  const { build, sha } = await import('./tools/build-cs.mjs');
+  const a = build();
+  const stamp = a.match(/csBuild:'v4\.6\.1-([0-9a-f]{8})'/)[1];
+  // Reverse the substitution: restore the placeholder, drop the banner, re-hash.
+  // If the stamp did not actually cover the source, this will not match.
+  const body = a.slice(a.indexOf('(function () {'));
+  const pre = body.split(stamp).join('__CS_BUILD__');
+  assert(sha(pre).slice(0, 8) === stamp, 'stamp == sha(source) — a source edit MUST change it');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

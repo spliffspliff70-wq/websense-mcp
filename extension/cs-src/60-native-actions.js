@@ -382,18 +382,42 @@
               document.execCommand('insertText', false, text);
             } catch (_) {}
           }
-          var readBack = function() {
-            var finalVal = el.value;
+          // v4.6.1 CONFIRMATION INTEGRITY (2026-09-11d). Two false-positive paths removed:
+          //  (1) `success: matches || hasValidityIssue` granted SUCCESS from the
+          //      faceplate-validity ATTRIBUTE alone, with no evidence the text was present.
+          //      An attribute is not evidence — hasValidityIssue now only ever DOWNGRADES
+          //      the verdict, it can never upgrade it.
+          //  (2) `matches` compared el.value, which is UNDEFINED for a rich-text editor
+          //      (Lexical/Draft.js/ProseMirror keep the text in child nodes). Comparing a
+          //      meaningless property is how a write was reported "value-persisted" on
+          //      Reddit while the editor was EMPTY. Read rendered text when there is no
+          //      usable value property.
+          // Also: one early match is not persistence — Lexical wipes DOM text it did not
+          // author, so re-read once after a settle and trust the LAST read.
+          var readBack = function(pass) {
+            var isEditorEl = el.isContentEditable === true || el.getAttribute('contenteditable') === 'true';
+            var hasVal = (typeof el.value === 'string' && el.value.length > 0) || (!isEditorEl && el.value !== undefined);
+            var finalVal = hasVal ? String(el.value) : String(el.innerText || el.textContent || '');
             var matches = (finalVal === text) || (finalVal === String(text));
             var validity = isCustomElement ? el.getAttribute('faceplate-validity') : null;
+            if (matches && pass < 2) {
+              setTimeout(function() { readBack(pass + 1); }, 500);
+              return;
+            }
             resolve({
-              success: matches || hasValidityIssue,
-              confirmed: matches ? 'value-persisted' : (hasValidityIssue ? 'custom-element-shadow-input' : false),
-              actualValue: finalVal,
-              reverted: !matches && !hasValidityIssue,
-              expected: text,
+              success: matches,
+              confirmed: matches ? (pass >= 2 ? 'value-persisted-after-settle' : 'value-persisted')
+                : (hasValidityIssue ? 'unconfirmed-shadow-input-text-missing' : false),
+              actualValue: finalVal.slice(0, 200),
+              reverted: !matches,
+              expected: String(text).slice(0, 200),
               validity,
               framework: hasValidityIssue ? 'custom-element' : undefined,
+              note: matches
+                ? (pass >= 2 ? 'Text still present on a second read 500ms later.' : 'Text present on first read.')
+                : 'Text is NOT present at read time, so this is NOT a success. '
+                  + (hasValidityIssue ? 'The custom element also reports faceplate-validity=invalid. ' : 'The framework discarded the value. ')
+                  + 'Use real_paste (genuine Ctrl+V) or scripts/real_input.py paste-text for this editor.',
             });
           };
           // v4.3.1 CRITICAL FIX (2026-09-01): rAF NEVER FIRES IN BACKGROUND
@@ -627,7 +651,7 @@
       const q = query || {};
       if (q.state) {
         const d = document;
-        const inputs = Array.prototype.slice.call(d.querySelectorAll('input,textarea,select')).map(function (i) {
+        const inputs = Array.prototype.slice.call(deepQueryAll('input,textarea,select')).map(function (i) {
           return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: i.value, checked: !!(i.checked || i.selected) };
         });
         return { success: true, mode: 'state', url: location.href, title: d.title, scrollY: window.scrollY, scrollH: (d.documentElement && d.documentElement.scrollHeight) || 0, inputCount: inputs.length, inputs: inputs.slice(0, 60) };
@@ -637,14 +661,15 @@
         return { success: true, mode: 'text', length: t.length, text: t.slice(0, q.maxLen || 20000) };
       }
       if (q.inputs) {
-        const ins = Array.prototype.slice.call(document.querySelectorAll('input,textarea,select')).map(function (i) {
+        const ins = Array.prototype.slice.call(deepQueryAll('input,textarea,select')).map(function (i) {
           return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: i.value, checked: !!(i.checked || i.selected), placeholder: i.placeholder || '', label: getLabel(i).slice(0, 60) };
         });
         return { success: true, mode: 'inputs', count: ins.length, inputs: ins.slice(0, 100) };
       }
       if (!q.selector) return { success: false, error: 'evaluate_safe needs selector, inputs:true, text:true, or state:true' };
-      const el = document.querySelector(q.selector);
-      if (!el) return { success: true, mode: 'query', found: false, selector: q.selector };
+      const el = deepQuery(q.selector);
+      if (!el) return { success: true, mode: 'query', found: false, selector: q.selector,
+        note: 'not found in the light DOM or in any OPEN shadow root. If the site uses a CLOSED shadow root no script can reach it — use explore_page refs or real_click at coordinates.' };
       const ex = q.extract || 'text';
       let val;
       if (ex === 'value') val = el.value !== undefined ? el.value : (el.textContent || '');
@@ -652,7 +677,7 @@
       else if (ex === 'html') val = el.outerHTML;
       else val = el.textContent || '';
       if (q.all) {
-        const els = document.querySelectorAll(q.selector);
+        const els = deepQueryAll(q.selector);
         const arr = [];
         for (let i = 0; i < els.length && i < (q.maxLen || 100); i++) {
           const e = els[i];
@@ -662,7 +687,7 @@
         }
         return { success: true, mode: 'query-all', found: true, count: arr.length, results: arr };
       }
-      return { success: true, mode: 'query', found: true, value: val };
+      return { success: true, mode: 'query', found: true, inShadow: isInShadow(el), value: val };
     } catch (e) { return { success: false, error: String((e && e.message) || e) }; }
   }
   function nativeTypeMany(fields) {
@@ -861,14 +886,31 @@
       }
       realInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
       realInput.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+      // v4.6.1 UPLOAD FALSE-NEGATIVE FIX (2026-09-11d). `realInput.files.length` is read
+      // back in the ISOLATED world, where the File/DataTransfer are realm-local. On
+      // strict-CSP pages Chrome reports an EMPTY FileList even when the file DID attach,
+      // so this reading produced "Input rejected the file" for uploads that had in fact
+      // succeeded — three copies of one video landed on a post the tool insisted had
+      // failed. NEVER assert failure from it: prefer page-side evidence, and otherwise
+      // report UNCONFIRMED rather than wrong.
+      const realmCount = realInput.files ? realInput.files.length : 0;
+      await new Promise((r) => setTimeout(r, 700));   // let the app render a preview
+      let shown = false;
+      try { shown = pageShowsFileName(file.name) === true; } catch (_) {}
       return {
-        success: realInput.files.length > 0,
+        success: shown === true,
         method: 'file_input',
-        fileCount: realInput.files.length,
+        fileCount: realmCount,
         fileName: file.name,
         fileSize: file.size,
-        confirmed: realInput.files.length > 0 ? 'input-has-file' : false,
-        note: realInput.files.length > 0 ? 'File set on input. Verify the app accepted it before reporting success.' : 'Input rejected the file.',
+        confirmed: shown === true ? 'preview-visible'
+          : (realmCount > 0 ? 'input-has-file' : 'unconfirmed-realm-readback'),
+        realmReadbackUnreliable: realmCount === 0,
+        note: shown === true
+          ? 'File attached — the page shows it.'
+          : (realmCount > 0
+            ? 'File set on the input; no page preview found yet. Verify before assuming success.'
+            : 'The isolated-world read-back returned 0, which is NOT evidence of failure on a strict-CSP page (the File is realm-local). Check the page/preview directly, or use real_paste (genuine CF_HDROP) / scripts/real_input.py paste-file.'),
       };
     }
 

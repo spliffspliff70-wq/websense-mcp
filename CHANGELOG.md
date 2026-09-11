@@ -3,6 +3,75 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.1] — 2026-09-11
+
+Four defects found by using the tool hard, all fixed at the source and pinned by
+regression tests (97/97; the pure functions are exercised behaviourally — the real
+extracted source runs against a fake DOM — rather than grepped for).
+
+### Confirmation integrity
+
+WebSense's confirmation fields could lie in **both** directions, because the
+read-back happened in the content script's isolated world at the instant of the
+action — which is not evidence of what the page actually did.
+
+- **`form action:"upload"` no longer reports a false failure.** It returned
+  `fileCount: 0` with "Input rejected the file" for uploads that *had* attached:
+  the `File`/`DataTransfer` are realm-local, so Chrome reports an empty `FileList`
+  on strict-CSP pages. Three copies of one video landed on a post the tool
+  insisted had failed. It now requires page-side evidence and otherwise reports
+  `unconfirmed-realm-readback`.
+- **`type_text` no longer grants a phantom success.** It returned `success: true`
+  from the `faceplate-validity` *attribute* alone, and compared `el.value` — which
+  is `undefined` for a rich-text editor (Lexical/Draft.js/ProseMirror keep the text
+  in child nodes). That is how a write reported "value-persisted" while the editor
+  was empty. It now reads rendered text, re-reads after a settle (frameworks wipe
+  DOM text they did not author), and an attribute can only *downgrade* the verdict.
+
+### Argument guard
+
+The MCP SDK validates types, but every action-specific parameter is `.optional()`,
+so a missing one became an opaque runtime error (`readFileSync(undefined)`) or a
+silent no-op. `requireArgs()` now fails loudly, naming the missing parameter,
+listing what it expected, and echoing what actually arrived — which is what
+exposes a typo, since unknown keys are stripped before the handler runs.
+
+### Better diagnostics
+
+- A **zero-hit intent search** returned an empty list indistinguishable from an
+  empty page. It now says so explicitly (`matched: 0` + note), and inspects both
+  the bare and `{type,id,success,data}` result envelopes.
+- **`screenshot`** results are normalized to one object shape and carry
+  `width`/`height` — the two capture paths differ (visible-tab 2560×1271 vs
+  debugger-fallback 2560×1215), so callers mapping page coordinates to pixels no
+  longer have to hand-parse image headers.
+- **`extension_reload`** now requires *evidence* of a reload (the hub's client-id
+  set must change) instead of mere connectivity, and returns `reloadVerified`.
+- **`real_click` / `real_paste` / `real_activate_tab`** now report an `effect`
+  verdict. The escalation rung — the one that exists *because* synthetic input is
+  unreliable — previously returned no verdict at all.
+
+### Shadow-DOM piercing
+
+`document.querySelector()` cannot see into a shadow root, but the candidate scan
+already could, so any Lit/FAST/faceplate control was invisible to selector
+resolution while the page map happily listed it. That mismatch forced a fallback to
+estimating coordinates from a screenshot. `deepQuery`/`deepQueryAll` now walk OPEN
+shadow roots and are wired into `inspect kind:"geometry"`, `screenCenter`,
+`evaluate_safe` and both intent searches. The light-DOM fast path is unchanged, so
+pages without shadow roots cannot regress. Closed roots are unreachable by design
+and are skipped, not faked.
+
+### Tooling
+
+- `csBuild` is now a **build stamp** (`v4.6.1-<source-hash>`) substituted at build
+  time, instead of a hand-written constant that reported an unchanged string while
+  the running copy was stale. It can now answer the only question that matters: is
+  the live content script the code I just wrote?
+- New: `tools/mcp_smoke.py`, `tools/which_extension_path.py`,
+  `scripts/goto_url.py`, `scripts/press_at.py`, `bench/shadow_fixture.html`
+  (deterministic nested-shadow-root fixture).
+
 ## [1.4.0] — 2026-09-11
 
 Closes out the "remaining issues" list from the 1.3.x audit. Every claim below was
