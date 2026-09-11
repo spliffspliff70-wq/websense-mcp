@@ -3,6 +3,62 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.2.0] — 2026-09-11
+
+### Why this release exists
+
+A transport audit found that the extension was doing three things that made
+the bridge feel unreliable to drive, even though the DOM layer was sound:
+opening a WebSocket that could never connect, holding hub slots that could
+never be used, and reporting failures that named no hop. The third one is the
+expensive one — a bare `Request timeout (30s) for page_state` is
+indistinguishable from a dead relay, a backgrounded tab, a minimized window, a
+CSP block, or a genuinely slow page, so the only rational response is to retry
+or guess. This release removes the first two and fixes the third.
+
+### Added
+- **Timeout errors now name the failing hop.** `hub._timeoutDiag()` reports the
+  op, the client the request was routed through (id + type + readyState), the
+  target tab, the full client census (registered / offscreen / mainFrameCS /
+  contentTabs), the in-flight count, and a likely-cause line specific to the
+  hop that was used. `Extension not connected` carries the same census.
+- **Regression tests for all of the above** — `test-regressions.mjs` grew from
+  42 to 49 tests: three cover the diagnostics, four are static guards on the
+  content script (the CS needs a DOM, so its invariants are asserted against
+  source to keep the failure loops from silently returning).
+
+### Changed — behaviour
+- **The direct content-script WebSocket bridge is now main-frame-only.**
+  It is skipped in ad frames (pre-existing) AND in subframes. Verified against
+  the hub's own routing: `handleMessage` only writes `contentByTab` on
+  `if (msg.tabId && msg.isMainFrame)`, so a subframe client can never be
+  selected for a page op, and frame-targeted delivery goes through
+  `chrome.tabs.sendMessage(tabId, msg, {frameId})`. Subframe sockets only
+  inflated hub membership (measured peak: 24 concurrent clients, 664
+  disconnects in a single log) and widened the wrong-client/hijack surface.
+- **Reconnect now backs off exponentially and gives up**, instead of retrying
+  a doomed socket every 3 seconds forever. Delays are 3s → 6s → 12s → 24s
+  (ceiling 60s) and it stops after 4 consecutive failures. A real state change
+  resets the streak and retries once: when the tab becomes visible again, the
+  content script resets and reconnects — the one honest reason to try again.
+- **`wsVersion` / `csBuild` markers bumped to `v4.4.0` / `v4.4.0-bridge-gate`**
+  so a live tab can be checked against the on-disk build (`page_state` reports
+  `csBuild`). This is how you tell whether an extension reload actually landed.
+
+### Notes
+- **Not gated on `https`.** An early draft of this fix assumed Chrome's
+  mixed-content rule blocks plain `ws://` from every https page. That is
+  false — content-script clients were observed connecting as MAIN on
+  `https://hackerone.com` tabs. What actually blocks the socket is the *site's*
+  own CSP `connect-src` (x.com and LinkedIn are strict; many sites are not),
+  which a content script cannot know in advance. That case is handled by
+  backoff + give-up, not by a protocol guess that would have disabled working
+  sites. A regression test asserts the gate never consults `location.protocol`.
+- **After editing any extension file, the extension must be reloaded** for the
+  change to reach already-open tabs. Content scripts re-inject on the next
+  navigation; an SPA route change does *not* re-inject them, so verify a
+  cross-origin navigation before concluding a reload failed.
+
 ## [1.1.1] — 2026-08-31
 
 ### Fixed

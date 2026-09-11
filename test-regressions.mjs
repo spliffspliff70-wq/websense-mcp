@@ -463,5 +463,77 @@ test('incr: fieldChanges truncates long values to 40 chars', () => {
   assert.strictEqual(ch[0].to, 'y');
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-09-11 — transport-friction fixes (see the "why it feels unreliable"
+// diagnosis: the CS bridge attempted a socket that https mixed-content forbids,
+// subframes held useless hub slots, and timeout errors named no hop).
+// ─────────────────────────────────────────────────────────────────────────────
+import { readFileSync } from 'fs';
+
+test('timeout diag: names the op, the routed client and hop state', () => {
+  const hub = new HubServer({ port: 0 });
+  const ws = mockWs({ cid: 'c7', clientSource: 'offscreen' });
+  const err = hub._timeoutDiag({ type: 'page_state', tabId: 12345 }, ws, 30000);
+  assert(err instanceof Error, 'returns an Error');
+  assert(err.message.includes('Request timeout (30s) for page_state'), 'names op + timeout');
+  assert(err.message.includes('c7'), 'names the routed client id');
+  assert(err.message.includes('offscreen'), 'names the client type');
+  assert(err.message.includes('12345'), 'names the target tab');
+  assert(err.message.includes('clients'), 'reports client census');
+});
+
+test('timeout diag: offscreen route points downstream, CS route points at binding', () => {
+  const hub = new HubServer({ port: 0 });
+  const off = hub._timeoutDiag({ type: 'click' }, mockWs({ clientSource: 'offscreen' }), 30000);
+  assert(off.message.includes('downstream'), 'offscreen → downstream hint');
+  const cs = hub._timeoutDiag({ type: 'click' }, mockWs({ clientSource: 'content-script' }), 30000);
+  assert(cs.message.includes('content-script client stopped answering'), 'CS → binding hint');
+});
+
+test('timeout diag: works with no client at all', () => {
+  const hub = new HubServer({ port: 0 });
+  const err = hub._timeoutDiag({ type: 'read_content' }, null, 120000);
+  assert(err.message.includes('120s'), 'honours the heavy-op timeout');
+  assert(err.message.includes('(none)'), 'says so when no tab is targeted');
+});
+
+// Static guards on the content script. The CS can't be unit-tested in node
+// (it needs a DOM), so these assert the invariants that fix the failure loop.
+// If someone removes the gate, the 1006 loop comes back — fail loudly here.
+const CS_SRC = readFileSync(new URL('./extension/websense-cs.js', import.meta.url), 'utf8');
+
+test('cs: direct bridge is main-frame-only (ad frames + subframes excluded)', () => {
+  assert(CS_SRC.includes('WS_BRIDGE_UNUSABLE'), 'gate variable exists');
+  assert(CS_SRC.includes('WS_IS_MAIN_FRAME'), 'main-frame check present');
+  assert(/var WS_BRIDGE_UNUSABLE = WS_IS_AD_FRAME \|\| !WS_IS_MAIN_FRAME;/.test(CS_SRC),
+    'gate is exactly ad-frame OR subframe');
+  assert(/if \(WS_BRIDGE_UNUSABLE\) return;/.test(CS_SRC), 'wsConnect bails when unusable');
+});
+
+test('cs: bridge is deliberately NOT gated on https protocol', () => {
+  // Regression guard for a real correction: an earlier draft assumed Chrome's
+  // mixed-content rule blocks ws:// from every https page. Live measurement
+  // disproved it (content scripts DID connect as MAIN on https hackerone tabs);
+  // what blocks the socket is the SITE's CSP connect-src (x.com), which a
+  // content script cannot know in advance. That case must stay handled by
+  // backoff+give-up, never by a protocol guess that would disable working sites.
+  assert(!/WS_BRIDGE_UNUSABLE[\s\S]{0,160}location\.protocol/.test(CS_SRC),
+    'WS_BRIDGE_UNUSABLE must not consult location.protocol');
+});
+
+test('cs: reconnect backs off exponentially and gives up (no flat 3s forever)', () => {
+  assert(CS_SRC.includes('WS_MAX_FAIL_STREAK'), 'give-up streak exists');
+  assert(CS_SRC.includes('wsFailStreak++'), 'failures are counted');
+  assert(/Math\.pow\(2,/.test(CS_SRC), 'exponential factor present');
+  assert(CS_SRC.includes('WS_BACKOFF_MAX_MS'), 'backoff ceiling present');
+  const flat = /setTimeout\(function \(\) \{ wsReconnectTimer = null; wsConnect\(\); \}, 3000\)/;
+  assert(!flat.test(CS_SRC), 'flat-3s reconnect is gone');
+});
+
+test('cs: a real state change can recover after give-up', () => {
+  assert(CS_SRC.includes('wsResetAndRetry'), 'reset+retry helper exists');
+  assert(/wsResetAndRetry\(\);/.test(CS_SRC), 'it is actually called (visibility handler)');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

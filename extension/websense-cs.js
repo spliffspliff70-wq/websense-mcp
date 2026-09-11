@@ -123,13 +123,60 @@
     } catch (_) { WS_IS_AD_FRAME = false; }
   })();
 
+  // ═══ Direct-bridge viability gate (2026-09-11) ═══
+  // At most ONE direct WS client per TAB, and only where it can be used:
+  //
+  //  1. AD FRAMES — pre-existing guard (SafeFrame / ad iframes must never hold a
+  //     hub slot; they answered broadcast relays with garbage — PITFALL 25).
+  //
+  //  2. SUBFRAMES ARE POINTLESS. Verified against the hub's own routing:
+  //     hub.handleMessage only writes the routing table on
+  //     `if (msg.tabId && msg.isMainFrame)` → contentByTab, so a subframe client
+  //     can NEVER be selected for a page op; frame-targeted delivery is done by
+  //     the SW via chrome.tabs.sendMessage(tabId, msg, {frameId}). A subframe
+  //     socket therefore only inflates hub membership (measured peak: 24
+  //     concurrent clients, 664 disconnects in one log) and widens the
+  //     wrong-client / hijack surface that PITFALL 16/25/26 describe.
+  //
+  // NOT gated on https. An earlier draft of this fix assumed Chrome's
+  // mixed-content rule blocks plain ws:// from every https page. That is FALSE —
+  // measured live 2026-09-11: content-script clients connected as MAIN on
+  // https://hackerone.com tabs immediately after an extension reload. What
+  // actually blocks the socket is the SITE's own CSP connect-src (x.com and
+  // LinkedIn are strict; hackerone is not). Since a content script cannot know
+  // its page's effective connect-src up front, that case is handled by the
+  // backoff + give-up below instead of by a protocol guess.
+  var WS_IS_MAIN_FRAME = false;
+  try { WS_IS_MAIN_FRAME = (window.self === window.top); } catch (_) { WS_IS_MAIN_FRAME = false; }
+  var WS_BRIDGE_UNUSABLE = WS_IS_AD_FRAME || !WS_IS_MAIN_FRAME;
+
+  if (WS_BRIDGE_UNUSABLE) {
+    wsLog('WS_SKIP: direct bridge not used here (' +
+      (WS_IS_AD_FRAME ? 'ad frame' : 'subframe — hub only routes to main-frame clients') +
+      ') — offscreen relay handles this tab');
+  }
+
+  // Exponential backoff with give-up. The old flat 3s retry re-attempted a
+  // doomed socket forever (no backoff, no ceiling), which is what produced the
+  // endless WS_CLOSE 1006 stream. A genuine state change (tab activated)
+  // resets the streak and retries once — see bindVisibilityActivationReport.
+  var wsFailStreak = 0;
+  var WS_MAX_FAIL_STREAK = 4;
+  var WS_BACKOFF_MIN_MS = 3000;
+  var WS_BACKOFF_MAX_MS = 60000;
+
   function wsConnect() {
-    if (WS_IS_AD_FRAME) { wsLog('WS_SKIP: ad frame — bridge disabled'); return; }
+    if (WS_BRIDGE_UNUSABLE) return;
+    if (wsFailStreak >= WS_MAX_FAIL_STREAK) {
+      wsLog('WS_GIVEUP: ' + wsFailStreak + ' consecutive failures — retry deferred to next tab activation');
+      return;
+    }
     try { ws = new WebSocket(WS_PROTO + '127.0.0.1:' + WS_PORT); }
-    catch (e) { wsLog('WS_CREATE_FAIL: ' + (e && e.message ? e.message : String(e))); wsScheduleReconnect(); return; }
+    catch (e) { wsLog('WS_CREATE_FAIL: ' + (e && e.message ? e.message : String(e))); wsFailStreak++; wsScheduleReconnect(); return; }
 
     ws.onopen = function () {
       wsReady = true;
+      wsFailStreak = 0; // healthy socket — clear the backoff streak
       // Detect if we're in the main frame (not inside an iframe)
       var isMainFrame = false;
       try { isMainFrame = (window.self === window.top); } catch (_) { isMainFrame = false; }
@@ -170,13 +217,31 @@
       if (msg.type === 'ready' || msg.type === 'pong') return;
       wsHandle(msg);
     };
-    ws.onclose = function (ev) { wsLog('WS_CLOSE: code=' + (ev && ev.code) + ' reason=' + (ev && ev.reason ? ev.reason : '')); wsReady = false; ws = null; wsScheduleReconnect(); };
+    ws.onclose = function (ev) { wsLog('WS_CLOSE: code=' + (ev && ev.code) + ' reason=' + (ev && ev.reason ? ev.reason : '')); wsReady = false; ws = null; wsFailStreak++; wsScheduleReconnect(); };
     ws.onerror = function (ev) { wsLog('WS_ERROR: ' + ((ev && ev.message) || 'unknown')); };
   }
 
   function wsScheduleReconnect() {
-    if (wsReconnectTimer) return;
-    wsReconnectTimer = setTimeout(function () { wsReconnectTimer = null; wsConnect(); }, 3000);
+    if (WS_BRIDGE_UNUSABLE || wsReconnectTimer) return;
+    if (wsFailStreak >= WS_MAX_FAIL_STREAK) {
+      wsLog('WS_GIVEUP: ' + wsFailStreak + ' consecutive failures — not retrying until the tab is activated again');
+      return;
+    }
+    // 3s, 6s, 12s, 24s … capped at 60s (was a flat 3s forever).
+    var delay = Math.min(WS_BACKOFF_MIN_MS * Math.pow(2, Math.max(0, wsFailStreak - 1)), WS_BACKOFF_MAX_MS);
+    wsLog('WS_RETRY_IN: ' + delay + 'ms (streak ' + wsFailStreak + ')');
+    wsReconnectTimer = setTimeout(function () { wsReconnectTimer = null; wsConnect(); }, delay);
+  }
+
+  // A real state change is the one honest reason to retry after give-up: the
+  // tab is being foregrounded, so the hub may now be reachable. Reset the
+  // streak and make one fresh attempt (used by the visibility handler below).
+  function wsResetAndRetry() {
+    if (WS_BRIDGE_UNUSABLE) return;
+    if (wsReady && ws && ws.readyState === 1) return;
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    wsFailStreak = 0;
+    wsConnect();
   }
 
   // P0#2 (2026-08-31, cold-tab wedge A1): when THIS tab becomes visible (the
@@ -189,17 +254,23 @@
   function bindVisibilityActivationReport() {
     try {
       document.addEventListener('visibilitychange', function () {
-        if (document.visibilityState === 'visible' && wsReady && ws && ws.readyState === 1) {
+        if (document.visibilityState !== 'visible') return;
+        if (wsReady && ws && ws.readyState === 1) {
           wsLog('TAB_VISIBLE: re-broadcasting tab_activated');
           try {
             chrome.runtime.sendMessage({ type: 'GET_MY_TAB_ID' }, function (resp) {
               if (resp && resp.tabId) {
-                wsSendRaw({ type: 'tab_identified', tabId: resp.tabId, isMainFrame: (window.self === window.top) });
+                wsSendRaw({ type: 'tab_identified', tabId: resp.tabId, isMainFrame: WS_IS_MAIN_FRAME });
                 wsSendRaw({ type: 'tab_activated', tabId: resp.tabId });
                 wsLog('TAB_VISIBLE_ACTIVATED: tabId=' + resp.tabId);
               }
             });
           } catch (_e) { wsLog('TAB_VISIBLE_ERR'); }
+        } else {
+          // Bridge is down (or gave up on backoff) and this tab is now the one
+          // being looked at — the honest moment to retry once (2026-09-11).
+          wsLog('TAB_VISIBLE: bridge down — resetting retry streak and reconnecting');
+          wsResetAndRetry();
         }
       });
     } catch (_e) { /* visibilitychange may not exist — harmless */ }
@@ -3135,7 +3206,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.3.1',csBuild:'v4.3.1-bg-raf-fix',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.4.0',csBuild:'v4.4.0-bridge-gate',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

@@ -318,6 +318,45 @@ export class HubServer {
     return null;
   }
 
+  // ═══ Timeout diagnostics (2026-09-11) ═══
+  // THE reason WebSense feels unreliable to work with: a bare
+  // "Request timeout (30s) for page_state" is indistinguishable from a dead
+  // relay, a backgrounded tab, a minimized window, a CSP block, a restricted
+  // page, or a genuinely slow page — so the only rational response is to retry
+  // or guess at a fallback. That guessing is the real cost. This names the hop
+  // the request was routed through and the state of every other layer, so the
+  // failure can be attributed instead of guessed at.
+  _timeoutDiag(cmd, client, timeout) {
+    const type = (cmd && cmd.type) || '?';
+    const targetTab = (cmd && cmd.tabId != null) ? Number(cmd.tabId) : this.selectedTabId;
+    const src = (client && client.clientSource) || 'unknown';
+    const cid = (client && client.cid) || '?';
+    const lines = [
+      'Request timeout (' + (timeout / 1000) + 's) for ' + type,
+      '  routed to   : ' + cid + ' [' + src + '] readyState=' + (client ? client.readyState : 'n/a'),
+      '  target tab  : ' + (targetTab != null ? targetTab : '(none)'),
+      '  clients     : ' + this.clients.size + ' registered' +
+        ' | offscreen=' + (this.offscreenClient && this.offscreenClient.readyState === 1 ? 'yes' : 'NO') +
+        ' | mainFrameCS=' + (this.mainFrameClient && this.mainFrameClient.readyState === 1 ? 'yes' : 'no') +
+        ' | contentTabs=' + this.contentByTab.size,
+      '  in-flight   : ' + this.pending.size,
+    ];
+    // Name the likely culprit for the hop that was actually used.
+    if (src === 'offscreen') {
+      lines.push('  likely      : the client ACCEPTED it, so the break is downstream — ' +
+        'offscreen → SW → tabs.sendMessage → content script. Usual causes: tab closed/never existed, ' +
+        'content script not injected (chrome:// or restricted page), backgrounded/minimized tab ' +
+        '(viewport 0×0), or the SW was evicted before the relay ran.');
+    } else if (src === 'content-script') {
+      lines.push('  likely      : the direct content-script client stopped answering — ' +
+        'page navigated (CS torn down) or the tab was backgrounded. The offscreen relay is the ' +
+        'fallback path; a repeat here means the tab binding went stale.');
+    } else {
+      lines.push('  likely      : client type is ' + src + ' — check the hub stats for hop state.');
+    }
+    return new Error(lines.join('\n'));
+  }
+
   nextId() { return 'r' + (++this.requestId); }
 
   // ═══ Pending-correlation helpers (multi-slot) ═══
@@ -371,7 +410,12 @@ export class HubServer {
       const connected = await this.waitForConnection(5000);
       client = this.activeClient(cmd);
       if (!client) {
-        throw new Error('Extension not connected. Reload the WebSense extension in Chrome (chrome://extensions → click reload). The content script auto-connects to ws://localhost:38401 within 3 seconds.');
+        throw new Error('Extension not connected — no client can serve ' + (cmd.type || '?') +
+          '. hub clients=' + this.clients.size +
+          ' | offscreen=' + (this.offscreenClient && this.offscreenClient.readyState === 1 ? 'yes' : 'NO') +
+          ' | mainFrameCS=' + (this.mainFrameClient && this.mainFrameClient.readyState === 1 ? 'yes' : 'no') +
+          '. If offscreen=NO, reload the WebSense extension in Chrome (chrome://extensions → reload); ' +
+          'it auto-connects to ws://localhost:38401 within 3 seconds.');
       }
     }
     const id = this.nextId();
@@ -384,7 +428,7 @@ export class HubServer {
           client: targetClient,
           resolve, reject,
           timer: setTimeout(() => {
-            this._settlePending(id, new Error('Request timeout (' + (timeout/1000) + 's) for ' + cmd.type));
+            this._settlePending(id, this._timeoutDiag(cmd, targetClient, timeout));
           }, timeout),
         });
         try { targetClient.send(JSON.stringify(payload)); }
