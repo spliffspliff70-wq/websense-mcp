@@ -627,7 +627,10 @@
     var sel = m[2], kind = m[3];
     try {
       if (q.indexOf('querySelectorAll') === 0) {
-        var all = document.querySelectorAll(sel);
+        // deepQueryAll: a shadow-hosted match must be visible to the safe-query
+        // path, otherwise the same selector answers found:false here while
+        // explore_page lists it as an action.
+        var all = deepQueryAll(sel);
         var out = [];
         for (var i = 0; i < all.length && i < 50; i++) {
           var e = all[i];
@@ -635,7 +638,7 @@
         }
         return { success: true, method: 'safe-querySelectorAll', count: all.length, results: out };
       }
-      var el = document.querySelector(sel);
+      var el = deepQuery(sel);
       if (!el) return { success: true, method: 'safe-querySelector', found: false };
       return { success: true, method: 'safe-querySelector', found: true, value: kind ? el[kind] : (el.textContent || '') };
     } catch (e) { return { success: false, error: String((e && e.message) || e) }; }
@@ -815,7 +818,10 @@
       p = p.parentElement;
     }
     // last resort: any hidden file input on the page
-    const all = document.querySelectorAll('input[type="file"]');
+    // deepQueryAll: a file input built by a web component (common in rich
+    // composers) lives in a shadow root — missing it made upload fall through to
+    // the drop-zone strategy and report a false negative.
+    const all = deepQueryAll('input[type="file"]');
     return all.length ? all[0] : null;
   }
   // ═══ Upload — multi-strategy + honest confirmation (agentreach pattern) ═══
@@ -854,7 +860,7 @@
       const inner = startEl.querySelector && startEl.querySelector('[data-testid*="upload"],[class*="dropzone"],[class*="drop-zone"],[class*="upload-area"],[class*="uploader"],[class*="file-drop"],[class*="upload-drop"]');
       if (inner) return inner;
     }
-    const all = document.querySelectorAll('[data-testid*="upload"],[class*="dropzone"],[class*="drop-zone"],[class*="upload-area"],[class*="uploader"],[class*="file-drop"],[class*="upload-drop"],[aria-label*="upload"],[aria-label*="drop"]');
+    const all = deepQueryAll('[data-testid*="upload"],[class*="dropzone"],[class*="drop-zone"],[class*="upload-area"],[class*="uploader"],[class*="file-drop"],[class*="upload-drop"],[aria-label*="upload"],[aria-label*="drop"]');
     for (let i = 0; i < all.length; i++) if (isDropZone(all[i])) return all[i];
     return null;
   }
@@ -897,8 +903,16 @@
       await new Promise((r) => setTimeout(r, 700));   // let the app render a preview
       let shown = false;
       try { shown = pageShowsFileName(file.name) === true; } catch (_) {}
+      // The read-back is ASYMMETRIC, and that asymmetry is the whole fix:
+      //   count > 0  => the file IS on the input (positive evidence)
+      //   count == 0 => proves NOTHING (see above) — never a rejection
+      // Measured on bench/shadow_fixture.html 2026-09-11d: a matching AND a
+      // mismatched file both read back 1, so Chrome does NOT filter a
+      // programmatically-assigned FileList by the input's `accept`. The
+      // read-back is therefore never grounds for asserting failure.
+      const attached = shown === true || realmCount > 0;
       return {
-        success: shown === true,
+        success: attached,
         method: 'file_input',
         fileCount: realmCount,
         fileName: file.name,
@@ -909,7 +923,7 @@
         note: shown === true
           ? 'File attached — the page shows it.'
           : (realmCount > 0
-            ? 'File set on the input; no page preview found yet. Verify before assuming success.'
+            ? 'File is on the input (read-back confirms ' + realmCount + '), but no page preview yet — the widget may not have processed it.'
             : 'The isolated-world read-back returned 0, which is NOT evidence of failure on a strict-CSP page (the File is realm-local). Check the page/preview directly, or use real_paste (genuine CF_HDROP) / scripts/real_input.py paste-file.'),
       };
     }

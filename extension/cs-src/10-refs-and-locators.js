@@ -130,7 +130,9 @@
           }
           continue;
         }
-        const el = document.querySelector(sel);
+        // deepQuery: the locator chain is the SELF-HEAL path, so it must pierce
+        // shadow roots too — otherwise a re-rendered web-component never rebinds.
+        const el = deepQuery(sel);
         if (el) return el;
       } catch (_) { /* try next */ }
     }
@@ -156,7 +158,11 @@
     if (typeof ref !== 'string' || !ref) return null;
     try {
       const esc = ref.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      return document.querySelector('[' + REF_ATTR + '="' + esc + '"]') || null;
+      // deepQuery: a REF assigned to a shadow-hosted control (createElement/refs
+      // on web components) is unreachable via document.querySelector, so
+      // resolveRef returned null and every tool answered "Element not found"
+      // for an element the candidate scan had ALREADY found and ref'd.
+      return deepQuery('[' + REF_ATTR + '="' + esc + '"]') || null;
     } catch (_) { return null; }
   }
 
@@ -167,7 +173,9 @@
     if (!/^[\[\]#\.>\+~,:*='"\w\-()%|\s]+$/.test(ref)) return null;
     if (!(ref.startsWith('[') || ref.startsWith('#') || ref.startsWith('.') || ref.includes(' > ') || ref.includes('>') || ref.includes('~') || /^[a-zA-Z][\w-]*([\[.:])/.test(ref))) return null;
     try {
-      return document.querySelector(ref) || null;
+      // deepQuery: accept a shadow-hosted selector as a ref (Reddit's Post button,
+      // any Lit/FAST widget) instead of failing and forcing coordinate guessing.
+      return deepQuery(ref) || null;
     } catch (_) { return null; }
   }
 

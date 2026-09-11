@@ -35,6 +35,19 @@ plain selector sees an "empty" page while the real controls are present.</p>
   <my-field id="host-3" data-testid="host-3"></my-field>
 </div>
 
+<!-- 5. a FILE input inside a shadow root (upload confirmation tests).
+     accept is deliberately narrow: Chrome SILENTLY FILTERS a file whose MIME
+     does not match accept, leaving input.files empty — the condition that made
+     upload report a false negative. -->
+<div class="row">
+  <my-upload id="host-4" data-testid="host-4"></my-upload>
+</div>
+
+<!-- 6. a plain light-DOM file input with the same narrow accept, as a control -->
+<div class="row">
+  <input id="light-file" data-testid="light-file" name="light-file" type="file" accept="video/mp4">
+</div>
+
 <script>
   // Each host is defined as a custom element with an OPEN shadow root, which is
   // the pattern Lit / FAST / Stencil / faceplate all produce in production.
@@ -69,6 +82,14 @@ plain selector sees an "empty" page while the real controls are present.</p>
     }
   }
   customElements.define('my-field', MyField);
+
+  class MyUpload extends HTMLElement {
+    connectedCallback() {
+      const sr = this.attachShadow({ mode: 'open' });
+      sr.innerHTML = '<input data-testid="shadow-file" name="shadow-file" type="file" accept="video/mp4">';
+    }
+  }
+  customElements.define('my-upload', MyUpload);
 </script>
 </body>
 </html>

@@ -6,7 +6,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/), versioning foll
 ## [1.4.1] — 2026-09-11
 
 Four defects found by using the tool hard, all fixed at the source and pinned by
-regression tests (97/97; the pure functions are exercised behaviourally — the real
+regression tests (102/102; the pure functions are exercised behaviourally — the real
 extracted source runs against a fake DOM — rather than grepped for).
 
 ### Confirmation integrity
@@ -19,8 +19,20 @@ action — which is not evidence of what the page actually did.
   `fileCount: 0` with "Input rejected the file" for uploads that *had* attached:
   the `File`/`DataTransfer` are realm-local, so Chrome reports an empty `FileList`
   on strict-CSP pages. Three copies of one video landed on a post the tool
-  insisted had failed. It now requires page-side evidence and otherwise reports
-  `unconfirmed-realm-readback`.
+  insisted had failed. The rule it now applies is **asymmetric**, which is the
+  whole point:
+  - `realmCount > 0` → the file is on the input (positive evidence)
+  - `realmCount == 0` → **unconfirmed**, never a rejection
+
+  A first cut required page-side preview evidence for success. That was wrong, and
+  measurement showed it: a plain file input reads back `fileCount: 1` with no
+  preview, so a genuine attach reported failure. Both directions are now covered
+  by the fixture.
+  Also measured, and worth recording: Chrome does **not** filter a
+  programmatically-assigned `FileList` by the input's `accept` attribute — a `.txt`
+  assigned to `accept="video/mp4"` read back `1`. The missing video/audio entries in
+  the server's MIME map were a real gap, but they were **not** the mechanism of the
+  false negative.
 - **`type_text` no longer grants a phantom success.** It returned `success: true`
   from the `faceplate-validity` *attribute* alone, and compared `el.value` — which
   is `undefined` for a rich-text editor (Lexical/Draft.js/ProseMirror keep the text
@@ -62,15 +74,38 @@ shadow roots and are wired into `inspect kind:"geometry"`, `screenCenter`,
 pages without shadow roots cannot regress. Closed roots are unreachable by design
 and are skipped, not faked.
 
+Live verification then showed the first cut was **half-done**: geometry pierced, but
+the *addressing* paths did not, so `type_text` on a shadow-hosted input still
+answered "Element not found" — for exactly the class of control the fix targeted.
+The ref system is now pierced too, along with every other lookup that resolves a
+caller-supplied selector:
+
+- `resolveAttrRef`, `resolveSelectorRef`, `resolveLocator` — the ref system itself
+  (a `REF` on a shadow control was unresolvable, which is why a found element looked
+  absent)
+- `nativeQuerySelector` (the safe-querySelector path)
+- `locateFileInput` / `locateDropZone` last-resort scans — uploads
+- `read_selector` / `write_selector` in both handlers (they feed compound ops)
+- the markdown-extraction root
+
+Verified live on `bench/shadow_fixture.html`: one root deep, **two** roots nested,
+and `inspect kind:"geometry"` on a shadow element all resolve with
+`inShadow: true`.
+
 ### Tooling
 
 - `csBuild` is now a **build stamp** (`v4.6.1-<source-hash>`) substituted at build
   time, instead of a hand-written constant that reported an unchanged string while
   the running copy was stale. It can now answer the only question that matters: is
   the live content script the code I just wrote?
-- New: `tools/mcp_smoke.py`, `tools/which_extension_path.py`,
+- `extension_reload` now probes the **hub client census** and requires the client-id
+  set to *change*. The previous check reported `reconnected: true` whenever any client
+  was connected — which was already true before the reload, so it could not tell a
+  successful reload from a no-op. It also polls in ~505 ms instead of burning a 20 s
+  timeout. `reloadVerified` plus `clientIdsBefore` now state the truth.
+- New: `tools/mcp_smoke.py`, `tools/mcp_raw.py`, `tools/which_extension_path.py`,
   `scripts/goto_url.py`, `scripts/press_at.py`, `bench/shadow_fixture.html`
-  (deterministic nested-shadow-root fixture).
+  (deterministic nested-shadow-root fixture, with shadow + light file inputs).
 
 ## [1.4.0] — 2026-09-11
 

@@ -853,7 +853,14 @@ test('upload: never asserts failure from the isolated-world read-back', () => {
   assert(!CS_CODE.includes('Input rejected the file'), 'the false "rejected" claim is gone');
   assert(CS_CODE.includes('unconfirmed-realm-readback'), 'reports UNCONFIRMED instead');
   assert(CS_CODE.includes('realmReadbackUnreliable'), 'flags the read-back as unreliable');
-  assert(/success: shown === true/.test(CS_CODE), 'success now needs page-side evidence');
+  // REFINED 2026-09-11d: the rule is ASYMMETRIC, not "page evidence only".
+  // A first cut required page-side evidence for success, which re-broke the
+  // plain-input case (read-back 1, no preview -> reported failure). Correct:
+  //   realmCount > 0  => attached (positive evidence)
+  //   realmCount == 0 => unconfirmed, NEVER a rejection
+  assert(/const attached = shown === true \|\| realmCount > 0;/.test(CS_CODE),
+    'success must accept either preview evidence or a non-zero read-back');
+  assert(/success: attached,/.test(CS_CODE), 'the verdict uses `attached`');
 });
 
 test('type_text: no phantom success granted by an attribute', () => {
@@ -1019,5 +1026,59 @@ test('cs: the build stamp is the hash of the source that produced it', async () 
   assert(sha(pre).slice(0, 8) === stamp, 'stamp == sha(source) — a source edit MUST change it');
 });
 
+// 2026-09-11d (b): shadow piercing must cover the ADDRESSING paths, not just
+// geometry. type_text on a shadow-hosted input still answered "Element not
+// found" because resolveRef -> document.querySelector, so the fix was
+// incomplete until every resolver pierced too.
+// ══════════════════════════════════════════════════════════════════════════════
+
+test('shadow: all THREE ref resolvers pierce (attr, selector, locator chain)', () => {
+  const src = CS_SRC;
+  assert(/function resolveAttrRef[\s\S]{0,700}?deepQuery\(/.test(src),
+    'resolveAttrRef must use deepQuery — a REF on a shadow control is otherwise unreachable');
+  assert(/function resolveSelectorRef[\s\S]{0,700}?deepQuery\(/.test(src),
+    'resolveSelectorRef must use deepQuery');
+  assert(/function resolveLocator[\s\S]{0,1400}?deepQuery\(/.test(src),
+    'resolveLocator must use deepQuery — it is the self-heal fallback');
+});
+
+test('shadow: no bare document.querySelector is left in the addressing paths', () => {
+  const src = CS_SRC;
+  // resolveAttrRef / resolveSelectorRef must not fall back to the light DOM.
+  const attr = src.slice(src.indexOf('function resolveAttrRef'), src.indexOf('function resolveAttrRef') + 900);
+  assert(!/document\.querySelector\(/.test(attr),
+    'resolveAttrRef still contains a light-DOM querySelector');
+  const sel = src.slice(src.indexOf('function resolveSelectorRef'), src.indexOf('function resolveSelectorRef') + 900);
+  assert(!/document\.querySelector\(/.test(sel),
+    'resolveSelectorRef still contains a light-DOM querySelector');
+});
+
+test('shadow: the upload file-input + drop-zone lookups pierce', () => {
+  const src = CS_SRC;
+  assert(/deepQueryAll\('input\[type="file"\]'\)/.test(src),
+    "locateFileInput must use deepQueryAll('input[type=\"file\"]')");
+  assert(/deepQueryAll\('\[data-testid\*="upload"\]/.test(src),
+    'locateDropZone must use deepQueryAll');
+});
+
+test('shadow: read_selector / write_selector pierce (they feed compound ops)', () => {
+  const src = CS_SRC;
+  const n = (src.match(/deepQuery\(params\.selector\)/g) || []).length;
+  assert(n >= 2, `expected read/write selector to use deepQuery (found ${n})`);
+});
+
+test('cs: upload confirmation is ASYMMETRIC — a 0 read-back is never a rejection', () => {
+  const src = CS_SRC;
+  assert(/const attached = shown === true \|\| realmCount > 0;/.test(src),
+    'success must be satisfied by positive evidence (preview OR a non-zero read-back)');
+  assert(!/success: realInput\.files\.length > 0/.test(src),
+    'the old bare-length success test must be gone');
+  assert(!CS_CODE.includes('Input rejected the file'),
+    "must never assert 'Input rejected the file' from an isolated-world read-back");
+  assert(/realmReadbackUnreliable: realmCount === 0/.test(src),
+    'a 0 read-back must be flagged as unreliable, not treated as failure');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
+

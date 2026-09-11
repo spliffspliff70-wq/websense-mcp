@@ -11,7 +11,7 @@
     var method = '';
 
     if (selector) {
-      root = document.querySelector(selector);
+      root = deepQuery(selector);
       method = 'selector:' + selector;
       if (!root) return { success: true, markdown: '', title: document.title, url: location.href, elements: 0, method: method + ' (no match)' };
     } else {

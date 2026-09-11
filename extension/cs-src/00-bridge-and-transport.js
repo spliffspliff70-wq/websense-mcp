@@ -413,7 +413,7 @@
       case 'read_selector': {
         // B2 helper: read text/value from a selector (used by SW compound ops)
         try {
-          const el = document.querySelector(params.selector);
+          const el = deepQuery(params.selector);
           if (!el) return { success: false, error: 'selector not found: ' + params.selector };
           return { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
         } catch (e) { return { success: false, error: e.message }; }
@@ -421,7 +421,7 @@
       case 'write_selector': {
         // B2 helper: set value + dispatch input events (used by SW compound ops)
         try {
-          const el = document.querySelector(params.selector);
+          const el = deepQuery(params.selector);
           if (!el) return { success: false, error: 'selector not found: ' + params.selector };
           const v = String(params.value == null ? '' : params.value);
           const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);

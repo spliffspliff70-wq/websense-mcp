@@ -266,7 +266,7 @@
         case 'explore_intent': result = exploreIntent(params.goal || ''); break;
         case 'read_selector': {
           try {
-            const el = document.querySelector(params.selector);
+            const el = deepQuery(params.selector);
             if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
             else result = { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
           } catch (e) { result = { success: false, error: e.message }; }
@@ -274,7 +274,7 @@
         }
         case 'write_selector': {
           try {
-            const el = document.querySelector(params.selector);
+            const el = deepQuery(params.selector);
             if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
             else {
               const v = String(params.value == null ? '' : params.value);

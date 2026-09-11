@@ -421,7 +421,7 @@
       case 'read_selector': {
         // B2 helper: read text/value from a selector (used by SW compound ops)
         try {
-          const el = document.querySelector(params.selector);
+          const el = deepQuery(params.selector);
           if (!el) return { success: false, error: 'selector not found: ' + params.selector };
           return { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
         } catch (e) { return { success: false, error: e.message }; }
@@ -429,7 +429,7 @@
       case 'write_selector': {
         // B2 helper: set value + dispatch input events (used by SW compound ops)
         try {
-          const el = document.querySelector(params.selector);
+          const el = deepQuery(params.selector);
           if (!el) return { success: false, error: 'selector not found: ' + params.selector };
           const v = String(params.value == null ? '' : params.value);
           const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
@@ -597,7 +597,9 @@
           }
           continue;
         }
-        const el = document.querySelector(sel);
+        // deepQuery: the locator chain is the SELF-HEAL path, so it must pierce
+        // shadow roots too — otherwise a re-rendered web-component never rebinds.
+        const el = deepQuery(sel);
         if (el) return el;
       } catch (_) { /* try next */ }
     }
@@ -623,7 +625,11 @@
     if (typeof ref !== 'string' || !ref) return null;
     try {
       const esc = ref.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      return document.querySelector('[' + REF_ATTR + '="' + esc + '"]') || null;
+      // deepQuery: a REF assigned to a shadow-hosted control (createElement/refs
+      // on web components) is unreachable via document.querySelector, so
+      // resolveRef returned null and every tool answered "Element not found"
+      // for an element the candidate scan had ALREADY found and ref'd.
+      return deepQuery('[' + REF_ATTR + '="' + esc + '"]') || null;
     } catch (_) { return null; }
   }
 
@@ -634,7 +640,9 @@
     if (!/^[\[\]#\.>\+~,:*='"\w\-()%|\s]+$/.test(ref)) return null;
     if (!(ref.startsWith('[') || ref.startsWith('#') || ref.startsWith('.') || ref.includes(' > ') || ref.includes('>') || ref.includes('~') || /^[a-zA-Z][\w-]*([\[.:])/.test(ref))) return null;
     try {
-      return document.querySelector(ref) || null;
+      // deepQuery: accept a shadow-hosted selector as a ref (Reddit's Post button,
+      // any Lit/FAST widget) instead of failing and forcing coordinate guessing.
+      return deepQuery(ref) || null;
     } catch (_) { return null; }
   }
 
@@ -1155,7 +1163,7 @@
     var method = '';
 
     if (selector) {
-      root = document.querySelector(selector);
+      root = deepQuery(selector);
       method = 'selector:' + selector;
       if (!root) return { success: true, markdown: '', title: document.title, url: location.href, elements: 0, method: method + ' (no match)' };
     } else {
@@ -3033,7 +3041,10 @@
     var sel = m[2], kind = m[3];
     try {
       if (q.indexOf('querySelectorAll') === 0) {
-        var all = document.querySelectorAll(sel);
+        // deepQueryAll: a shadow-hosted match must be visible to the safe-query
+        // path, otherwise the same selector answers found:false here while
+        // explore_page lists it as an action.
+        var all = deepQueryAll(sel);
         var out = [];
         for (var i = 0; i < all.length && i < 50; i++) {
           var e = all[i];
@@ -3041,7 +3052,7 @@
         }
         return { success: true, method: 'safe-querySelectorAll', count: all.length, results: out };
       }
-      var el = document.querySelector(sel);
+      var el = deepQuery(sel);
       if (!el) return { success: true, method: 'safe-querySelector', found: false };
       return { success: true, method: 'safe-querySelector', found: true, value: kind ? el[kind] : (el.textContent || '') };
     } catch (e) { return { success: false, error: String((e && e.message) || e) }; }
@@ -3221,7 +3232,10 @@
       p = p.parentElement;
     }
     // last resort: any hidden file input on the page
-    const all = document.querySelectorAll('input[type="file"]');
+    // deepQueryAll: a file input built by a web component (common in rich
+    // composers) lives in a shadow root — missing it made upload fall through to
+    // the drop-zone strategy and report a false negative.
+    const all = deepQueryAll('input[type="file"]');
     return all.length ? all[0] : null;
   }
   // ═══ Upload — multi-strategy + honest confirmation (agentreach pattern) ═══
@@ -3260,7 +3274,7 @@
       const inner = startEl.querySelector && startEl.querySelector('[data-testid*="upload"],[class*="dropzone"],[class*="drop-zone"],[class*="upload-area"],[class*="uploader"],[class*="file-drop"],[class*="upload-drop"]');
       if (inner) return inner;
     }
-    const all = document.querySelectorAll('[data-testid*="upload"],[class*="dropzone"],[class*="drop-zone"],[class*="upload-area"],[class*="uploader"],[class*="file-drop"],[class*="upload-drop"],[aria-label*="upload"],[aria-label*="drop"]');
+    const all = deepQueryAll('[data-testid*="upload"],[class*="dropzone"],[class*="drop-zone"],[class*="upload-area"],[class*="uploader"],[class*="file-drop"],[class*="upload-drop"],[aria-label*="upload"],[aria-label*="drop"]');
     for (let i = 0; i < all.length; i++) if (isDropZone(all[i])) return all[i];
     return null;
   }
@@ -3303,8 +3317,16 @@
       await new Promise((r) => setTimeout(r, 700));   // let the app render a preview
       let shown = false;
       try { shown = pageShowsFileName(file.name) === true; } catch (_) {}
+      // The read-back is ASYMMETRIC, and that asymmetry is the whole fix:
+      //   count > 0  => the file IS on the input (positive evidence)
+      //   count == 0 => proves NOTHING (see above) — never a rejection
+      // Measured on bench/shadow_fixture.html 2026-09-11d: a matching AND a
+      // mismatched file both read back 1, so Chrome does NOT filter a
+      // programmatically-assigned FileList by the input's `accept`. The
+      // read-back is therefore never grounds for asserting failure.
+      const attached = shown === true || realmCount > 0;
       return {
-        success: shown === true,
+        success: attached,
         method: 'file_input',
         fileCount: realmCount,
         fileName: file.name,
@@ -3315,7 +3337,7 @@
         note: shown === true
           ? 'File attached — the page shows it.'
           : (realmCount > 0
-            ? 'File set on the input; no page preview found yet. Verify before assuming success.'
+            ? 'File is on the input (read-back confirms ' + realmCount + '), but no page preview yet — the widget may not have processed it.'
             : 'The isolated-world read-back returned 0, which is NOT evidence of failure on a strict-CSP page (the File is realm-local). Check the page/preview directly, or use real_paste (genuine CF_HDROP) / scripts/real_input.py paste-file.'),
       };
     }
@@ -3632,7 +3654,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-0d0ad7da',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-6b8b1778',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;
@@ -3657,7 +3679,7 @@
         case 'explore_intent': result = exploreIntent(params.goal || ''); break;
         case 'read_selector': {
           try {
-            const el = document.querySelector(params.selector);
+            const el = deepQuery(params.selector);
             if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
             else result = { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
           } catch (e) { result = { success: false, error: e.message }; }
@@ -3665,7 +3687,7 @@
         }
         case 'write_selector': {
           try {
-            const el = document.querySelector(params.selector);
+            const el = deepQuery(params.selector);
             if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
             else {
               const v = String(params.value == null ? '' : params.value);
