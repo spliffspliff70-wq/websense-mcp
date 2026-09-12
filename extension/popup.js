@@ -3,11 +3,8 @@
 // Check if offscreen document exists and is connected
 // by sending a message to the background service worker
 
-// Cross-browser bridge check. Chrome uses an offscreen document for the WS bridge;
-// Firefox holds the bridge directly in the persistent background script (no offscreen).
-// We avoid chrome.runtime.getContexts on Firefox (OFFSCREEN_DOCUMENT is invalid there).
+// Chrome-only bridge check: the WS bridge lives in the offscreen document.
 async function bridgeUp() {
-  if (typeof chrome.runtime.getContexts !== 'function') return true; // Firefox: bridge in background
   try {
     var c = await chrome.runtime.getContexts({
       contextTypes: ['OFFSCREEN_DOCUMENT'],
@@ -15,7 +12,7 @@ async function bridgeUp() {
     });
     return c.length > 0;
   } catch (e) {
-    return true; // Firefox or unsupported enum: bridge lives in background
+    return false; // could not confirm the offscreen document → treat the bridge as down
   }
 }
 

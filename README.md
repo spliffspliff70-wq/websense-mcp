@@ -17,17 +17,9 @@
 hub logs a warning and the server keeps running (MCP still works) — the bridge just isn't
 claimed. Run multiple isolated servers with different `--port` values.
 
-## Firefox (permanent install)
-Firefox's "Load Temporary Add-on" is **removed on every restart** (dev-only, unsigned). To make WebSense permanent:
-1. Use **Firefox Developer Edition / Nightly** — regular release rejects unsigned add-ons.
-2. `about:config` → set `xpinstall.signatures.required` = `false`.
-3. `about:addons` → gear icon → **Install Add-on From File** → select `E:\local_memstore\websense\websense.xpi`.
-4. It now persists across restarts and auto-connects to the same `ws://localhost:38401`.
-
-The Firefox extension lives in `extension-firefox/` — its `manifest.json` is the Firefox MV3 version
-(`background.scripts`, **no** `chrome.offscreen`; the WebSocket lives in the persistent background script
-`background-firefox.js`). After editing those files, re-zip the folder contents to `websense.xpi` (manifest at root).
-Chrome uses `extension/` (with `background.service_worker` + `offscreen.js`) — separate on purpose.
+> **Chrome-only.** WebSense is built, tested and supported on Chrome / Chromium (MV3, offscreen
+> WS bridge). It has never been developed or tested on Firefox, and there is no Firefox code in
+> this repo. Do not expect it to work there.
 
 ## Architecture
 ```
