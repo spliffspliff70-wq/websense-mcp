@@ -69,12 +69,32 @@ KEY PATTERNS:
             poll loops after async loads
 - Pseudo-text: read format:"text" and element labels include CSS ::before/::after content
             (icon-font glyphs, counters) that innerText misses
+- TWO CLASSES OF OPERATION — do not conflate them (this is the #1 source of wasted calls):
+  * PAGE OPS: navigate, explore_page, read, click{ref}, type_text, form, scroll, inspect,
+    main_world, status, wait. These travel over tabs.sendMessage BY TABID and work on a
+    tab that is NOT active. Never activate or focus the tab for these. Measured
+    2026-09-20: bound an active:false tab with no activation and explore_page returned
+    29 live matches.
+  * OS-INPUT OPS: real_click, real_paste, real_activate_tab, computer_use, dialog{keystroke}.
+    These use SendInput, which lands on whatever window is FOREGROUND, so the target must
+    be the active tab/window first — and they steal the user's focus. Use them only when a
+    page op genuinely cannot work (a submit button that ignores synthetic events).
+  * A page op that HANGS is almost never an activation problem. Diagnose in this order:
+    (1) is Chrome MINIMISED or occluded (0x0 window)? restore it — an unrendered tab
+        stops answering the content script and every call then burns the 90s timeout;
+    (2) is a native "Leave site?" beforeunload dialog parked over Chrome? it swallows
+        clicks AND blocks paint — dismiss it;
+    (3) is another process/tab already driving the same tab?
+    Do NOT "fix" a hang by activating the tab or reaching for real_click.
 - Effect verdict: after click/type_text, if effect:"suspected_noop" do NOT retry blind —
-            escalate (OS-level click via windows-control) or try an alternate path
+            read before/after and diagnose, or try an alternate path
 - REAL INPUT (synthetic events ignored): if click returns effect:"unverifiable" with
             escalation.recommended="real_click" on a React/Lit/CustomElement submit
             (shreddit, Lexical/Draft.js/ProseMirror editors, faceplate), climb the ladder:
-            1) real_activate_tab({match}) to foreground the tab (cold-background-tab fix)
+            1) real_activate_tab({match}) — needed HERE because the next two steps are
+               SendInput, which hits the frontmost window. This is the only reason to
+               activate a tab; it is not a general remedy for a hung page op (see the
+               hang diagnosis above — check a minimised window first)
             2) inspect{kind:"geometry"} on the target → viewport center (x,y)
             3) real_click({x, y, gate:"<expected tab title>"}) OR
                real_paste({x, y, text, gate}) for rich-text editors that revert

@@ -17,7 +17,7 @@ export function planAutoClimb(opts) {
   if (bound == null) return { climb: false, screen: null, reason: 'no session-bound tab — bind/switch to a tab first' };
   if (activeId == null) return { climb: false, screen: null, reason: 'could not resolve OS-active tab' };
   if (Number(activeId) !== Number(bound)) {
-    return { climb: false, screen: null, reason: `target tab not OS-active (active=${activeId} bound=${bound}) — activate it first or auto-climb would click the wrong window` };
+    return { climb: false, screen: null, reason: `auto-climb does a real OS click, which lands on the FRONTMOST window — target tab must be OS-active (active=${activeId} bound=${bound}). This is an OS-INPUT requirement, not a page-op one: activate the tab only for this, or skip auto-climb and use the synthetic click.` };
   }
   if (!geo || !geo.success) return { climb: false, screen: null, reason: (geo && geo.error) ? geo.error : 'screen_center failed' };
   if (!geo.screen || geo.screen.x == null || geo.screen.y == null || geo.visible === false) {

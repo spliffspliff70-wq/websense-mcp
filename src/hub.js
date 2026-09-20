@@ -406,11 +406,15 @@ export class HubServer {
     if (src === 'offscreen') {
       lines.push('  likely      : the client ACCEPTED it, so the break is downstream — ' +
         'offscreen → SW → tabs.sendMessage → content script. Usual causes: tab closed/never existed, ' +
-        'content script not injected (chrome:// or restricted page), backgrounded/minimized tab ' +
-        '(viewport 0×0), or the SW was evicted before the relay ran.');
+        'content script not injected (chrome:// or restricted page), Chrome window MINIMISED or ' +
+        'occluded (0×0 viewport — restore it with focus_window), or the SW was evicted before the ' +
+        'relay ran. NOTE: a merely BACKGROUNDED (non-active) tab is NOT a cause — page ops route ' +
+        'by tabId and work on an inactive tab (measured 2026-09-20).');
     } else if (src === 'content-script') {
       lines.push('  likely      : the direct content-script client stopped answering — ' +
-        'page navigated (CS torn down) or the tab was backgrounded. The offscreen relay is the ' +
+        'page navigated (CS torn down), the Chrome window was MINIMISED/occluded, or a native ' +
+        '"Leave site?" dialog is parked over Chrome blocking paint. A BACKGROUNDED tab is not a ' +
+        'cause; do not activate it, that steals focus from the user. The offscreen relay is the ' +
         'fallback path; a repeat here means the tab binding went stale.');
     } else {
       lines.push('  likely      : client type is ' + src + ' — check websense_doctor for hop state.');

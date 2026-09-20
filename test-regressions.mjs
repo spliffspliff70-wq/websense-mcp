@@ -191,7 +191,12 @@ test('planAutoClimb: returns climb=false when no active tab', () => {
 test('planAutoClimb: returns climb=false when bound != active (multi-agent guard)', () => {
   const r = planAutoClimb({ bound: 10, activeId: 20, geo: { success: true, screen: { x: 100, y: 200 }, visible: true } });
   assert.strictEqual(r.climb, false);
-  assert(r.reason.includes('target tab not OS-active'), 'reason: ' + r.reason);
+  assert(r.reason.includes('must be OS-active'), 'reason: ' + r.reason);
+  // The refusal must be framed as an OS-INPUT requirement, not as a page-op one —
+  // the old copy ("target tab not OS-active ... activate it first") read as though
+  // activating the tab were a general fix for page ops, which it is not. See
+  // MODEL_PROMPT.md "PAGE OPS vs OS-INPUT".
+  assert(/OS-INPUT requirement/.test(r.reason), 'reason must name the class: ' + r.reason);
 });
 
 test('planAutoClimb: returns climb=false when geo fails', () => {
@@ -1077,6 +1082,53 @@ test('cs: upload confirmation is ASYMMETRIC — a 0 read-back is never a rejecti
     "must never assert 'Input rejected the file' from an isolated-world read-back");
   assert(/realmReadbackUnreliable: realmCount === 0/.test(src),
     'a 0 read-back must be flagged as unreliable, not treated as failure');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC GUARD: the stale "activation fixes page ops" folklore must not come back.
+// Ali's hypothesis 2026-09-20 ("in the tools schema and or prompt instructions some old
+// logic remained and is burying the blazing fast full background one") was CONFIRMED:
+// three agent-facing surfaces claimed a backgrounded tab wedges the content script.
+// It does not. Page ops route over tabs.sendMessage by tabId and work on an inactive
+// tab — measured: bound an active:false tab, no activation, explore_page returned 29
+// live matches. The real hang cause is a MINIMISED/occluded Chrome window (0x0).
+// These assertions fail loudly if the folklore is reintroduced anywhere an agent reads.
+test('guidance: no surface claims a backgrounded tab wedges page ops', () => {
+  const MODEL = readFileSync(new URL('./MODEL_PROMPT.md', import.meta.url), 'utf8');
+  const surfaces = { 'src/server.js': SRV_SRC, 'src/hub.js': HUB_SRC, 'MODEL_PROMPT.md': MODEL };
+  const forbidden = [
+    'cold-background-tab fix',
+    'content script injects',
+    'backgrounded/minimized tab',
+    'or the tab was backgrounded',
+    'content-script ops hang',
+  ];
+  for (const [name, src] of Object.entries(surfaces)) {
+    for (const phrase of forbidden) {
+      assert(!src.includes(phrase), `${name} still carries the stale claim: "${phrase}"`);
+    }
+  }
+});
+
+test('guidance: the two operation classes are actually documented', () => {
+  const MODEL = readFileSync(new URL('./MODEL_PROMPT.md', import.meta.url), 'utf8');
+  // The distinction must be stated where an agent reads it, in both places.
+  assert(/PAGE OPS/.test(MODEL) && /OS-INPUT/.test(MODEL),
+    'MODEL_PROMPT.md must state the PAGE OPS vs OS-INPUT split');
+  assert(/PAGE OPS/.test(SRV_SRC) && /OS-INPUT/.test(SRV_SRC),
+    'websense_guide (src/server.js) must state the split');
+  // And the hang diagnosis must lead with the real cause.
+  assert(/MINIMISED|MINIMIZED|minimised|minimized/.test(MODEL),
+    'the hang diagnosis must name a minimised window as the leading cause');
+});
+
+test('guidance: real_activate_tab is scoped to OS-input, not page ops', () => {
+  const m = SRV_SRC.match(/reg\(server, 'real_activate_tab', \{\s*\n\s*description: '([^']*(?:\\'[^']*)*)'/);
+  assert(m, 'real_activate_tab description not found');
+  const d = m[1];
+  assert(/OS-LEVEL INPUT|OS-input|OS-INPUT/.test(d), 'must scope itself to OS-level input');
+  assert(/do NOT need it for page ops|NOT need it for page ops/i.test(d), 'must explicitly deny the page-op use');
+  assert(/CANNOT fix a minimised/i.test(d), 'must state it cannot restore a minimised window');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

@@ -421,6 +421,17 @@ KEY PATTERNS:
 - Anti-patterns: no screenshots/vision/CDP for routine work (bot detection); no evaluate for routine reads (CSP); don't guess labels — read them from explore_page
 
 TAB DISCIPLINE: reuse tabs (navigate reuses by default). NEVER close the last open tab/window of an app.
+PAGE OPS vs OS-INPUT (do not conflate — the #1 source of wasted calls):
+  page ops (navigate/explore_page/read/click{ref}/type_text/form/scroll/inspect/main_world/status/wait)
+    route over tabs.sendMessage BY TABID and work on a tab that is NOT active. Never activate
+    a tab for these. Measured 2026-09-20: explore_page on an active:false tab, no activation, 29 matches.
+  OS-input ops (real_click/real_paste/real_activate_tab/dialog{keystroke}/computer_use) use SendInput,
+    which hits the FRONTMOST window — those need the target active first, and they steal the
+    user's focus. Use them only when a page op genuinely cannot work.
+  A page op that HANGS is almost never activation. Check in order: (1) Chrome MINIMISED/occluded
+    (0x0 window — restore with focus_window; an unrendered tab stops answering and every call then
+    burns the 90s timeout), (2) a native "Leave site?" dialog parked over Chrome (dismiss it),
+    (3) another process already driving that tab. Do NOT "fix" a hang by activating the tab.
 NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialogs need dialog{keystroke:true}.`);
   });
 
@@ -561,7 +572,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
                 result.autoClimb = { attempted: false, reason: geo && !geo.success ? (geo.error || 'screen_center failed') : 'element not visible or no screen coords' };
               }
             } else {
-              result.autoClimb = { attempted: false, reason: 'target tab not OS-active (active=' + activeId + ' bound=' + bound + ') — activate it first or auto-climb would click the wrong window' };
+              result.autoClimb = { attempted: false, reason: 'auto-climb uses a real OS click, which lands on the frontmost window, so the target tab must be OS-active (active=' + activeId + ' bound=' + bound + ') — an OS-INPUT requirement, not a page-op one' };
             }
           } else {
             result.autoClimb = { attempted: false, reason: 'no session-bound tab — bind/switch to a tab first' };
@@ -728,12 +739,12 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 10. TABS ═══
   reg(server, 'tabs', {
-    description: 'Tab/window ops: action:"list" | "switch" (tabId) | "close" (tabId) | "bind" (tabId, activate? — route page ops without focusing) | "frames" (list iframes w/ frameId) | "windows" (all windows+tabs) | "focus" (windowId) | "move" (tabId,windowId) | "transfer" (fromTab,toTab,fromSelector,toSelector — atomic cross-tab copy/paste) | "switchread" (tabId,selector — switch+read in one).',
+    description: 'Tab/window ops: action:"list" | "switch" (tabId) | "close" (tabId) | "bind" (tabId — route page ops at this tab WITHOUT focusing; pass activate:true ONLY when you are about to do OS-level input, since real_click/real_paste hit the frontmost window) | "frames" (list iframes w/ frameId) | "windows" (all windows+tabs) | "focus" (windowId) | "move" (tabId,windowId) | "transfer" (fromTab,toTab,fromSelector,toSelector — atomic cross-tab copy/paste) | "switchread" (tabId,selector — switch+read in one).',
     inputSchema: {
       action: z.enum(['list', 'switch', 'close', 'bind', 'frames', 'windows', 'focus', 'move', 'transfer', 'switchread']).describe('Tab operation'),
       tabId: z.number().optional().describe('Target tab'),
       windowId: z.number().optional().describe('Target window (focus/move)'),
-      activate: z.boolean().optional().describe('bind: also activate the tab'),
+      activate: z.boolean().optional().describe('bind: ALSO make this the OS-active tab. Not needed for page ops (they route by tabId on a backgrounded tab); pass it only when OS-level input (real_click/real_paste) follows, because SendInput hits the frontmost window.'),
       fromTab: z.number().optional().describe('transfer: source tab'),
       toTab: z.number().optional().describe('transfer: destination tab'),
       fromSelector: z.string().optional().describe('transfer: source selector'),
@@ -1303,7 +1314,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   });
 
   reg(server, 'real_activate_tab', {
-    description: 'REAL OS click on a Chrome tab pill via UIA (pywinauto click_input) — activates the tab so its content script injects (cold-background-tab fix) and gates on the window title. match: substring of the tab title; gate: expected title after activation (default match). Use when navigate(newTab:true) leaves the tab backgrounded and content-script ops hang.',
+    description: 'REAL OS click on a Chrome tab pill via UIA (pywinauto click_input) — makes the tab the OS-active one and gates on the window title. match: substring of the tab title; gate: expected title after activation (default match). WHEN YOU NEED IT: only before OS-LEVEL INPUT (real_click / real_paste), because SendInput lands on whatever window is frontmost. You do NOT need it for page ops — navigate, explore_page, read, click(ref), type_text, inspect, form and main_world all travel over tabs.sendMessage by tabId and work on a backgrounded tab (measured 2026-09-20: bound an active:false tab, no activation, explore_page returned 29 live matches). It CANNOT fix a minimised Chrome window either — a UIA click needs the window on screen; restore that with focus_window instead. Do not reach for it as a liveness remedy for a hang: diagnose a minimised/occluded window or a parked native dialog first. Requires the user\'s foreground — never use it for routine page work.',
     inputSchema: {
       match: z.string().describe('Tab title substring to match (e.g. "Submit to r/mcp")'),
       gate: z.string().optional().describe('Expected window title after activation (default: match)'),
