@@ -429,7 +429,8 @@ PAGE OPS vs OS-INPUT (do not conflate — the #1 source of wasted calls):
     which hits the FRONTMOST window — those need the target active first, and they steal the
     user's focus. Use them only when a page op genuinely cannot work.
   A page op that HANGS is almost never activation. Check in order: (1) Chrome MINIMISED/occluded
-    (0x0 window — restore with focus_window; an unrendered tab stops answering and every call then
+    (0x0 window — restore it: tabs{action:"windows"} then tabs{action:"focus", windowId};
+    an unrendered tab stops answering and every call then
     burns the 90s timeout), (2) a native "Leave site?" dialog parked over Chrome (dismiss it),
     (3) another process already driving that tab. Do NOT "fix" a hang by activating the tab.
 NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialogs need dialog{keystroke:true}.`);

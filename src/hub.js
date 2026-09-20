@@ -407,7 +407,8 @@ export class HubServer {
       lines.push('  likely      : the client ACCEPTED it, so the break is downstream — ' +
         'offscreen → SW → tabs.sendMessage → content script. Usual causes: tab closed/never existed, ' +
         'content script not injected (chrome:// or restricted page), Chrome window MINIMISED or ' +
-        'occluded (0×0 viewport — restore it with focus_window), or the SW was evicted before the ' +
+        'occluded (0×0 viewport — restore the window: tabs{action:"windows"} lists windowIds, ' +
+        'then tabs{action:"focus", windowId} raises it), or the SW was evicted before the ' +
         'relay ran. NOTE: a merely BACKGROUNDED (non-active) tab is NOT a cause — page ops route ' +
         'by tabId and work on an inactive tab (measured 2026-09-20).');
     } else if (src === 'content-script') {
