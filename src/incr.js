@@ -12,7 +12,10 @@
  *          re-renders when any semantic attribute survives.
  *   fp   — fingerprint string of the action-relevant fields (type, subtype,
  *          label, href, value, checked, disabled, expanded, selected,
- *          pressed, visible, inViewport, required, readOnly). Same key +
+ *          pressed, visible, required, readOnly). NOTE: inViewport is
+ *          deliberately EXCLUDED — it is a scroll artifact, not a mutation,
+ *          and including it made every scroll report as a page change
+ *          (2026-09-21). Same key +
  *          same fp = unchanged. Password values never enter the fp.
  */
 

@@ -558,7 +558,13 @@
         classification.href || '', classification.target || '', value,
         String(state.checked), String(state.disabled), String(state.disabledReason || ''),
         String(state.expanded), String(state.selected), String(state.pressed),
-        String(state.visible), String(state.inViewport), String(state.required), String(state.readOnly),
+        // inViewport is DELIBERATELY NOT in the fingerprint (2026-09-21).
+        // Whether an element sits inside the viewport is a SCROLL artifact, not a
+        // page mutation. Including it flipped the fingerprint of every element
+        // crossing the fold, so a scroll was reported as a page change (measured:
+        // changedRatio 1.038 — 12 added / 40 removed — read as "the page changed").
+        // state.inViewport is still recorded in fpo below for informational use.
+        String(state.visible), String(state.required), String(state.readOnly),
       ].join('|'),
       fpo: {
         type: classification.type, subtype: classification.subtype, label: label,

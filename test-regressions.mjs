@@ -1070,6 +1070,41 @@ test('shadow: the upload file-input + drop-zone lookups pierce', () => {
     'locateDropZone must use deepQueryAll');
 });
 
+test('upload: the file input is picked by PROXIMITY, never blindly all[0]', () => {
+  // BUG (2026-09-21, measured on LemonSqueezy): locateFileInput's last resort
+  // returned all[0], the FIRST file input on the page. On any form with an
+  // image/avatar input BEFORE the document input — most storefronts and CMSes —
+  // an upload silently targeted the WRONG field while still reporting
+  // success:true / fileCount:1 / confirmed:"preview-visible". A .zip was
+  // repeatedly attached to the product-IMAGE input.
+  //
+  // NOTE: scoped to locateFileInput's own body on purpose. deepQuery() also ends
+  // with `all.length ? all[0] : null`, and that is CORRECT there (querySelector
+  // semantics = first match), so a file-wide check would false-positive.
+  const src = CS_SRC;
+  const start = src.indexOf('function locateFileInput');
+  assert(start !== -1, 'locateFileInput must exist');
+  const body = src.slice(start, src.indexOf('\n  }', start));
+  assert(/domCloseness/.test(body),
+    'locateFileInput must rank candidate file inputs by DOM closeness');
+  assert(/domCloseness\(startEl, all\[i\]\)/.test(body),
+    'the last-resort branch must score every candidate against startEl');
+  assert(!/all\[0\]\s*:\s*null/.test(body),
+    "locateFileInput must not fall back to the FIRST file input on the page");
+});
+
+test('delta: inViewport is NOT in the mutation fingerprint (a scroll is not a change)', () => {
+  // BUG (2026-09-21): the fp included state.inViewport, so every scroll flipped
+  // the fingerprint of each element crossing the fold and the scroll was reported
+  // as a page mutation (measured: changedRatio 1.038, 12 added / 40 removed).
+  // inViewport is a viewport artifact, not a mutation — it stays in fpo only.
+  const src = CS_SRC;
+  assert(!/String\(state\.inViewport\)/.test(src),
+    'state.inViewport must NOT be in the fp — a scroll would read as a page change');
+  assert(/inViewport: state\.inViewport/.test(src),
+    'inViewport should still be recorded in fpo for informational use');
+});
+
 test('shadow: read_selector / write_selector pierce (they feed compound ops)', () => {
   const src = CS_SRC;
   const n = (src.match(/deepQuery\(params\.selector\)/g) || []).length;

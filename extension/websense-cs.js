@@ -2256,7 +2256,13 @@
         classification.href || '', classification.target || '', value,
         String(state.checked), String(state.disabled), String(state.disabledReason || ''),
         String(state.expanded), String(state.selected), String(state.pressed),
-        String(state.visible), String(state.inViewport), String(state.required), String(state.readOnly),
+        // inViewport is DELIBERATELY NOT in the fingerprint (2026-09-21).
+        // Whether an element sits inside the viewport is a SCROLL artifact, not a
+        // page mutation. Including it flipped the fingerprint of every element
+        // crossing the fold, so a scroll was reported as a page change (measured:
+        // changedRatio 1.038 — 12 added / 40 removed — read as "the page changed").
+        // state.inViewport is still recorded in fpo below for informational use.
+        String(state.visible), String(state.required), String(state.readOnly),
       ].join('|'),
       fpo: {
         type: classification.type, subtype: classification.subtype, label: label,
@@ -3231,12 +3237,47 @@
       if (inner) return inner;
       p = p.parentElement;
     }
-    // last resort: any hidden file input on the page
+    // Last resort: the file input NEAREST to startEl — NOT simply the first one
+    // on the page.
+    //
+    // BUG (found 2026-09-21, measured on LemonSqueezy): this returned all[0].
+    // On any form with an image/avatar file input BEFORE the document input —
+    // which is most storefronts and CMSes — an upload silently targeted the WRONG
+    // field, while still reporting success:true / fileCount:1 /
+    // confirmed:"preview-visible". A .zip was repeatedly attached to the
+    // product-IMAGE input while the file input stayed empty.
+    //
     // deepQueryAll: a file input built by a web component (common in rich
     // composers) lives in a shadow root — missing it made upload fall through to
     // the drop-zone strategy and report a false negative.
     const all = deepQueryAll('input[type="file"]');
-    return all.length ? all[0] : null;
+    if (!all.length) return null;
+    if (all.length === 1) return all[0];
+    let best = all[0];
+    let bestScore = -1;
+    for (let i = 0; i < all.length; i++) {
+      const score = domCloseness(startEl, all[i]);
+      if (score > bestScore) { bestScore = score; best = all[i]; }
+    }
+    return best;
+  }
+
+  // Higher = more closely related: the depth of the deepest shared ancestor, so a
+  // sibling/child input outranks an unrelated one in another form section.
+  function domCloseness(a, b) {
+    if (!a || !b) return 0;
+    const chain = (el) => {
+      const out = [];
+      let c = el;
+      while (c) { out.push(c); c = c.parentElement || (c.getRootNode && c.getRootNode().host) || null; }
+      return out;
+    };
+    const A = chain(a);
+    const inB = new Set(chain(b));
+    for (let i = 0; i < A.length; i++) {
+      if (inB.has(A[i])) return A.length - i;
+    }
+    return 0;
   }
   // ═══ Upload — multi-strategy + honest confirmation (agentreach pattern) ═══
   // Strategy 1: real <input type=file> via native 'files' setter + events.
@@ -3654,7 +3695,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-6b8b1778',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-ebcc87a0',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

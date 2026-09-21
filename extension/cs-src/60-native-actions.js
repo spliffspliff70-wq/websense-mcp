@@ -817,12 +817,47 @@
       if (inner) return inner;
       p = p.parentElement;
     }
-    // last resort: any hidden file input on the page
+    // Last resort: the file input NEAREST to startEl — NOT simply the first one
+    // on the page.
+    //
+    // BUG (found 2026-09-21, measured on LemonSqueezy): this returned all[0].
+    // On any form with an image/avatar file input BEFORE the document input —
+    // which is most storefronts and CMSes — an upload silently targeted the WRONG
+    // field, while still reporting success:true / fileCount:1 /
+    // confirmed:"preview-visible". A .zip was repeatedly attached to the
+    // product-IMAGE input while the file input stayed empty.
+    //
     // deepQueryAll: a file input built by a web component (common in rich
     // composers) lives in a shadow root — missing it made upload fall through to
     // the drop-zone strategy and report a false negative.
     const all = deepQueryAll('input[type="file"]');
-    return all.length ? all[0] : null;
+    if (!all.length) return null;
+    if (all.length === 1) return all[0];
+    let best = all[0];
+    let bestScore = -1;
+    for (let i = 0; i < all.length; i++) {
+      const score = domCloseness(startEl, all[i]);
+      if (score > bestScore) { bestScore = score; best = all[i]; }
+    }
+    return best;
+  }
+
+  // Higher = more closely related: the depth of the deepest shared ancestor, so a
+  // sibling/child input outranks an unrelated one in another form section.
+  function domCloseness(a, b) {
+    if (!a || !b) return 0;
+    const chain = (el) => {
+      const out = [];
+      let c = el;
+      while (c) { out.push(c); c = c.parentElement || (c.getRootNode && c.getRootNode().host) || null; }
+      return out;
+    };
+    const A = chain(a);
+    const inB = new Set(chain(b));
+    for (let i = 0; i < A.length; i++) {
+      if (inB.has(A[i])) return A.length - i;
+    }
+    return 0;
   }
   // ═══ Upload — multi-strategy + honest confirmation (agentreach pattern) ═══
   // Strategy 1: real <input type=file> via native 'files' setter + events.
