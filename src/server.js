@@ -23,6 +23,7 @@ import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { COLLECTOR, putSnapshot, getSnapshot, sliceSnapshot, snapshotStats } from './snapshot.js';
 import { HubServer } from './hub.js';
 import { SessionManager } from './session.js';
 import { exportMermaid } from './mermaid.js';
@@ -196,6 +197,37 @@ function safeHandler(fn) {
 // command so the hub routes to THAT session's tab — never the global one.
 import { AsyncLocalStorage } from 'node:async_hooks';
 const sessionCtx = new AsyncLocalStorage();
+// ── CROSS-SESSION TAB CLAIMS (2026-09-21) ────────────────────────────────────
+// Which tab each live MCP session has pinned. Keyed by the per-session McpServer
+// object (unique per HTTP session, and already carried in the ALS store).
+// WHY: an unbound session used to inherit the hub GLOBAL selectedTabId. That cursor
+// is moved by ANY activate:true / tabs{focus} / OS tab switch (hub.js tab_activated
+// and `activated` handlers), so an unbound session could silently operate on a tab
+// another agent owned. With this registry we can tell "the cursor is mine/free" from
+// "the cursor belongs to someone else" — the difference between safe and hijacking.
+const boundTabsBySession = new Map(); // serverObject -> { tabId, at }
+// A claim is only evidence of a LIVE owner if that session touched its tab recently.
+// Python/script clients exit without a clean MCP close, so transport.onclose does not
+// always fire and a dead session's claim lingered — producing false "bound to a
+// DIFFERENT live session" refusals for later callers (found 2026-09-21).
+const CLAIM_TTL_MS = 10 * 60 * 1000;
+
+function claimTab(srv, tid) {
+  if (!srv || tid == null) return;
+  boundTabsBySession.set(srv, { tabId: Number(tid), at: Date.now() });
+}
+
+// Return the OTHER session that currently owns `tid`, ignoring (and evicting) stale claims.
+function liveClaimOwner(srv, tid) {
+  if (tid == null) return null;
+  const now = Date.now();
+  for (const [s, c] of boundTabsBySession) {
+    if (!c) { boundTabsBySession.delete(s); continue; }
+    if (now - (c.at || 0) > CLAIM_TTL_MS) { boundTabsBySession.delete(s); continue; }
+    if (s !== srv && Number(c.tabId) === Number(tid)) return s;
+  }
+  return null;
+}
 function sessionTabOf() {
   const st = sessionCtx.getStore();
   return st && st.boundTabId != null ? st.boundTabId : null;
@@ -255,15 +287,48 @@ function withSessionTab(cmd) {
   // being unbound, and safeHandler tells the caller it happened.
   if (tid == null && st && st.server && cmd && cmd.type && !cmd.tabId
       && !SESSION_TAB_OPS.has(cmd.type)) {
+    // A BINDING op (navigate) creates/reuses this session's OWN tab, so it must never
+    // inherit the shared cursor. Return it UNSTAMPED and let the navigate handler force a
+    // fresh tab (newTab) and bind this session to the result — that is Ali's "1 tab to 1
+    // caller" model, and it is what stops an unbound session from navigating ANOTHER
+    // agent's tab to its own URL.
+    if (cmd.type === 'navigate') return cmd;
     let sel = null;
     try { sel = (hubChrome && hubChrome.selectedTabId != null) ? Number(hubChrome.selectedTabId) : null; } catch (_) {}
+
+    // Is the cursor tab already OWNED by a different LIVE session?
+    // `navigate` is EXEMPT: it is the BINDING op — it creates/reuses this session's own
+    // tab — so refusing it deadlocked every fresh session, because the refusal message
+    // told callers to "call navigate first" while navigate was itself blocked. Found
+    // live 2026-09-21: a fresh session's navigate AND explore both returned the refusal,
+    // leaving no path forward. A binding op can never inherit, so there is nothing to refuse.
+    const isBindingOp = cmd.type === 'navigate';
+    const owner = (!isBindingOp && sel != null) ? liveClaimOwner(st.server, sel) : null;
+    if (owner) {
+      // REFUSE, don't inherit. This is the hijack case: the global cursor moved
+      // (activate:true / tabs{focus} / an OS tab switch — hub.js tab_activated and
+      // `activated` handlers) onto a tab another session pinned. Silently using it
+      // would read or act on another agent's tab with no error and no signal.
+      // Throwing surfaces through safeHandler as a normal tool error.
+      throw new Error(
+        'Unbound session refused a page op: the hub routing cursor points at tab ' + sel +
+        ', which is bound to a DIFFERENT live session. Using it would silently operate on ' +
+        'another agent\'s tab. Fix: call navigate (binds a tab to THIS session) or ' +
+        'tabs{action:"bind", tabId} first. Before 2026-09-21 this fell through silently to ' +
+        'the shared cursor, which is why tabs appeared hijacked between concurrent runs.'
+      );
+    }
     if (sel != null) {
       st.boundTabId = sel;              // this session is now pinned
       st.server._wsBoundTabId = sel;    // ...persisted for its later requests
+      claimTab(st.server, sel);
       cmd.tabId = sel;                  // ...and this command routes explicitly
       st.autoBound = { tabId: sel, op: cmd.type, at: Date.now() };
     }
   }
+  // Keep the claim registry fresh for any session that has a binding (refreshes `at`,
+  // which is what makes the TTL honest about who is actually still working).
+  if (tid != null && st && st.server) claimTab(st.server, tid);
   return cmd;
 }
 // Wrap hub.send so every command is stamped with the calling session's tab.
@@ -326,12 +391,123 @@ function dropSelfEvident(node) {
 }
 
 // Helper to register a tool with automatic error wrapping
+// ═══ ACTION DELTA — flag "did it land" PROGRAMMATICALLY (Ali 2026-09-21) ═══
+// Ali's directive, verbatim: "if you did the dif should notify the model that a difference
+// exists it should be flagged so when a paste action for example (not limited to) is done
+// the model doesn't have to spend time and tokens to ask did it land it should be flagged
+// programatically."
+//
+// BEFORE: the only way to KNOW an input landed was an extra explore_page{incremental:true}
+// round-trip — a separate tool call plus its tokens, per action. The weak `effect` verdict
+// (beforeState/afterState) could not see mutations that change neither URL nor title — the
+// proven case is liking a post (mem 800: effect:unverifiable while the like DID register).
+//
+// NOW: every MUTATING op automatically carries a DOM-DIFF verdict, computed from the
+// content script's own per-tab scan cache and its incremental differ — the same mechanism
+// the model would otherwise have had to call for itself. That mechanism compares real
+// element FINGERPRINTS (value/checked/disabled/expanded/... per element), so it catches
+// changes that beforeState/afterState structurally cannot.
+//
+// COST NOTE: this is NOT free — it adds one hub round-trip per mutating op (~20-60ms, and
+// the delta payload itself is a few hundred bytes). Callers who don't want it pass
+// verify:false to skip the diff for that call.
+const DELTA_OPS = new Set(['click', 'type_text', 'form', 'press_key',
+  'real_click', 'real_paste', 'main_world', 'evaluate', 'dialog']);
+
+// Turn an incremental scan result into the compact verdict we hand back.
+// CRITICAL: a first call on a tab has no baseline, so the content script ESCALATES and
+// returns a FULL SAG. We must NEVER forward that (it is huge, and it would silently
+// replace the payload the caller asked for). We report honestly that we could not tell.
+function summarizeDelta(res) {
+  if (!res || typeof res !== 'object') return { mutated: null, reason: 'no scan result' };
+  // Hub replies are WRAPPED: {type, id, success, data:{...}}. The delta arrays live under
+  // .data. Reading them off the top level silently reports "no baseline" FOREVER — the
+  // exact bug this function shipped with on first write (caught by test/action-delta-test.py,
+  // where every call claimed no baseline even though inc2+ were real deltas).
+  const d = (res && typeof res.data === 'object' && res.data) ? res.data : res;
+  const isDelta = Array.isArray(d.added) && Array.isArray(d.changed) && Array.isArray(d.removed);
+  if (!isDelta) {
+    return {
+      mutated: null,
+      reason: 'no scan baseline existed for this tab, so this action seeded one — ' +
+        'it is NOT verifiable. The NEXT action on this tab will be flagged.',
+    };
+  }
+  const n = d.added.length + d.changed.length + d.removed.length;
+  const out = {
+    mutated: n > 0,
+    changed: d.changed.length,
+    added: d.added.length,
+    removed: d.removed.length,
+    unchanged: d.unchangedCount,
+  };
+  if (n > 0) {
+    // Only the mutated elements, and only the fields that matter, so the block stays small.
+    out.elements = []
+      .concat(d.changed.slice(0, 4).map((c) => {
+        const a = c.action || {};
+        const e = { ref: a.ref, label: String(a.label == null ? '' : a.label).slice(0, 60), kind: 'changed' };
+        if (a.value !== undefined && a.value !== '') e.value = String(a.value).slice(0, 60);
+        if (a.checked !== undefined) e.checked = a.checked;
+        if (Array.isArray(c.changes) && c.changes.length) {
+          e.fields = c.changes.slice(0, 4).map((f) => (typeof f === 'string' ? f : (f && (f.field || f.name)) || '?'));
+        }
+        return e;
+      }))
+      .concat(d.added.slice(0, 3).map((a) => ({
+        ref: a.ref, label: String(a.label == null ? '' : a.label).slice(0, 60), kind: 'added',
+      })))
+      .concat(d.removed.slice(0, 3).map((r) => ({
+        ref: r.ref, label: String(r.label == null ? '' : r.label).slice(0, 60), kind: 'removed',
+      })));
+  } else {
+    out.hint = 'NOTHING on the page changed. Treat this action as NOT LANDED — do not ' +
+      'assume success, and do not retry blindly without changing the approach.';
+  }
+  return out;
+}
+
+// Wrap a mutating handler so its result carries the diff verdict as a SECOND content block
+// (a separate block, so the JSON payload the caller asked for can never be corrupted).
+function withDelta(name, handler) {
+  if (!DELTA_OPS.has(name)) return handler;
+  return async (args) => {
+    const res = await handler(args);
+    if (args && args.verify === false) return res;
+    let delta;
+    try {
+      const inc = await getActiveHub().send({
+        type: 'explore_page', incremental: true, includeContent: false,
+      });
+      delta = summarizeDelta(inc);
+    } catch (err) {
+      delta = { mutated: null, reason: 'delta unavailable: ' + (err && err.message) };
+    }
+    const line = 'DELTA (auto, after ' + name + '): ' + JSON.stringify(delta);
+    try {
+      if (res && Array.isArray(res.content)) res.content.push({ type: 'text', text: line });
+      else return { content: [{ type: 'text', text: line }] };
+    } catch (_) { /* never let the flag break a result */ }
+    return res;
+  };
+}
+
 function reg(server, name, def, handler) {
   const inputSchema = def.inputSchema || {};
-  const merged = NO_FRAME.has(name)
+  const merged0 = NO_FRAME.has(name)
     ? inputSchema
     : { ...inputSchema, frameId: z.number().optional().describe(FRAME_DESC) };
-  server['registerTool'](name, { ...def, inputSchema: merged }, safeHandler(handler));
+  // Mutating ops gain verify:false so a caller can opt out of the automatic delta diff.
+  const merged = DELTA_OPS.has(name)
+    ? {
+      ...merged0,
+      verify: z.boolean().optional().describe(
+        'Set false to SKIP the automatic post-action DOM diff. By default every mutating op '
+        + 'returns a DELTA block (mutated true/false) so you can tell whether it landed '
+        + 'without spending a second call.'),
+    }
+    : merged0;
+  server['registerTool'](name, { ...def, inputSchema: merged }, safeHandler(withDelta(name, handler)));
 }
 
 // Wrap the SDK's tools/list handler: post-process the WIRE OUTPUT so every
@@ -436,9 +612,13 @@ Non-vision web automation via Chrome extension. No CDP debug port, no bot detect
 
 THE LOOP: explore_page → pick refs → act (click/type_text/form/scroll) → read result → repeat.
 
+DID IT LAND? Every mutating op (click, type_text, form, press_key, real_click, real_paste, main_world, evaluate, dialog) returns a SECOND block: DELTA (auto, after <op>): {mutated: true|false|null, ...}. Read that instead of spending an extra explore_page{incremental:true} call — it is the same diff, already paid for. mutated:false means the action did NOT land (do not assume success; change approach, do not retry blindly). mutated:null means no baseline existed yet on that tab, so that action seeded one and only the NEXT action is verifiable. Pass verify:false to skip the diff on a call you don't need checked.
+
+FULL PAGE MAP vs A SLICE: page_snapshot collects a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and returns only a small INDEX (counts + the dimensions you can slice by). page_slice then fetches ONE slice (tag/role/region/vp/interactive/query) at full fidelity. Use this when you need the whole page's shape or something the SAG does not show (off-viewport elements, the rest of a long page, a full tag/region inventory). It is also scroll-stable, so its index does not churn the way a viewport-filtered scan does. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
+
 THE 20 TOOLS — what each absorbed from the old 65-tool surface:
   websense_guide   this guide
-  explore_page     page map (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (added/changed/removed, no settle/content — cheap post-action diff; first call returns full SAG)
+  explore_page     page map (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (added/changed/removed, no settle/content — you usually do NOT need this any more: mutating ops return a DELTA block automatically; first call returns full SAG)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
   click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)
   type_text        fill one input (React-safe native setter) — or fields:[{ref,text},...] for batch (old type_many)
@@ -777,8 +957,25 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     description: 'Navigate the CURRENT tab to a URL (reuses the tab — no tab spam). Pass newTab:true to open in a fresh tab instead. Returns tabId (session binding follows).',
     inputSchema: { url: z.string(), newTab: z.boolean().optional().describe('Open in a new tab instead of reusing (default false)') },
   }, async ({ url, newTab }) => {
-    const result = await getActiveHub().send({ type: 'navigate', url, newTab: !!newTab });
-    if (server && result && result.tabId) server._wsBoundTabId = result.tabId;
+    // An UNBOUND session must get its OWN tab. Reusing "the current tab" means reusing the
+    // SHARED routing cursor, i.e. navigating whatever tab another agent happens to be on.
+    // So on first use we force a fresh tab, then bind this session to it.
+    const stBefore = sessionCtx.getStore();
+    const hadBinding = !!(stBefore && stBefore.boundTabId != null)
+      || !!(server && server._wsBoundTabId != null);
+    const forceFresh = !hadBinding;
+    const result = await getActiveHub().send({ type: 'navigate', url, newTab: !!(newTab || forceFresh) });
+    if (server && result && result.tabId) {
+      server._wsBoundTabId = result.tabId;
+      claimTab(server, result.tabId);
+    }
+    // Bind THIS request's session store too, so any op later in the same session is
+    // already routed at the tab we just navigated (the store is otherwise only seeded
+    // from server._wsBoundTabId on the NEXT request).
+    if (result && result.tabId) {
+      const st = sessionCtx.getStore();
+      if (st) st.boundTabId = Number(result.tabId);
+    }
     session.recordAction({ action: 'navigate', url }, result);
     return textResult(result);
   });
@@ -1359,6 +1556,82 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     return textResult(await getActiveHub().send({ type: 'main_world_exec', tabId, func: o.func, args: o.args || [], allFrames: !!o.allFrames }));
   });
 
+  // ═══ 21c. PAGE SNAPSHOT + ADDRESSABLE INDEX + SLICE (Ali 2026-09-21) ═══
+  // "why can't the structuring not cut anything out but simply map or index the webpage
+  //  for agentic use... implement fully and wire locally and test end to end."
+  //
+  // page_snapshot collects a LOSSLESS inventory (via main_world — no extension change)
+  // and returns only the small INDEX. page_slice then fetches ONE slice at full fidelity.
+  // Store everything, ship the index, make every element addressable.
+  reg(server, 'page_snapshot', {
+    description: 'LOSSLESS page inventory held server-side; returns the small INDEX (counts + addressable dimensions). Then call page_slice to fetch one slice at full fidelity. Unlike explore_page nothing is filtered out (no interactive-only, no in-viewport-only), and unlike the scan cache the snapshot does NOT change when you scroll. fresh:true re-collects.',
+    inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
+      fresh: z.boolean().optional().describe('Re-collect even if a live snapshot exists'),
+    },
+  }, async (o) => {
+    const tabId = o.tabId || sessionTabOf();
+    if (!tabId) return textResult({ success: false, error: 'no tab bound — bind/navigate first or pass tabId' });
+    const existing = getSnapshot(tabId);
+    if (existing && !o.fresh) {
+      return textResult({
+        success: true, cached: true, handle: 'snap:' + tabId + ':' + existing.seq,
+        seq: existing.seq, ageMs: Date.now() - existing.at, index: existing.index,
+        hint: 'slice it with page_slice{tag|role|region|vp|interactive|query}. fresh:true to re-collect.',
+      });
+    }
+    const res = await getActiveHub().send({ type: 'main_world_exec', tabId, func: COLLECTOR, args: [] });
+    // The inventory comes back as {success, results:[{frameId, result:{...}}]} — frame 0 is
+    // the main frame. (Earlier versions of this handler looked for res.result / res.data.result
+    // and reported "no inventory" while the collector had worked perfectly; measured, not read.)
+    const snap = (res && res.result)
+      || (res && Array.isArray(res.results) && res.results[0] && res.results[0].result)
+      || (res && res.data && res.data.result)
+      || (res && res.data && Array.isArray(res.data.results) && res.data.results[0] && res.data.results[0].result);
+    if (!snap || !Array.isArray(snap.elements)) {
+      return textResult({
+        success: false, error: 'the collector returned no element inventory',
+        got: JSON.stringify(res).slice(0, 400),
+      });
+    }
+    const { seq, index } = putSnapshot(tabId, snap);
+    session.recordAction({ action: 'page_snapshot', tabId }, { elements: index.elements });
+    return textResult({
+      success: true, cached: false, handle: 'snap:' + tabId + ':' + seq, seq, index,
+      hint: 'slice it with page_slice{tag|role|region|vp|interactive|query}.',
+    });
+  });
+
+  reg(server, 'page_slice', {
+    description: 'Full-fidelity records from the stored page snapshot, filtered to ONE slice: tag / role / region / vp (true|false) / interactive / query (+limit, default 200). This is how you load only the branch you need WITHOUT re-reading the page and without cutting anything out. Call page_snapshot first.',
+    inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
+      tag: z.string().optional().describe('Filter by tag, e.g. input'),
+      role: z.string().optional().describe('Filter by ARIA role'),
+      region: z.string().optional().describe('Filter by region substring, e.g. form, nav, footer'),
+      vp: z.boolean().optional().describe('true = in viewport only, false = off-viewport only'),
+      interactive: z.boolean().optional().describe('true = actionable elements only'),
+      query: z.string().optional().describe('Substring match over name / locator / tag'),
+      limit: z.number().optional().describe('Max records (default 200, hard max 2000)'),
+    },
+  }, async (o) => {
+    const tabId = o.tabId || sessionTabOf();
+    const e = getSnapshot(tabId);
+    if (!e) {
+      return textResult({
+        success: false,
+        error: 'no live snapshot for tab ' + tabId + ' — call page_snapshot first (or it expired)',
+        stats: snapshotStats(),
+      });
+    }
+    const s = sliceSnapshot(e.snap, o);
+    return textResult({
+      success: true, snapshotSeq: e.seq, ageMs: Date.now() - e.at, url: e.snap.url,
+      matched: s.matched, returned: s.returned, truncatedByLimit: s.truncatedByLimit,
+      elements: s.elements,
+    });
+  });
+
   reg(server, 'real_activate_tab', {
     description: 'OS-INPUT ONLY (before real_click/real_paste) — page ops NEVER need this. REAL OS click on a Chrome tab pill via UIA (pywinauto click_input): makes the tab the OS-active one and gates on the window title. match: substring of the tab title; gate: expected title after activation (default match). WHEN YOU NEED IT: only before OS-LEVEL INPUT (real_click / real_paste), because SendInput lands on whatever window is frontmost. You do NOT need it for page ops — navigate, explore_page, read, click(ref), type_text, inspect, form and main_world all travel over tabs.sendMessage by tabId and work on a backgrounded tab (measured 2026-09-20: bound an active:false tab, no activation, explore_page returned 29 live matches). It CANNOT fix a minimised Chrome window either — a UIA click needs the window on screen; restore that with focus_window instead. Do not reach for it as a liveness remedy for a hang: diagnose a minimised/occluded window or a parked native dialog first. Requires the user\'s foreground — never use it for routine page work.',
     inputSchema: {
@@ -1454,6 +1727,9 @@ async function main() {
           transport.onclose = () => {
             console.error('[websense] HTTP client disconnected');
             if (transport.sessionId) sessions.delete(transport.sessionId);
+            // Release this session's tab claim so a dead session cannot cause false
+            // refusals for later ones (registry is keyed by the server object).
+            try { boundTabsBySession.delete(server); } catch (_) {}
           };
           await server.connect(transport);
           session = { server, transport };

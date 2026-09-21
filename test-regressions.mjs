@@ -512,7 +512,10 @@ const OFF_SRC = readFileSync(new URL('./extension/offscreen.js', import.meta.url
 const BG_SRC = readFileSync(new URL('./extension/background.js', import.meta.url), 'utf8');
 const HUB_SRC = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
 const SRV_SRC = readFileSync(new URL('./src/server.js', import.meta.url), 'utf8');
-
+// The page-side collector is a STRING, so a syntax error inside it is invisible to
+// node --check (that is exactly how a broken `rec reg = 0;` line once shipped). Import it
+// so it can be compiled for real, below.
+import { COLLECTOR } from './src/snapshot.js';
 // ── 2026-09-11b: performance + reload-path guards ───────────────────────────
 // Measured baseline these exist to prevent from returning: explore_page's DEFAULT
 // call had no action cap, walked every DOM node in document order, read
@@ -1190,6 +1193,90 @@ test('guidance: essential claims survive the 110-char wire cap on tool descripti
         '-char wire cut, so no agent ever reads it (move it to the front of the description)');
     }
   }
+});
+
+// ═══ ACTION DELTA — "did it land" flagged programmatically (Ali 2026-09-21) ═══
+// Ali: "the dif should notify the model that a difference exists it should be flagged so
+// when a paste action is done the model doesn't have to spend time and tokens to ask did
+// it land it should be flagged programatically."
+test('delta: the mutating input class carries the automatic DOM-diff flag', () => {
+  const m = SRV_SRC.match(/const DELTA_OPS = new Set\(([^)]*)\)/);
+  assert(m, 'DELTA_OPS must exist');
+  for (const op of ['click', 'type_text', 'form', 'press_key', 'real_paste']) {
+    assert(new RegExp("'" + op + "'").test(m[1]), op + ' must be in DELTA_OPS');
+  }
+  assert(/withDelta\(name, handler\)/.test(SRV_SRC),
+    'reg() must wrap every handler with withDelta, or the flag is never attached');
+});
+
+test('delta: summarizeDelta unwraps the hub .data envelope (guards a real shipped bug)', () => {
+  // This function shipped reading added/changed/removed off the TOP level. Hub replies are
+  // wrapped {type,id,success,data:{...}}, so it reported "no baseline" on EVERY call while
+  // the diff was working fine underneath. Caught by test/action-delta-test.py.
+  assert(/typeof res\.data === 'object' && res\.data\) \? res\.data : res/.test(SRV_SRC),
+    'summarizeDelta must unwrap .data — without it every action falsely reports no baseline');
+  assert(/Array\.isArray\(d\.added\)/.test(SRV_SRC),
+    'the delta test must run against the UNWRAPPED object');
+});
+
+test('delta: a caller can opt out per call, and a no-op is reported as not-landed', () => {
+  assert(/args\.verify === false/.test(SRV_SRC), 'withDelta must honour verify:false');
+  assert(/verify: z\.boolean\(\)\.optional\(\)/.test(SRV_SRC),
+    'mutating tools must expose a verify param so the diff can be skipped');
+  // The negative case is the whole point — it must say so loudly, not silently.
+  assert(/NOT LANDED/.test(SRV_SRC),
+    'a zero-change delta must explicitly say the action did NOT land');
+});
+
+test('delta: the guide tells the agent to read the DELTA block instead of re-exploring', () => {
+  // A feature an agent cannot discover is not a feature — this is the mem-795 failure
+  // mode (fixes on disk that never reach the model). The guide is served as the tool
+  // RESULT (textResult), not the description, so it is NOT hit by the 110-char wire cap.
+  assert(/DID IT LAND\?/.test(SRV_SRC), 'the guide must carry a DID IT LAND section');
+  assert(/DELTA \(auto, after/.test(SRV_SRC), 'the guide must name the DELTA block format');
+  assert(/verify:false/.test(SRV_SRC), 'the guide must document the verify:false opt-out');
+});
+
+// ═══ SNAPSHOT + INDEX + SLICE (Ali 2026-09-21) ═══
+// Ali: "why can't the structuring not cut anything out but simply map or index the webpage
+// for agentic use... implement fully and wire locally and test end to end."
+test('snapshot: the page-side COLLECTOR compiles (node --check cannot see inside a string)', () => {
+  let fn = null, err = null;
+  try { fn = new Function('return (' + COLLECTOR + ')'); } catch (e) { err = e; }
+  assert(fn, 'the COLLECTOR must compile as a function expression: ' + (err && err.message));
+  assert(typeof COLLECTOR === 'string' && COLLECTOR.length > 500, 'COLLECTOR looks truncated');
+  // It must collect the things the index/slice dimensions rely on. (The collector builds
+  // `loc:` and `region:` in the record literal and assigns `rec.name = ...` — assert the
+  // real shapes, not a wished-for one.)
+  assert(/loc:/.test(COLLECTOR), 'COLLECTOR must emit loc per element');
+  assert(/region:/.test(COLLECTOR), 'COLLECTOR must emit region per element');
+  assert(/rec\.name/.test(COLLECTOR), 'COLLECTOR must emit name per element');
+  assert(/getBoundingClientRect/.test(COLLECTOR), 'COLLECTOR must measure geometry for the vp flag');
+});
+
+test('snapshot: page_snapshot/page_slice are registered and hold the lossless invariant', () => {
+  assert(/reg\(server, 'page_snapshot'/.test(SRV_SRC), 'page_snapshot must be registered');
+  assert(/reg\(server, 'page_slice'/.test(SRV_SRC), 'page_slice must be registered');
+  // The unwrap that cost a round-trip: main_world returns {results:[{result:{...}}]}.
+  assert(/results\[0\]/.test(SRV_SRC), 'the handler must unwrap main_world results[0].result');
+  assert(/sliceSnapshot\(/.test(SRV_SRC), 'the slice path must be wired in the server');
+  assert(/putSnapshot\(/.test(SRV_SRC) && /getSnapshot\(/.test(SRV_SRC), 'store must be wired');
+  const SNAP_SRC = readFileSync(new URL('./src/snapshot.js', import.meta.url), 'utf8');
+  assert(/buildIndex/.test(SNAP_SRC) && /sliceSnapshot/.test(SNAP_SRC), 'index + slice live in snapshot.js');
+  // The filter that made the scan cache lossy must NOT appear in the page-side code. Assert on
+  // COLLECTOR (the executable string) rather than the whole file — the file's COMMENT quotes
+  // the offending line to explain what it avoids, which would trip a file-wide search.
+  assert(!/isInViewport\(/.test(COLLECTOR),
+    'the COLLECTOR must NOT filter by viewport — that is the whole point (scroll must not churn it)');
+  assert(!/\.closest\('\[role="dialog"\]/.test(COLLECTOR),
+    'the COLLECTOR must not carry the dialog viewport exemption either');
+});
+
+test('snapshot: the guide tells agents the map/slice tools exist', () => {
+  // Same failure mode as the DELTA block: a tool an agent cannot discover is not a tool.
+  assert(/FULL PAGE MAP vs A SLICE/.test(SRV_SRC), 'the guide must describe page_snapshot/page_slice');
+  assert(/page_snapshot collects a LOSSLESS/.test(SRV_SRC), 'the guide must state the lossless property');
+  assert(/scroll-stable/.test(SRV_SRC), 'the guide must state why it beats the viewport-filtered scan');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

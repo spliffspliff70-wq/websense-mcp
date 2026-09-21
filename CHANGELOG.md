@@ -3,6 +3,26 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.4] — 2026-09-21
+
+Two pieces that were measured but not wired are now on the surface: a programmatic **did-it-land flag** on every action, and a **lossless page inventory** you can slice by any dimension.
+
+### Action DELTA — `did it land` flagged programmatically
+
+The weak `effect` verdict (beforeState/afterState) structurally cannot see mutations that change neither URL nor title — the proven case is liking a post (effect:unverifiable while the like did register). Knowing an input landed also cost an extra `explore_page{incremental:true}` round-trip per action.
+
+Every mutating op (`click`, `type_text`, `form`, `press_key`, `real_click`, `real_paste`, `main_world`, `evaluate`, `dialog`) now returns a SECOND block: `DELTA (auto, after <op>): {mutated: true|false|null, ...}`. It is the content script's own per-tab scan cache and element-fingerprint differ — so it catches changes before/after misses — computed automatically, as a separate content block so the payload can never be corrupted. `mutated:false` means the action did NOT land. `mutated:null` means no baseline existed yet on that tab (first action seeds one). `verify:false` skips it.
+
+### Page snapshot + addressable index + slice
+
+The existing per-tab scan cache is **lossy** — `collectScan` is gated on `isInteractive(el) && isInViewport(el)`, so it sees only interactive, in-viewport elements, and because that set moves with the viewport, **scrolling pollutes its diff** (measured: a scroll reported changedRatio 1.038 with 12 added / 40 removed — viewport churn, not mutation).
+
+`page_snapshot` runs a collector in the page's own main world (via `main_world`, CSP-immune, background, no extension change) and stores a **lossless** inventory server-side. It returns only a small index (~690 B on a page whose SAG is ~116 KB). `page_slice` then fetches ONE slice — tag / role / region / vp / interactive / query — at full fidelity. Nothing is cut; access is deferred. Measured on github.com/nodejs/node: snapshot 3,842 elements (1,018 interactive, 903 in-viewport, **2,939 off-viewport**) vs the SAG's 134 actions; the index is 169x smaller and a *complete* map; and scrolling leaves the index unchanged.
+
+### Guide + guard updates
+
+Both features are documented in the in-tool guide (served as the tool result, so not subject to the 110-char description cap) and guarded by static tests.
+
 ## [1.4.3] — 2026-09-20
 
 Two corrections that turned out to be the *same* class of bug — **a fix written
