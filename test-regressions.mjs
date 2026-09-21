@@ -1279,6 +1279,20 @@ test('snapshot: the guide tells agents the map/slice tools exist', () => {
   assert(/scroll-stable/.test(SRV_SRC), 'the guide must state why it beats the viewport-filtered scan');
 });
 
+// ═══ DOC DRIFT: the guide must state the TRUE tool count and list every tool ═══
+// Found 2026-09-21: the guide header said "29 consolidated tools" while its own list said
+// "THE 20 TOOLS", with 31 tools registered — 11 of them undocumented. This guard makes the
+// count self-enforcing so the docs cannot drift silently again.
+test('docs: the guide states the TRUE tool count and lists every registered tool', () => {
+  const regs = [...SRV_SRC.matchAll(/reg\(server, '([a-z_]+)'/g)].map((m) => m[1]);
+  assert(regs.length >= 30, 'expected the full tool surface, got ' + regs.length);
+  assert(SRV_SRC.includes('Guide (' + regs.length + ' consolidated tools)'),
+    'the guide header must state the real count (' + regs.length + ')');
+  assert(SRV_SRC.includes('THE ' + regs.length + ' TOOLS'),
+    'the guide tool-list heading must state the real count');
+  const missing = regs.filter((n) => !new RegExp('^  ' + n + '\\s', 'm').test(SRV_SRC));
+  assert(missing.length === 0, 'registered but undocumented in the guide: ' + missing.join(', '));
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
-

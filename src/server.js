@@ -604,9 +604,9 @@ function registerAllTools(server) {
 
   // ═══ 1. GUIDE ═══
   reg(server, 'websense_guide', {
-    description: 'START HERE. Full usage guide for the 29 consolidated WebSense tools: explore, read, click, type, form, scroll, tabs, wait, evaluate, main_world, ax, real input, status. Call once before using other tools.',
+    description: 'START HERE. Full usage guide for the 31 consolidated WebSense tools: explore, read, click, type, form, scroll, tabs, wait, evaluate, main_world, ax, snapshot map/slice, real input...[truncated]
   }, async () => {
-    return textResult(`WebSense MCP — Guide (29 consolidated tools)
+    return textResult(`WebSense MCP — Guide (31 consolidated tools)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
@@ -616,7 +616,7 @@ DID IT LAND? Every mutating op (click, type_text, form, press_key, real_click, r
 
 FULL PAGE MAP vs A SLICE: page_snapshot collects a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and returns only a small INDEX (counts + the dimensions you can slice by). page_slice then fetches ONE slice (tag/role/region/vp/interactive/query) at full fidelity. Use this when you need the whole page's shape or something the SAG does not show (off-viewport elements, the rest of a long page, a full tag/region inventory). It is also scroll-stable, so its index does not churn the way a viewport-filtered scan does. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 
-THE 20 TOOLS — what each absorbed from the old 65-tool surface:
+THE 31 TOOLS — what each absorbed from the old 65-tool surface:
   websense_guide   this guide
   explore_page     page map (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (added/changed/removed, no settle/content — you usually do NOT need this any more: mutating ops return a DELTA block automatically; first call returns full SAG)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
@@ -637,6 +637,18 @@ THE 20 TOOLS — what each absorbed from the old 65-tool surface:
   network_log      captured fetch/XHR since last call (clear, maxEntries)
   clipboard        action:"copy" (text) | "read"
   inspect          resolve a ref / one element: kind:"element" (resolve_ref — is this ref alive?) | "geometry" (bounding box, z-depth, scroll-container-aware) | "relation" (refA vs refB: above/below/overlaps)
+  navigate         navigate the CURRENT tab to a URL (reuses the tab — no tab spam). newTab:true forces a fresh tab. An UNBOUND session gets its OWN tab automatically (it never inherits another session's tab)
+  main_world       run a COMPILED function expression in the page MAIN world (F12-insider view). CSP-proof — the escape hatch when evaluate is blocked
+  page_snapshot    LOSSLESS inventory of the page, held server-side; returns only the INDEX (counts + sliceable dimensions + handle). Nothing is cut: not interactive-only, not in-viewport-only. Scroll-stable. fresh:true re-collects
+  page_slice       fetch ONE slice of the snapshot at full fidelity: by tag / role / region / vp / interactive / query (+limit). Every record carries a usable locator, so you can act on what you fetch
+  console_log      captured browser console + JS errors since last call (the page telling you WHY something failed)
+  network_log      captured fetch/XHR since last call — the page's own API responses (often cleaner structured data than the DOM)
+  cookies          cookie session manager: action:"list" (metadata for a url — names/expiry, NEVER values) | "get" | "clear"
+  respawn_offscreen  force-close + recreate the offscreen document so the extension reloads fresh code (MV3 trap: the offscreen does NOT reload with the extension card)
+  extension_reload   reload the WebSense extension itself
+  real_activate_tab  OS-INPUT ONLY — genuinely activates a tab (SendInput). Page ops NEVER need this; it exists solely to precede real_click/real_paste
+  real_click       GENUINE OS-level click (SendInput) at VIEWPORT coords (x,y) — for canvases/raw-input surfaces a page op cannot reach. Lands on the FRONTMOST window
+  real_paste       GENUINE paste (Ctrl+V) into a focused editor at viewport coords — the working route for attaching a real file/image to a composer
 
 KEY PATTERNS:
 - Forms: form{action:"state", formRef:"F0"} → type_text/select via form{action:"select"} → click submit ref

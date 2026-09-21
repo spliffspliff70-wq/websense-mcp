@@ -35,17 +35,19 @@ Chrome Extension (extension/)
 Live DOM
 ```
 
-## Tools (29) — call `websense_guide` first
+## Tools (31) — call `websense_guide` first
 
-> **Count verified 2026-09-11** by `tools/list` against the RUNNING server
-> (`POST http://127.0.0.1:9222/mcp`, streamable HTTP JSON-RPC): **29 tools**.
-> The same 29 `reg(server, …)` names are in `src/server.js`. Anything in these
-> docs that says 21/43/61 tools is stale.
+> **Count verified 2026-09-21** by `tools/list` against the RUNNING server
+> (`POST http://127.0.0.1:9222/mcp`, streamable HTTP JSON-RPC): **31 tools**.
+> The same 31 `reg(server, …)` names are in `src/server.js`. Anything in these
+> docs that says 20/21/29/43/61 tools is stale.
 
 ### Guide & Status
 `websense_guide` · `status` (kind:page|bridge|doctor|downloads)
 ### Exploration
 `explore_page` (compact:list, intent:find, goal:goal-filter, preload:lazy, incremental:delta-since-last-scan)
+### Page Map (lossless, addressable)
+`page_snapshot` (LOSSLESS inventory of the page held server-side; returns only the small INDEX — counts + sliceable dimensions. Nothing is cut: not interactive-only, not in-viewport-only, and it is scroll-stable) · `page_slice` (fetch ONE slice at full fidelity: tag|role|region|vp|interactive|query — every record carries a usable locator)
 ### Read
 `read` (format:text|content|markdown|diff|scrollextract|preload)
 ### Interact
@@ -83,7 +85,7 @@ Live DOM
 - **Chrome / Edge / Opera:** load `extension/manifest.json` (MV3, offscreen WS bridge).
 
 ## Key Features
-- **CSP-Safe (28/29 tools):** native DOM functions in the content script's isolated world. No eval, no string-to-code. Works on LinkedIn, GitHub, Google — any strict-CSP site. (`evaluate` is the only eval-based tool; `dialog keystroke:true` is a Windows-control keystroke, and `main_world` uses Chrome's userScripts MAIN-world path.)
+- **CSP-Safe (30/31 tools):** native DOM functions in the content script's isolated world. No eval, no string-to-code. Works on LinkedIn, GitHub, Google — any strict-CSP site. (`evaluate` is the only eval-based tool; `dialog keystroke:true` is a Windows-control keystroke, and `main_world` uses Chrome's userScripts MAIN-world path which is CSP-proof by design.)
 - **React-Compatible:** native prototype value setters bypass React's value tracker, then `input`/`change` events are dispatched.
 - **No Bot Detection:** real Chrome profile, cookies, fingerprint. No CDP, no `navigator.webdriver`, no headless.
 - **No Vision:** all structured JSON; no screenshots, no vision model.
@@ -119,7 +121,7 @@ node test/mcp-client-test.js
 websense/
 ├── package.json
 ├── src/
-│   ├── server.js       # MCP server with 29 consolidated tools
+│   ├── server.js       # MCP server with 31 consolidated tools
 │   ├── hub.js          # WebSocket hub
 │   ├── session.js      # Exploration map + diff engine
 │   └── mermaid.js      # Mermaid export

@@ -4,15 +4,15 @@ This is the instruction text the AI model receives when it calls `websense_guide
 entry point for every WebSense session. It is kept here as documentation and as the single
 source of truth for the in-tool prompt.
 
-> **⚠️ KNOWN DRIFT — verified 2026-09-11 (keep in sync with `src/server.js`).**
-> The RUNNING server exposes **29 tools** (`tools/list` over `http://127.0.0.1:9222/mcp`;
-> 29 `reg(server, …)` registrations in `src/server.js`). The prompt text below still says
-> **21**, and the same stale string is live inside `src/server.js` (the `websense_guide`
-> text at the `reg(server, 'websense_guide')` block) — that copy is **src-owned** and must
-> be fixed there by the src owner; this file only mirrors it.
-> **8 tools exist in the runtime but appear in neither this prompt nor the list below:**
-> `console_log`, `cookies`, `main_world`, `real_activate_tab`, `real_click`, `real_paste`,
-> `respawn_offscreen`, `extension_reload`.
+> **⚠️ DRIFT RESOLVED — re-verified 2026-09-21 (source of truth: `src/server.js`).**
+> The RUNNING server exposes **31 tools** (`tools/list` over `http://127.0.0.1:9222/mcp`;
+> 31 `reg(server, …)` registrations in `src/server.js`). The `websense_guide` text in
+> `src/server.js` now states **31** as well, and its tool list was completed to cover all
+> 31 (it previously documented only 20 — `navigate`, `main_world`, `page_snapshot`,
+> `page_slice`, `console_log`, `network_log`, `cookies`, `respawn_offscreen`,
+> `extension_reload`, `real_activate_tab`, `real_click`, `real_paste` were missing).
+> The prompt text below still contains the older **21** string in places — this file only
+> mirrors the src-owned text, so treat `src/server.js` as authoritative.
 > Also note: `websense_doctor` is **not** a tool (it is `status kind:"doctor"`), and
 > `evaluate_safe` is **not** a tool (it is `evaluate {query:{…}}`) — the old→new map below
 > is correct about that, and `src/server.js:53` documents the absorption.
