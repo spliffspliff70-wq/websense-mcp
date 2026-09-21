@@ -122,7 +122,15 @@
     targetEl.dispatchEvent(new PointerEvent('pointerdown',pOpts)); targetEl.dispatchEvent(new MouseEvent('mousedown',mOpts));
     try{targetEl.focus({preventScroll:true});}catch(_){}
     targetEl.dispatchEvent(new PointerEvent('pointerup',pOpts)); targetEl.dispatchEvent(new MouseEvent('mouseup',mOpts));
-    targetEl.click();
+    // .click() EXISTS ONLY ON HTMLElement. The deepest-clickable walk above can
+    // land on an SVGElement (every icon-only button on a modern UI), and calling
+    // .click() there threw "targetEl.click is not a function" — an
+    // UNHANDLED_REJECTION that aborted the click AFTER the pointerdown/up
+    // sequence had already been dispatched, leaving the element half-clicked and
+    // the caller with no error. Fall back to a dispatched click event, which
+    // every EventTarget accepts.
+    if (typeof targetEl.click === 'function') targetEl.click();
+    else targetEl.dispatchEvent(new MouseEvent('click', mOpts));
     return { success: true, target: targetEl.tagName.toLowerCase(), dispatchedOn: targetEl === el ? 'resolved' : 'deepest' };
   }
 

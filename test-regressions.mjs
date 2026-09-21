@@ -1149,6 +1149,39 @@ test('delta: inViewport is NOT in the mutation fingerprint (a scroll is not a ch
     'inViewport should still be recorded in fpo for informational use');
 });
 
+test('click: an unguarded .click() never crashes a click (SVGElement has none)', () => {
+  // BUG (2026-09-21, seen repeatedly as "UNHANDLED_REJECTION: targetEl.click is
+  // not a function" while driving LemonSqueezy): nativeClick walks down to the
+  // deepest clickable descendant, which can be an SVGElement — and .click()
+  // exists only on HTMLElement. The throw happened AFTER pointerover/down/up had
+  // already been dispatched, so the element was left half-clicked and the caller
+  // got an unhandled rejection instead of an error.
+  const src = CS_SRC;
+  assert(!/^\s*targetEl\.click\(\);\s*$/m.test(src),
+    'targetEl.click() must be guarded — SVGElement has no .click()');
+  assert(/typeof targetEl\.click === 'function'/.test(src),
+    'the click must fall back to a dispatched MouseEvent when .click() is missing');
+});
+
+test('tabs: an activation must not steal an EXPLICIT bind', () => {
+  // BUG (2026-09-21): onActivated assigned boundTabId on EVERY tab switch, so it
+  // silently overwrote an explicit `tabs{action:"bind"}`. Consequences measured
+  // live: bind appeared to work and then resolved "ref not found" for elements
+  // that demonstrably existed (the answer came from whichever tab was last
+  // activated), and a navigate meant to reload one page loaded a different tab —
+  // "it still loaded an x.com over lemonsqueezy I had to reopen".
+  assert(/let explicitBind = false;/.test(BG_SRC), 'explicitBind must be declared');
+  assert(/if \(!explicitBind\) boundTabId = activeInfo\.tabId;/.test(BG_SRC),
+    'onActivated must NOT overwrite an explicitly bound tab');
+  const latchSetters = (BG_SRC.match(/explicitBind = true;/g) || []).length;
+  assert(latchSetters >= 2,
+    `every explicit binding path must set the latch (switch_to_tab + bind_tab, found ${latchSetters})`);
+  assert(/if \(tabId === boundTabId\) \{ boundTabId = null; explicitBind = false; \}/.test(BG_SRC),
+    'closing the bound tab must release the latch (anti-latch, PITFALL 16)');
+  assert(/tabId: boundTabId, explicit: explicitBind/.test(BG_SRC),
+    'get_bound_tab must expose whether the binding was explicit');
+});
+
 test('shadow: read_selector / write_selector pierce (they feed compound ops)', () => {
   const src = CS_SRC;
   const n = (src.match(/deepQuery\(params\.selector\)/g) || []).length;

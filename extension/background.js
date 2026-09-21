@@ -50,6 +50,19 @@ function withTimeout(promise, ms, label) {
 // below invalidate it when the tab closes; navigate/switch rebind it.
 let boundTabId = null;
 
+// EXPLICIT-BIND LATCH (fixed 2026-09-21). `bind` is documented as "routes page
+// ops to a tab WITHOUT focus — page ops NEVER need activation", but onActivated
+// below overwrote boundTabId on EVERY tab switch, so any user (or another
+// session) activating a tab silently retargeted every subsequent page op.
+// Measured consequences: `tabs{bind}` appeared to work and then resolved
+// "ref not found" for elements that demonstrably existed, because the answer
+// came from whichever tab was last activated; and a `navigate` meant to reload
+// one page loaded a DIFFERENT tab instead (Ali: "it still loaded an x.com over
+// lemonsqueezy I had to reopen"). Once a tab is bound EXPLICITLY, activation
+// must not steal it. It is released when that tab closes, or replaced by the
+// next explicit bind/switch — never by someone else clicking a tab.
+let explicitBind = false;
+
 // Restricted-page guard (mirrors offscreen.js). Content scripts cannot run on
 // chrome://, chrome-extension://, about:, edge://, file:// — page ops into
 // those must fall back to a real http(s) tab.
@@ -137,7 +150,7 @@ async function checkContentScriptReady(tabId) {
 // the offscreen's cached id used to survive closes and route ops to a dead
 // tab, PITFALL 26 class).
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === boundTabId) boundTabId = null;
+  if (tabId === boundTabId) { boundTabId = null; explicitBind = false; }
   // Phase 2 (2026-08-15): tell the offscreen → hub so the hub's tab registry
   // drops the dead content-script client (no routing into a dead tab).
   try {
@@ -150,7 +163,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // a stale tab forever (root of PITFALL 16 latch). The offscreen also needs to
 // learn of user-driven switches so its getActiveTabId() resolves correctly.
 chrome.tabs.onActivated.addListener((activeInfo) => {
-  boundTabId = activeInfo.tabId;
+  // NEVER let an activation steal an EXPLICIT bind — see the explicitBind note
+  // above. The anti-latch concern this listener was added for (PITFALL 16) is
+  // still covered: the flag is dropped when the bound tab closes, and every
+  // deliberate switch rebinds through switch_to_tab / bind_tab.
+  if (!explicitBind) boundTabId = activeInfo.tabId;
   try {
     chrome.runtime.sendMessage({ type: 'tab_event', event: 'activated', tabId: activeInfo.tabId, windowId: activeInfo.windowId }).catch(() => {});
   } catch (_) { /* offscreen may not be ready — harmless */ }
@@ -532,6 +549,7 @@ async function handleTabControl(action, payload) {
           try { await chrome.tabs.update(tabId, { active: true }); } catch (_) {}
         }
         boundTabId = tabId; // B1: SW is the single source of truth for binding
+        explicitBind = true; // explicit-bind latch: a later activation must not steal this
         return { success: true, tabId };
       } catch (err) {
         return { error: 'Failed to switch tab ' + tabId + ': ' + (err.message || err) };
@@ -549,6 +567,7 @@ async function handleTabControl(action, payload) {
         if (!tab) return { error: 'No such tab: ' + tabId };
         if (payload.activate) await chrome.tabs.update(tabId, { active: true });
         boundTabId = tabId;
+        explicitBind = true; // the caller picked THIS tab on purpose — hold it
         return { success: true, tabId, url: tab.url || '', title: tab.title || '' };
       } catch (err) {
         return { error: 'Failed to bind tab ' + tabId + ': ' + (err.message || err) };
@@ -556,7 +575,9 @@ async function handleTabControl(action, payload) {
     }
     case 'get_bound_tab': {
       // B1: pure SW-state read — sub-ms, no chrome.tabs.get round trip.
-      return { success: true, tabId: boundTabId };
+      // `explicit` lets a caller tell "someone deliberately bound this tab"
+      // from "this is just whatever the user last activated".
+      return { success: true, tabId: boundTabId, explicit: explicitBind };
     }
     case 'list_windows': {
       // B3 (2026-08-10): every Chrome window + its tabs in ONE call.
@@ -581,6 +602,7 @@ async function handleTabControl(action, payload) {
       if (!tid || !wid || isNaN(tid) || isNaN(wid)) return { error: 'tabId and windowId required' };
       const moved = await chrome.tabs.move(tid, { windowId: wid, index: -1 });
       boundTabId = moved && moved.id != null ? moved.id : boundTabId;
+      if (moved && moved.id != null) explicitBind = true;
       return { success: true, tabId: moved && moved.id, windowId: wid };
     }
     case 'transfer_text': {
