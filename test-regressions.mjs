@@ -1131,6 +1131,67 @@ test('guidance: real_activate_tab is scoped to OS-input, not page ops', () => {
   assert(/CANNOT fix a minimised/i.test(d), 'must state it cannot restore a minimised window');
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC GUARD: "CDP" is TWO classes and only one is banned.
+// Ali 2026-09-20: "cdp in that context I think should be allowed as long as it
+// can't be flagged as bot by any page." -> chrome.debugger, the EXTENSION API the
+// `ax` tool uses, is ALLOWED; the debug-port class stays FORBIDDEN.
+// Why this guard exists: before this, every "CDP IS FORBIDDEN" surface read as an
+// absolute, so a model could not tell whether the sanctioned `ax` tool was legal —
+// the ban and the tool contradicted each other. Measured 2026-09-20 with `ax`
+// attached: navigator.webdriver=false, no playwright/puppeteer/selenium/cdc_
+// globals, window.chrome.debugger undefined in the page world, and
+// Accessibility.getFullAXTree over a 2105-node tree produced zero >=50ms
+// main-thread long tasks.
+test('guidance: the chrome.debugger carve-out is stated, and the debug-port ban kept', () => {
+  const MODEL = readFileSync(new URL('./MODEL_PROMPT.md', import.meta.url), 'utf8');
+  const axDesc = SRV_SRC.match(/reg\(server, 'ax', \{\s*\n\s*description: '((?:\\'|[^'])*)'/);
+  assert(axDesc, 'ax tool description not found');
+  const d = axDesc[1];
+  assert(/EXTENSION API/.test(d), 'ax description must say it is the extension API');
+  assert(/NOT a CDP debug port/.test(d), 'ax description must deny being a CDP debug port');
+  assert(/ALLOWED/.test(d), 'ax description must state that it is allowed');
+  // The ban must survive, narrowed — not deleted.
+  assert(/CDP debug port/.test(SRV_SRC), 'src/server.js must use the narrowed "CDP debug port" wording');
+  assert(/debug port/i.test(MODEL), 'MODEL_PROMPT.md must use the narrowed "debug port" wording');
+  // The carve-out must also be stated where the model reads prose, not only on the tool.
+  assert(/chrome\.debugger/.test(MODEL), 'MODEL_PROMPT.md must name chrome.debugger as the allowed case');
+  assert(/IS allowed|are allowed|is NOT that/i.test(MODEL), 'MODEL_PROMPT.md must state that chrome.debugger is allowed');
+  // The old unqualified absolute is the regression: "NO screenshots, NO CDP, NO vision model".
+  assert(!/NO CDP,/.test(MODEL), 'MODEL_PROMPT.md still carries the unqualified "NO CDP," absolute');
+  assert(/NO CDP debug port/.test(MODEL), 'MODEL_PROMPT.md must qualify the absolute as "NO CDP debug port"');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC GUARD: essential claims must survive the WIRE, not just the file.
+// Ali directive 2026-08-18 (installSchemaMinifier, src/server.js ~line 237) clips
+// every tool description to DESC_CAP=110 chars on tools/list to save ~10k
+// tokens/request. Consequence, discovered 2026-09-20: prose past ~110 chars
+// NEVER REACHES AN AGENT. A fix written after the cut is a fix nobody sees —
+// this is the same class of bug as the stale-server problem, one layer down.
+// Live casualties found by dumping the real wire output: on real_activate_tab the
+// "You do NOT need it for page ops" correction sat at ~char 300 and was invisible,
+// so the tool still read as "makes the tab the OS-active one and gates".
+test('guidance: essential claims survive the 110-char wire cap on tool descriptions', () => {
+  const CAP = Number(process.env.WEBSENSE_DESC_CAP || 110);
+  const mustFit = [
+    ['real_activate_tab', /OS-INPUT ONLY/, /page ops NEVER need this/],
+    ['tabs', /page ops NEVER need activation/],
+    ['screenshot', /No debug port/],
+    ['ax', /EXTENSION API/, /NOT a CDP debug port/, /ALLOWED/],
+  ];
+  for (const [tool, ...pats] of mustFit) {
+    const m = SRV_SRC.match(new RegExp("reg\\(server, '" + tool + "', \\{\\s*\\n\\s*description: '((?:\\\\'|[^'])*)'"));
+    assert(m, tool + ' description not found');
+    const head = m[1].replace(/\\'/g, "'").slice(0, CAP);
+    for (const p of pats) {
+      assert(p.test(head),
+        tool + ': the claim ' + p + ' falls AFTER the ' + CAP +
+        '-char wire cut, so no agent ever reads it (move it to the front of the description)');
+    }
+  }
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
 

@@ -172,7 +172,7 @@ function annotateIntentResult(r, kind, q) {
 // Wrap any tool handler so errors return a result instead of crashing the server
 function safeHandler(fn) {
   return async (args) => {
-    try { return await fn(args); }
+    try { return withBindingNote(await fn(args)); }
     catch (err) {
       const out = { success: false, error: err && err.message };
       // Fold back the structured failure detail the hub preserved (2026-09-11c),
@@ -202,22 +202,67 @@ function sessionTabOf() {
 }
 // Stamp the session's bound tab onto a hub command (page ops only — tab ops
 // like navigate/switch_tab carry their own explicit tabId).
+// Ops that carry their OWN explicit tabId and must never be stamped.
+// NOTE: 'navigate' is deliberately NOT here (removed 2026-08-13, Ali directive —
+// session isolation): each session's navigate is stamped with ITS OWN bound
+// tabId, so a worker's navigate never steals another session's tab.
+const SESSION_TAB_OPS = new Set(['list_tabs','switch_tab','close_tab',
+  'list_frames','download_state','tab_contents','bind_tab','transfer_text',
+  'switch_tab_and_read','list_windows','focus_window','move_tab_to_window',
+  'ax_state','ax_read','ax_click','ax_type',
+  'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen','extension_reload','main_world_exec']);
+
+// Surface the auto-bind to the CALLER (safeHandler calls this on every result).
+// Without this the fix would be invisible again — which is the exact failure
+// mode we spent 2026-09-20 chasing.
+function withBindingNote(res) {
+  const st = sessionCtx.getStore();
+  if (!st || !st.autoBound || st.autoBoundNotified) return res;
+  st.autoBoundNotified = true;
+  const b = st.autoBound;
+  const note = 'SESSION WAS UNBOUND — auto-bound to tab ' + b.tabId + ' for this ' + b.op + '. ' +
+    'An unbound session previously fell back to the hub GLOBAL selected tab, which follows the ' +
+    'OS-frontmost tab (and whichever tab any other session last bound/activated), so it could ' +
+    'silently operate on ANOTHER session\'s tab. It is now pinned to tab ' + b.tabId + '. To choose ' +
+    'your own tab: navigate (binds automatically) or tabs{action:"bind", tabId}.';
+  try {
+    if (res && Array.isArray(res.content)) res.content.push({ type: 'text', text: 'WARNING: ' + note });
+  } catch (_) { /* never let a note break a result */ }
+  console.error('[websense] ' + note);
+  return res;
+}
+
 function withSessionTab(cmd) {
-  const tid = sessionTabOf();
+  const st = sessionCtx.getStore();
+  const tid = st && st.boundTabId != null ? st.boundTabId : null;
   if (tid != null && cmd && cmd.type && !cmd.tabId) {
     // Page ops (click/type/explore/evaluate/extract/page_state/...) route by
     // tabId in the hub's activeClient(). Tab ops keep their own semantics.
-    const TAB_OPS = new Set(['list_tabs','switch_tab','close_tab',
-      'list_frames','download_state','tab_contents','bind_tab','transfer_text',
-      'switch_tab_and_read','list_windows','focus_window','move_tab_to_window',
-      'ax_state','ax_read','ax_click','ax_type',
-      'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen','extension_reload','main_world_exec']);
-    // NOTE: 'navigate' was REMOVED from TAB_OPS (2026-08-13, Ali directive —
-    // session isolation). Each session's navigate is stamped with ITS OWN
-    // bound tabId so a worker's navigate never steals another session's tab.
-    // Sessions with no binding fall back to the SW's global tab via the
-    // offscreen relay (message.tabId absent → boundTabId).
-    if (!TAB_OPS.has(cmd.type)) cmd.tabId = tid;
+    if (!SESSION_TAB_OPS.has(cmd.type)) cmd.tabId = tid;
+    return cmd;
+  }
+  // ── UNBOUND PAGE OP — the leak (fixed 2026-09-20) ─────────────────────────
+  // Previously an unbound session stamped NOTHING, so the hub fell back to its
+  // GLOBAL selectedTabId. That cursor follows the OS-frontmost tab and whatever
+  // tab any other session last identified/activated — so a fresh session
+  // (typically a cron worker that had not navigated yet) silently operated on
+  // ANOTHER session's tab. Reproduced live 2026-09-20: an unbound third session
+  // read session B's example.org tab with no error and no signal.
+  // Ali's design intent is "1 tab to 1 caller/agent ... parallel ... no
+  // foreground". Rather than breaking every caller that reads before it
+  // navigates (many crons do), bind THIS session to the tab it is about to use
+  // and pin the command to it: routing becomes explicit and the session stops
+  // being unbound, and safeHandler tells the caller it happened.
+  if (tid == null && st && st.server && cmd && cmd.type && !cmd.tabId
+      && !SESSION_TAB_OPS.has(cmd.type)) {
+    let sel = null;
+    try { sel = (hubChrome && hubChrome.selectedTabId != null) ? Number(hubChrome.selectedTabId) : null; } catch (_) {}
+    if (sel != null) {
+      st.boundTabId = sel;              // this session is now pinned
+      st.server._wsBoundTabId = sel;    // ...persisted for its later requests
+      cmd.tabId = sel;                  // ...and this command routes explicitly
+      st.autoBound = { tabId: sel, op: cmd.type, at: Date.now() };
+    }
   }
   return cmd;
 }
@@ -387,7 +432,7 @@ function registerAllTools(server) {
   }, async () => {
     return textResult(`WebSense MCP — Guide (29 consolidated tools)
 ==============================================
-Non-vision web automation via Chrome extension. No CDP, no bot detection. CSP-safe. React/Vue/Angular compatible.
+Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
 THE LOOP: explore_page → pick refs → act (click/type_text/form/scroll) → read result → repeat.
 
@@ -404,7 +449,7 @@ THE 20 TOOLS — what each absorbed from the old 65-tool surface:
   status           kind:"page" (page_state) | "bridge" (get_status) | "doctor" (diagnostics) | "downloads"
   wait             poll until conditions met (urlContains/hasModal/hasCaptcha/notLoading/pendingDialogsGt/selector/script/timeoutMs/pollMs) — old wait_for; or event:"dialog_open|navigation|network|..." — old wait_for_event
   evaluate         script:<js> (eval, CSP-blocked on strict sites) — or query:{selector,extract,all,inputs,text,state} for CSP-proof no-eval reads (old evaluate_safe)
-  ax               native accessibility tree via chrome.debugger: action:"state"|"read"|"click"|"type" + tabId (+ match/role/name). For canvas SPAs & chrome:// pages
+  ax               native accessibility tree via chrome.debugger (Chrome's EXTENSION API — ALLOWED, unlike a CDP debug port): action:"state"|"read"|"click"|"type" + tabId (+ match/role/name). For canvas SPAs & chrome:// pages
   screenshot       captureVisibleTab → PNG/JPEG dataUrl for a vision model
   press_key        key + modifiers ["ctrl","shift","alt","meta"], optional ref target
   dialog           JS dialogs: action:"accept"|"dismiss" + index/value (old handle_dialog) — or keystroke:true + key:"enter|escape|tab|f5|ctrl+c" + value typed first (old dismiss_dialog, OS-level)
@@ -418,7 +463,7 @@ KEY PATTERNS:
 - After every action: read the before/after + effect verdict (confirmed / suspected_noop / unverifiable). On suspected_noop do NOT retry blind — escalate (OS-level click via windows-control) or try an alternate path
 - Iframes: status{kind:"frames"}? No — list_frames lives under tabs{action:"frames"}; pass frameId to any element tool
 - Waits: wait{urlContains:"/dashboard"} beats manual poll loops; wait{event:"dialog_open"} after clicks that pop dialogs
-- Anti-patterns: no screenshots/vision/CDP for routine work (bot detection); no evaluate for routine reads (CSP); don't guess labels — read them from explore_page
+- Anti-patterns: no screenshots/vision for routine work; no CDP *debug port* (bot detection) — note chrome.debugger via the ax tool is NOT that and is allowed; no evaluate for routine reads (CSP); don't guess labels — read them from explore_page
 
 TAB DISCIPLINE: reuse tabs (navigate reuses by default). NEVER close the last open tab/window of an app.
 PAGE OPS vs OS-INPUT (do not conflate — the #1 source of wasted calls):
@@ -740,7 +785,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 10. TABS ═══
   reg(server, 'tabs', {
-    description: 'Tab/window ops: action:"list" | "switch" (tabId) | "close" (tabId) | "bind" (tabId — route page ops at this tab WITHOUT focusing; pass activate:true ONLY when you are about to do OS-level input, since real_click/real_paste hit the frontmost window) | "frames" (list iframes w/ frameId) | "windows" (all windows+tabs) | "focus" (windowId) | "move" (tabId,windowId) | "transfer" (fromTab,toTab,fromSelector,toSelector — atomic cross-tab copy/paste) | "switchread" (tabId,selector — switch+read in one).',
+    description: 'Tab/window ops. bind routes page ops to a tab WITHOUT focus — page ops NEVER need activation. action:"list" | "switch" (tabId) | "close" (tabId) | "bind" (tabId — route page ops at this tab WITHOUT focusing; pass activate:true ONLY when you are about to do OS-level input, since real_click/real_paste hit the frontmost window) | "frames" (list iframes w/ frameId) | "windows" (all windows+tabs) | "focus" (windowId) | "move" (tabId,windowId) | "transfer" (fromTab,toTab,fromSelector,toSelector — atomic cross-tab copy/paste) | "switchread" (tabId,selector — switch+read in one).',
     inputSchema: {
       action: z.enum(['list', 'switch', 'close', 'bind', 'frames', 'windows', 'focus', 'move', 'transfer', 'switchread']).describe('Tab operation'),
       tabId: z.number().optional().describe('Target tab'),
@@ -985,7 +1030,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 13. AX BRIDGE ═══
   reg(server, 'ax', {
-    description: 'Native accessibility tree via chrome.debugger (CDP Accessibility domain) — for canvas SPAs (Telegram web, TradingView) and chrome:// pages. action:"state" (full tree) | "read" (filter by role/name/nameContains) | "click" (match) | "type" (match, text). Requires explicit tabId. Shows a debugger banner while attached.',
+    description: 'Native accessibility tree via chrome.debugger — Chrome\'s EXTENSION API, NOT a CDP debug port, and ALLOWED (Ali 2026-09-20). No page-visible signal: measured navigator.webdriver=false, no automation globals, and Accessibility.getFullAXTree over a 2105-node tree produced no >=50ms main-thread long task; it attaches and detaches inside this one call and never enables the Debugger domain. Use for canvas SPAs (Telegram web, TradingView) and chrome:// pages the SAG cannot represent. action:"state" (full tree) | "read" (filter by role/name/nameContains) | "click" (match) | "type" (match, text). Requires explicit tabId. Shows a LOCAL debugger banner while attached — local UI, not page-readable.',
     inputSchema: {
       action: z.enum(['state', 'read', 'click', 'type']).describe('AX operation'),
       tabId: z.number().describe('Tab to act on (required)'),
@@ -1004,7 +1049,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 14. SCREENSHOT ═══
   reg(server, 'screenshot', {
-    description: 'Capture the visible tab via chrome.tabs.captureVisibleTab (chrome.tabs API — NO CDP, no bot-detection surface). Returns {dataUrl, mime} for a vision model. For pages the structured tree can\'t fully represent.',
+    description: 'Capture the visible tab. No debug port, no bot-detection surface. (chrome.tabs.captureVisibleTab, with a chrome.debugger fallback the result reports via mode=). Returns {dataUrl, mime} for a vision model. For pages the structured tree can\'t fully represent.',
     inputSchema: {
       format: z.enum(['png', 'jpeg']).optional().describe('Default png'),
       quality: z.number().optional().describe('JPEG quality 0-100 (default 80)'),
@@ -1315,7 +1360,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   });
 
   reg(server, 'real_activate_tab', {
-    description: 'REAL OS click on a Chrome tab pill via UIA (pywinauto click_input) — makes the tab the OS-active one and gates on the window title. match: substring of the tab title; gate: expected title after activation (default match). WHEN YOU NEED IT: only before OS-LEVEL INPUT (real_click / real_paste), because SendInput lands on whatever window is frontmost. You do NOT need it for page ops — navigate, explore_page, read, click(ref), type_text, inspect, form and main_world all travel over tabs.sendMessage by tabId and work on a backgrounded tab (measured 2026-09-20: bound an active:false tab, no activation, explore_page returned 29 live matches). It CANNOT fix a minimised Chrome window either — a UIA click needs the window on screen; restore that with focus_window instead. Do not reach for it as a liveness remedy for a hang: diagnose a minimised/occluded window or a parked native dialog first. Requires the user\'s foreground — never use it for routine page work.',
+    description: 'OS-INPUT ONLY (before real_click/real_paste) — page ops NEVER need this. REAL OS click on a Chrome tab pill via UIA (pywinauto click_input): makes the tab the OS-active one and gates on the window title. match: substring of the tab title; gate: expected title after activation (default match). WHEN YOU NEED IT: only before OS-LEVEL INPUT (real_click / real_paste), because SendInput lands on whatever window is frontmost. You do NOT need it for page ops — navigate, explore_page, read, click(ref), type_text, inspect, form and main_world all travel over tabs.sendMessage by tabId and work on a backgrounded tab (measured 2026-09-20: bound an active:false tab, no activation, explore_page returned 29 live matches). It CANNOT fix a minimised Chrome window either — a UIA click needs the window on screen; restore that with focus_window instead. Do not reach for it as a liveness remedy for a hang: diagnose a minimised/occluded window or a parked native dialog first. Requires the user\'s foreground — never use it for routine page work.',
     inputSchema: {
       match: z.string().describe('Tab title substring to match (e.g. "Submit to r/mcp")'),
       gate: z.string().optional().describe('Expected window title after activation (default: match)'),
@@ -1421,7 +1466,7 @@ async function main() {
         // so every hub command this session issues routes to ITS tab — never
         // the shared global binding (worker sessions can no longer hijack the
         // collector's login tab).
-        const store = { boundTabId: session.server && session.server._wsBoundTabId != null ? session.server._wsBoundTabId : null };
+        const store = { boundTabId: session.server && session.server._wsBoundTabId != null ? session.server._wsBoundTabId : null, server: session.server };
         await sessionCtx.run(store, () => session.transport.handleRequest(req, res));
 
         // After first initialize, store session by transport sessionId

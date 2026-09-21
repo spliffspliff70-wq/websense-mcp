@@ -23,7 +23,7 @@ source of truth for the in-tool prompt.
 WebSense MCP — Model Guide
 ============================
 Non-vision web automation. You drive a real Chrome (your profile, cookies, no bot detection)
-via a Semantic Action Graph. NO screenshots, NO CDP, NO vision model, NO eval. Everything is
+via a Semantic Action Graph. NO screenshots, NO CDP debug port, NO vision model, NO eval. Everything is
 structured JSON. Works on LinkedIn, GitHub, Google — any strict-CSP site — including
 React/Vue/Angular apps.
 
@@ -113,7 +113,9 @@ NATIVE DIALOGS (the one thing DOM can't reach — handled here):
 CROSS-BROWSER: Chrome/Edge/Opera load extension/manifest.json (MV3, offscreen WS bridge).
 
 TIPS / ANTI-PATTERNS:
-- Do NOT use screenshots, vision, or CDP — unnecessary and may trigger bot detection.
+- Do NOT use screenshots, vision, or a CDP *debug port* — unnecessary, and a debug port may
+  trigger bot detection. NOTE: `chrome.debugger`, the extension API behind the `ax` tool, is
+  NOT a debug port and IS allowed (Ali 2026-09-20) — it exposes nothing to the page.
   WebSense IS the interface.
 - Do NOT guess button labels. Read them from the SAG (explore_page / inspect).
 - Do NOT use evaluate for routine work — it runs eval and is blocked by strict CSP
@@ -168,7 +170,7 @@ the 21 consolidated names:
 | `resolve_ref` / `geometry` / `layout_relation` | `inspect {kind:"element"|"geometry"|"relation"}` |
 
 ## Why this prompt (design notes)
-- **No vision / no CDP / no eval** is the core principle: the model navigates from the
+- **No vision / no CDP debug port / no eval** is the core principle: the model navigates from the
   Semantic Action Graph (structured JSON), which is immune to bot-detection and works on
   strict-CSP SPAs (LinkedIn, GitHub, Google).
 - **21 tools instead of 65** (2026-08-30 consolidation): every old tool became a

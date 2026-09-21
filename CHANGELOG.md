@@ -3,6 +3,80 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.3] — 2026-09-20
+
+Two corrections that turned out to be the *same* class of bug — **a fix written
+where no agent reads it** — plus the first committed test for multi-session tab
+isolation.
+
+### Corrections that never reached the model
+
+- **The CDP ban was stated as an absolute, while a shipped tool is built on CDP.**
+  Every surface said "CDP IS FORBIDDEN"; the `ax` tool is implemented with
+  `chrome.debugger`. An agent reading both had no way to tell which won.
+  The ban now covers the **debug-port class only** (`--remote-debugging-port`,
+  `agent-browser --cdp`, temp-profile Chrome) — those set `navigator.webdriver`,
+  get blocked by Cloudflare/Reddit, and their setup path can destroy every
+  authenticated session. `chrome.debugger` is Chrome's **extension** API and is
+  **allowed**, on Ali's explicit condition that it cannot be flagged as a bot by
+  any page. Measured with `ax` attached on a live page: `navigator.webdriver ===
+  false`, `window.chrome.debugger` undefined in the page world, no
+  playwright/puppeteer/selenium/`cdc_` globals, and `Accessibility.getFullAXTree`
+  over a 2105-node tree produced **zero ≥50ms main-thread long tasks**. Stated on
+  `ax`, in the in-tool guide, and in `MODEL_PROMPT.md`, with a guard test.
+
+  Stated honestly, because it is not zero: `ax` click/type inject through
+  `Runtime.callFunctionOn`, so a page that throws and inspects its own
+  `Error.stack` can see an anonymous injected frame. Every extension that injects
+  scripts leaves the same artifact, so it is not a bot signal on its own. The
+  debugger also attaches and detaches inside a single call, so it is never
+  attached across a navigation — the moment most detection scripts run.
+
+- **Tool descriptions are clipped to 110 chars on the wire, so prose past the cut
+  never reaches an agent.** The schema minifier post-processes `tools/list`; the
+  cap is deliberate (it saves ~10k tokens per request) and the full instructions
+  live in tool *return* values. But the previous activation-folklore correction on
+  `real_activate_tab` sat at ~char 300 and was therefore **invisible** — the tool
+  still read to every model as "makes the tab the OS-active one and gates", i.e.
+  exactly the instruction that induces a cargo-culted `activate:true`. The
+  load-bearing claim is now the first thing in each affected description
+  (`real_activate_tab`, `tabs`, `screenshot`, `ax`), and a guard test fails if a
+  future edit pushes an essential claim past the cut.
+
+### Multi-session tab isolation
+
+`withSessionTab` only stamped a tab onto a command when the calling session
+already had a binding. An unbound session stamped nothing, so routing fell back to
+the hub's **global** `selectedTabId` — a cursor that follows the OS-frontmost tab
+and whichever tab any other session last touched. A fresh session could therefore
+operate on **another** session's tab with no error and no signal (reproduced: an
+unbound session read a different session's tab).
+
+Unbound sessions are now pinned to the tab they are about to use, and the caller
+is **told**: results carry a `WARNING: SESSION WAS UNBOUND — auto-bound to tab N`
+block. It is emitted as a separate content block rather than appended text so JSON
+payloads are not corrupted.
+
+Sessions that navigate first were already isolated — N workers navigating get N
+private tabs, no foreground, no activation. This release closes the remaining
+silent case. A hard error or an auto-opened tab was deliberately rejected: many
+callers legitimately read before they navigate, and opening tabs for them would
+spam tabs while handing them a blank page.
+
+### New test
+
+- **`test/live-isolation-test.py`** — opens real, independent MCP sessions against
+  a running server and asserts each one stays on its own tab (separate tabs per
+  session, interleaved reads, re-navigate not stealing, explicit bind, unbound
+  auto-bind + warning). It is a **live** test needing Chrome and the running
+  server, so it is *not* part of `npm test`. Run it directly:
+
+  ```
+  python test/live-isolation-test.py   # exit 0 = isolation holds
+  ```
+
+Tests: 107 passed / 0 failed.
+
 ## [1.4.1] — 2026-09-11
 
 Four defects found by using the tool hard, all fixed at the source and pinned by
