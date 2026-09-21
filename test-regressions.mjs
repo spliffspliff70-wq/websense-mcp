@@ -1093,6 +1093,50 @@ test('upload: the file input is picked by PROXIMITY, never blindly all[0]', () =
     "locateFileInput must not fall back to the FIRST file input on the page");
 });
 
+test('upload: locateFileInput refuses a non-Element startEl instead of guessing', () => {
+  // Companion to the missing-await bug below: even with the await in place, a
+  // Promise/junk startEl reaching locateFileInput would score 0 against every
+  // candidate and silently settle on all[0]. Returning null makes the failure
+  // honest (Strategy 2 / a clear error) instead of writing to another field.
+  const src = CS_SRC;
+  const start = src.indexOf('function locateFileInput');
+  assert(start !== -1, 'locateFileInput must exist');
+  const body = src.slice(start, src.indexOf('\n  }', start));
+  assert(/startEl\.nodeType !== 1\) return null/.test(body),
+    'a non-Element startEl must return null — otherwise every candidate scores 0 and all[0] wins');
+});
+
+test('upload: the upload_file case AWAITS resolveRefHealed (a Promise never reaches locateFileInput)', () => {
+  // BUG (2026-09-21, measured on LemonSqueezy): `case 'upload_file'` called
+  // resolveRefHealed(params.ref) WITHOUT await, so upEl was a PROMISE. A Promise
+  // has no tagName / querySelector / parentElement, so locateFileInput fell past
+  // every structural branch into the proximity last resort — where
+  // domCloseness(promise, candidate) scores 0 for EVERY candidate, so `best`
+  // never moved off all[0]. The ref was resolved, correctly, and then thrown
+  // away: the file ALWAYS attached to the FIRST <input type=file> on the page.
+  // Symptom: a .zip landed on LemonSqueezy's product-IMAGE input while the real
+  // files input stayed empty, with the call still reporting success:true /
+  // fileCount:1 / confirmed:"preview-visible".
+  //
+  // This is why the earlier PROXIMITY fix alone changed nothing in production:
+  // proximity was correct, but it never received an element to measure against.
+  const src = CS_SRC;
+  // IMPORTANT: the CS ships TWO 'upload_file' labels. The bridge dispatcher
+  // (00-bridge-and-transport.js) deliberately returns a "requires the SW relay"
+  // error; the REAL handler is the brace-form case in 70-capture-and-readers.js.
+  // Matching the bare label picks the stub and the assertion fails for the wrong
+  // reason — so match the brace form.
+  const i = src.indexOf("case 'upload_file': {");
+  assert(i !== -1, "the upload_file handler case (brace form) must exist");
+  // Bound the branch by the NEXT case label rather than a fixed char count: the
+  // explanatory comment above the fix is long, and a fixed window silently
+  // truncated before the line under test (that is how this test first failed).
+  const j = src.indexOf("case '", i + 5);
+  const branch = src.slice(i, j === -1 ? i + 3000 : j);
+  assert(/const upEl = await resolveRefHealed\(params\.ref\)/.test(branch),
+    'upload_file must AWAIT resolveRefHealed — without await the ref is a Promise and is silently ignored');
+});
+
 test('delta: inViewport is NOT in the mutation fingerprint (a scroll is not a change)', () => {
   // BUG (2026-09-21): the fp included state.inViewport, so every scroll flipped
   // the fingerprint of each element crossing the fold and the scroll was reported

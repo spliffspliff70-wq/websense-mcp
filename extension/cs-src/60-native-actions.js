@@ -805,6 +805,12 @@
 
   function locateFileInput(startEl) {
     if (!startEl) return null;
+    // A non-Element startEl (a Promise from a missed `await`, a wrapper object)
+    // must NOT fall through to the proximity ranking below: every candidate
+    // would score 0 and all[0] — the FIRST file input on the page — would
+    // silently win. That is exactly how a .zip landed on a product-IMAGE input
+    // (2026-09-21). Fail honestly instead of retargeting someone else's field.
+    if (startEl.nodeType !== 1) return null;
     if (startEl.tagName === 'INPUT' && startEl.type === 'file') return startEl;
     // search descendants of the clicked/labeled element
     let f = startEl.querySelector && startEl.querySelector('input[type="file"]');

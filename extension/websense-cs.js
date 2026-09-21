@@ -3225,6 +3225,12 @@
 
   function locateFileInput(startEl) {
     if (!startEl) return null;
+    // A non-Element startEl (a Promise from a missed `await`, a wrapper object)
+    // must NOT fall through to the proximity ranking below: every candidate
+    // would score 0 and all[0] — the FIRST file input on the page — would
+    // silently win. That is exactly how a .zip landed on a product-IMAGE input
+    // (2026-09-21). Fail honestly instead of retargeting someone else's field.
+    if (startEl.nodeType !== 1) return null;
     if (startEl.tagName === 'INPUT' && startEl.type === 'file') return startEl;
     // search descendants of the clicked/labeled element
     let f = startEl.querySelector && startEl.querySelector('input[type="file"]');
@@ -3679,7 +3685,17 @@
         case 'upload_file': {
           // v4: editor targets get the paste strategy; input/dropzone targets
           // keep the classic strategies.
-          const upEl = resolveRefHealed(params.ref);
+          // AWAIT IS LOAD-BEARING (bug fixed 2026-09-21). resolveRefHealed is
+          // ASYNC; without await, upEl was a PROMISE. It has no tagName /
+          // querySelector / parentElement, so locateFileInput fell through every
+          // structural branch to the proximity last resort — where
+          // domCloseness(promise, candidate) scores 0 for EVERY candidate, so
+          // `best` never moved off all[0]: the FIRST file input on the page.
+          // Measured on LemonSqueezy: a .zip repeatedly attached to the product
+          // IMAGE input while the real files input stayed empty, and the call
+          // still reported success:true / fileCount:1 / preview-visible — i.e.
+          // the ref was silently ignored and the wrong field was corrupted.
+          const upEl = await resolveRefHealed(params.ref);
           const upDet = detectEditor(upEl);
           if (upDet.kind === 'editor') {
             result = await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
@@ -3695,7 +3711,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-ebcc87a0',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-a54dd7cd',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

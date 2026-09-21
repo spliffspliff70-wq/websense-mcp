@@ -225,7 +225,17 @@
         case 'upload_file': {
           // v4: editor targets get the paste strategy; input/dropzone targets
           // keep the classic strategies.
-          const upEl = resolveRefHealed(params.ref);
+          // AWAIT IS LOAD-BEARING (bug fixed 2026-09-21). resolveRefHealed is
+          // ASYNC; without await, upEl was a PROMISE. It has no tagName /
+          // querySelector / parentElement, so locateFileInput fell through every
+          // structural branch to the proximity last resort — where
+          // domCloseness(promise, candidate) scores 0 for EVERY candidate, so
+          // `best` never moved off all[0]: the FIRST file input on the page.
+          // Measured on LemonSqueezy: a .zip repeatedly attached to the product
+          // IMAGE input while the real files input stayed empty, and the call
+          // still reported success:true / fileCount:1 / preview-visible — i.e.
+          // the ref was silently ignored and the wrong field was corrupted.
+          const upEl = await resolveRefHealed(params.ref);
           const upDet = detectEditor(upEl);
           if (upDet.kind === 'editor') {
             result = await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
