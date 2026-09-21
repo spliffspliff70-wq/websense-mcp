@@ -4,6 +4,7 @@
  * Run: node test-regressions.mjs
  */
 import assert from 'assert';
+import { execSync } from 'node:child_process';
 import { HubServer } from './src/hub.js';
 import { planAutoClimb } from './src/climb.js';
 import { summarizeRead } from './src/summarize.js';
@@ -1277,6 +1278,25 @@ test('snapshot: the guide tells agents the map/slice tools exist', () => {
   assert(/FULL PAGE MAP vs A SLICE/.test(SRV_SRC), 'the guide must describe page_snapshot/page_slice');
   assert(/page_snapshot collects a LOSSLESS/.test(SRV_SRC), 'the guide must state the lossless property');
   assert(/scroll-stable/.test(SRV_SRC), 'the guide must state why it beats the viewport-filtered scan');
+});
+
+// ═══ THE BUILD MUST PARSE ══════════════════════════════════════════════════════
+// 2026-09-21: a TRUNCATED edit shipped a server.js with a syntax error to GitHub, and
+// npm test did NOT catch it — these tests read server.js as a TEXT blob. This actually
+// parses it (and everything it imports).
+test('src/server.js parses (a broken build once shipped — never again)', () => {
+  try {
+    execSync('node --check src/server.js', { stdio: 'pipe' });
+  } catch (e) {
+    assert(false, 'node --check src/server.js FAILED: ' + String(e.stderr || e.message));
+  }
+});
+
+test('no shipped source carries a literal ...[truncated] marker', () => {
+  for (const f of ['src/server.js', 'src/snapshot.js', 'src/hub.js']) {
+    const s = readFileSync(new URL('./' + f, import.meta.url), 'utf8');
+    assert(!s.includes('...[truncated]'), f + ' contains a literal ...[truncated] marker');
+  }
 });
 
 // ═══ DOC DRIFT: the guide must state the TRUE tool count and list every tool ═══

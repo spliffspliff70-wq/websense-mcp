@@ -604,7 +604,7 @@ function registerAllTools(server) {
 
   // ═══ 1. GUIDE ═══
   reg(server, 'websense_guide', {
-    description: 'START HERE. Full usage guide for the 31 consolidated WebSense tools: explore, read, click, type, form, scroll, tabs, wait, evaluate, main_world, ax, snapshot map/slice, real input...[truncated]
+    description: 'START HERE. Full usage guide for the 31 consolidated WebSense tools: explore, read, click, type, form, scroll, tabs, wait, evaluate, main_world, ax, snapshot map/slice, real input, status. Call once before using other tools.',
   }, async () => {
     return textResult(`WebSense MCP — Guide (31 consolidated tools)
 ==============================================
