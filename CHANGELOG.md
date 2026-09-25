@@ -83,7 +83,15 @@ blocked on *every* page (the extension's own CSP, not "strict sites"), that JS
 dialogs are not a reliable surface, and that session state is global. 12 new
 static assertions pin these so a false claim cannot ship again.
 
-Tests: 113 → 126.
+**`MODEL_PROMPT.md` is now generated, not hand-maintained.** It was a mirror of
+a *21-tool* guide the server had already replaced, so it kept teaching the false
+doctrines long after the guide itself was fixed. `tools/export-guide.mjs`
+extracts the live `websense_guide` text from `src/server.js`; `--check` runs in
+`npm test`, so the mirror and the served prompt can never diverge silently
+again. One existing test had been pinning that divergence (it demanded an exact
+uppercase string only the hand-edited copy produced) — now case-insensitive.
+
+Tests: 113 → 127.
 
 ## [1.4.4] — 2026-09-21
 
