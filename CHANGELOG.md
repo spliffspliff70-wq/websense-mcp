@@ -1,7 +1,17 @@
-# Changelog
+## [1.4.8] - 2026-09-25
 
-All notable changes to WebSense MCP are documented here.
-Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
+- Consolidated the duplicate content-script dispatchers: 48 ops existed in both
+  transports, hand-maintained, so fixes landed on one. On github.com `action_preview`
+  threw, `network_log` stubbed, `upload_file` refused, `write_selector` threw. All now
+  share one implementation, and a test fails if any regains a second body.
+- `ping` no longer times out (30s -> 5-7ms): the hub discarded the offscreen's
+  keep-alive-shaped reply.
+- Guide and README now teach token cost: full explore 79-183 KB, `page_snapshot`
+  1.5-1.8 KB (53-102x smaller), `intent` ~4 KB.
+- Background contract documented and guarded; the one automatic window-restore
+  (minimized -> 0x0 viewport) now reports `windowRestored` instead of popping silently.
+- Two ops called "dead" (zero call sites) work when executed; kept reachable so the
+  claim stays checkable. Tests 140/140, verified in a clean LF clone.
 
 ## [1.4.7] — 2026-09-25
 

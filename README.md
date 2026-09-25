@@ -107,6 +107,37 @@ Live DOM
 - **Exploration Graph:** persistent navigation map with Mermaid export.
 - **Frame-Aware:** targets iframes via `frameId`; no DOM region is unreachable.
 
+## Token cost — measured, not estimated
+
+Real payloads from the three sites this tool is used on most (2026-09-25):
+
+| call | x.com | Reddit | GitHub |
+|---|---|---|---|
+| `explore_page{full:true}` | 183 KB / 726 ms | 147 KB / 132 ms | 79 KB / 34 ms |
+| `page_snapshot` (lossless index) | **1.8 KB** / 147 ms | **1.8 KB** / 81 ms | **1.5 KB** / 33 ms |
+| `page_slice` (25 records) | 8.4 KB | 8.1 KB | 7.8 KB |
+| `explore_page{intent:"…"}` | ~4 KB / 29 ms | ~4 KB / 30 ms | ~4 KB / 4 ms |
+
+So the index is **53-102x smaller** than a full explore, and `intent` is cheaper still.
+Start with `intent` when you know what you want, `page_snapshot` + `page_slice` when you
+need to map the page, and reserve `full:true` for small pages (forms, settings) where you
+genuinely want every action. A single `full:true` on a large SPA is the most expensive
+call in the toolset.
+
+## Background by default
+
+Page ops never take the foreground. The complete list of things that do:
+
+1. `real_activate_tab`, `real_click`, `real_paste` — OS-input by design.
+2. `tabs action:"focus"` and `action:"move"`.
+3. **One automatic case:** if the target tab's Chrome window is *minimized or collapsed*,
+   its viewport is 0×0 and every read comes back empty, so WebSense restores that window
+   to read the page and then reports `windowRestored: true` with a note saying why. It
+   never raises a window that is merely in the background or occluded.
+4. **Things with no background path at all:** native file dialogs (OS open/save), OS-level
+   print dialogs, and attaching a *real* file to a composer via a custom dropzone — that
+   attaches a realm-local `File` that never uploads, so use `real_paste`.
+
 ## Known limitations
 - **`dialog` cannot answer a native dialog raised while the tab is hidden** — Chrome auto-dismisses
   those before the page can be reached. A MAIN-world hook records them either way

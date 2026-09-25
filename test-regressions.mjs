@@ -1868,5 +1868,51 @@ test('background-only: the ONE automatic foreground case is disclosed, not silen
     'the guide must say native file dialogs have no background path');
 });
 
+test('guide: it teaches the TOKEN COST ladder, with the measured numbers', () => {
+  // 2026-09-25. The guide documented WHAT each tool does but never what it COSTS,
+  // so an agent following it opened a real site with explore_page{full:true} and
+  // paid 183 KB (x.com) / 147 KB (Reddit) / 79 KB (GitHub) for its first look.
+  // The page_snapshot index is 1.5-1.8 KB for the same pages and explore_page
+  // {intent} is ~4 KB — so the cheapest-first ladder is worth 50-100x.
+  const s = SRV_SRC;
+  assert(/TOKEN COST/.test(s), 'the guide must state token cost, not just capability');
+  assert(/183 KB/.test(s) && /147 KB/.test(s) && /79 KB/.test(s),
+    'the guide must carry the MEASURED full-explore sizes for the three real sites');
+  assert(/1\.5-1\.8 KB/.test(s) || /53-102/.test(s),
+    'the guide must state the index size so the comparison is checkable');
+  const cost = s.split('TOKEN COST')[1] || '';
+  const head = cost.slice(0, 2000);
+  assert(/intent/.test(head),
+    'the ladder must start with the cheapest call (intent)');
+  assert(/page_snapshot/.test(head),
+    'the ladder must name page_snapshot as the map-the-page step');
+  // and the ordering must be explicit enough to act on
+  assert(/only when you genuinely need every action/.test(s),
+    'the guide must say when full:true IS appropriate, not only when it is not');
+});
+
+test('README: it publishes the measured token ladder and the background contract', () => {
+  // 2026-09-25. The README listed capabilities but never cost, so a reader's first
+  // move on a real site was explore_page{full:true} = 183 KB (x.com). It also did
+  // not say which operations take the foreground, which is the property a user
+  // cares about most (Ali: "make sure additionally that websense remains a
+  // background tool").
+  const r = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  assert(/## Token cost/.test(r), 'README must publish token cost, measured');
+  assert(/183 KB/.test(r) && /147 KB/.test(r) && /79 KB/.test(r),
+    'README must carry the three real-site full-explore sizes');
+  assert(/53-102x/.test(r) || /53–102x/.test(r),
+    'README must state the index-vs-full ratio so the choice is checkable');
+  assert(/## Background by default/.test(r),
+    'README must state the background-first contract');
+  for (const t of ['real_activate_tab', 'real_click', 'real_paste']) {
+    assert(new RegExp('`' + t + '`').test(r), 'README must name the OS-input tool ' + t);
+  }
+  assert(/minimized or collapsed/.test(r) && /windowRestored/.test(r),
+    'README must disclose the one automatic window-restore and that it reports itself');
+  assert(/no background path at all/.test(r),
+    'README must say which operations genuinely cannot run in the background');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
