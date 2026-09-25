@@ -77,13 +77,15 @@ Live DOM
 > **Each tool absorbed 2-10 old one-verb tools.** Full absorption table in `websense_guide`. All 65 original capabilities are callable — just through the consolidated tool with a `mode`/`format`/`action`/`kind` parameter instead of a separate tool name.
 
 ## Dialog handling
-- **DOM modals** (`[role=dialog]`, most in-app modals): the reliable surface. Close them by
-  ref, and note `status` reports `hasModal` / `dialogCount` from a **visibility-blind** scan
-  (a hidden modal still counts).
-- **JS dialogs** (`alert` / `confirm` / `prompt`) are **not reliably captured**: the page's own
-  `window.alert` bypasses the content-script override and does not block, so `pendingDialogs`
-  usually stays empty. Don't build a flow that depends on catching them. `dialog
-  action:"accept"|"dismiss"` still exists for anything that *does* land in the queue.
+- **JS dialogs** (`alert` / `confirm` / `prompt`) are captured, including the ones the **page itself**
+  raises — a MAIN-world hook shadows the three functions (the content script's isolated-world copy was
+  never called by page code, so dialogs used to go unseen and Chrome auto-dismissed them in a
+  background tab). `status` lists them in `pendingDialogs` (waiting) and `recentDialogs` (already
+  fired, with the outcome). Resolve with `dialog action:"accept"|"dismiss"` (+ `value` for `prompt`);
+  the answer really reaches the page's promise. Confirm/prompt auto-answer after 30s so a page can
+  never wedge.
+- **DOM modals** (`[role=dialog]`, most in-app modals) are closed by ref; `status.hasModal` /
+  `dialogCount` come from a **visibility-blind** scan (a hidden modal still counts).
 - **OS-level dialogs** (HTTP basic-auth, proxy-auth, print): can't be intercepted by JS. `dialog keystroke:true key:"enter"|"escape"` injects a global keystroke through Windows control (PowerShell `SendKeys`). This is the windows-control bridge.
 - **File picker:** handled by `form action:"upload"` (DataTransfer API) — no OS dialog.
 

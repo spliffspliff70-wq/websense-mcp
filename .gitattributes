@@ -1,0 +1,23 @@
+# Normalize line endings in the repository, and pin the files that MUST NOT be
+# transformed.
+#
+# WHY (2026-09-25): this repo had no .gitattributes and local core.autocrlf=true.
+# On Windows the working tree got CRLF, on the Linux CI runner git checked the
+# same blobs out as LF. The regression test "the artifact is IN SYNC with a
+# fresh build" then failed in CI (126 passed, 2 failed) while passing locally —
+# because a fresh build from the committed cs-src bytes did not byte-match the
+# committed artifact bytes. Pin the generated artifact to LF so the build is
+# reproducible on every platform.
+* text=auto eol=lf
+
+# Generated from extension/cs-src/*.js by tools/build-cs.mjs. Byte-compare
+# guarded by a regression test — it must never be rewritten by a checkout.
+extension/websense-cs.js text eol=lf
+
+# The CS sources it is built from.
+extension/cs-src/** text eol=lf
+extension/*-hook.js text eol=lf
+
+# Windows-only helpers keep CRLF so they stay double-click friendly.
+scripts/*.ps1 text eol=crlf
+scripts/*.bat text eol=crlf

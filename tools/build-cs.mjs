@@ -25,19 +25,26 @@ const ROOT = join(HERE, '..');
 const ARTIFACT = join(ROOT, 'extension', 'websense-cs.js');
 const SRCDIR = join(ROOT, 'extension', 'cs-src');
 
+// 2026-09-25: emit LF unconditionally. This builder hardcoded CRLF, so the
+// artifact it produced never byte-matched a fresh build on a checkout that used
+// LF — which is why the "artifact is IN SYNC" guard failed in CI on every push
+// while passing on Windows. Normalize both the banner and the concatenated body
+// so the output is identical on every platform.
+const NL = '\n';
 const BANNER = [
   '/**',
   ' * WebSense MCP \u2014 Enhanced Content Script',
   " * Runs in Chrome's isolated world (NOT subject to page CSP).",
   ' * All operations are native DOM manipulation \u2014 NO eval, NO string-to-code.',
   ' */',
-].join('\r\n');
+].join(NL);
 
 export function build() {
   const files = readdirSync(SRCDIR).filter(f => f.endsWith('.js')).sort();
   if (!files.length) throw new Error('no sources in ' + SRCDIR);
-  const chunks = files.map(f => readFileSync(join(SRCDIR, f), 'utf8'));
-  // Each part file ends with CRLF; joining with '' keeps those separators exact.
+  // Normalize each part: the build hash and the artifact bytes must not depend
+  // on whether the checkout converted line endings.
+  const chunks = files.map((f) => readFileSync(join(SRCDIR, f), 'utf8').split(/\r\n|\r|\n/).join(NL));
   let body = chunks.join('');
   // BUILD STAMP (2026-09-11d). csBuild used to be a hand-written constant, so it
   // was useless for the one question that matters: "is the content script running
@@ -47,12 +54,12 @@ export function build() {
   // before substitution, and the placeholder is fixed-width-free.
   const stamp = 'v4.6.1-' + sha(body).slice(0, 8);
   body = body.split('__CS_BUILD__').join(stamp);
-  return BANNER + '\r\n' +
-    '(function () {\r\n' +
-    "  'use strict';\r\n" +
-    '\r\n' +
+  return BANNER + NL +
+    '(function () {' + NL +
+    "  'use strict';" + NL +
+    NL +
     body +
-    '})();\r\n';
+    '})();' + NL;
 }
 
 export function sha(s) { return createHash('sha256').update(s).digest('hex'); }

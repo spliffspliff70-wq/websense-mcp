@@ -153,6 +153,13 @@
     try { scrollC = findScrollContainer() === document.documentElement ? 'window' : 'inner'; } catch (_) { scrollC = 'unknown'; }
     var dialogs = [];
     try { dialogs = WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}); } catch (_) {}
+    // 2026-09-25: include the MAIN-world queue. The page's own alert/confirm/
+    // prompt never touch the isolated-world WS_DIALOGS, so without this every
+    // status reported pendingDialogs:[] even while a confirm() was blocking the
+    // page — a silent-wrong-outcome class.
+    try { dialogs = dialogs.concat(readMainWorldDialogs().slice(-5)); } catch (_) {}
+    var recent = [];
+    try { recent = readRecentMainWorldDialogs().slice(-8); } catch (_) {}
     return {
       url: window.location.href,
       title: document.title,
@@ -161,6 +168,7 @@
       hasCaptcha: !!document.querySelector('iframe[src*="captcha"],iframe[src*="recaptcha"],.g-recaptcha,#captcha'),
       isLoading: !!document.querySelector('[aria-busy="true"],.loading,.spinner,.loader'),
       pendingDialogs: dialogs,
+      recentDialogs: recent,
       hasBeforeUnload: !!WS_HAS_BEFOREUNLOAD,
       viewport: { w: window.innerWidth, h: window.innerHeight },
       scrollPct: Math.round(window.scrollY / Math.max(1, (document.documentElement.scrollHeight || 1) - window.innerHeight) * 100),
@@ -274,7 +282,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'__CS_BUILD__',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'__CS_BUILD__',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;
@@ -324,12 +332,31 @@
         case 'scroll_and_extract': result = await scrollAndExtract(params); break;
         case 'preload_content': result = await preloadPage(params); break;
         case 'doctor_content': result = doctorContent(); break;
-        case 'get_status': result={connected:true,url:window.location.href,title:document.title,wsVersion:'v2-logged',pendingDialogs:WS_DIALOGS.length}; break;
+        case 'get_status': result={connected:true,url:window.location.href,title:document.title,wsVersion:'v2-logged',pendingDialogs:WS_DIALOGS.length + readMainWorldDialogs().length}; break;
         case 'ping': result={pong:true,url:window.location.href}; break;
         case 'handle_dialog': {
+          // 2026-09-25: try the MAIN-world queue FIRST — that is where the PAGE's
+          // own dialogs land. The isolated-world queue is the fallback for
+          // dialogs raised by other extension-injected code.
+          var act0 = params.action || 'accept';
+          var mwList = readMainWorldDialogs();
+          if (mwList.length) {
+            var mIdx = (params.index !== undefined && params.index !== null) ? params.index : (mwList.length - 1);
+            var mw = mwList[mIdx];
+            if (!mw) { result = { success: false, error: 'No pending MAIN-world dialog at index ' + mIdx }; break; }
+            var mwReply = await resolveMainWorldDialog(mw.id, act0, params.value);
+            result = {
+              success: true, handled: mw.type, source: 'main_world', id: mw.id,
+              message: mw.message,
+              value: (mw.type === 'confirm') ? (act0 === 'dismiss' ? false : true)
+                : (mw.type === 'prompt' ? (params.value != null ? params.value : mw.defaultValue) : undefined),
+              hookReply: mwReply,
+            };
+            break;
+          }
           var idx = (params.index !== undefined && params.index !== null) ? params.index : (WS_DIALOGS.length - 1);
           var dlg = WS_DIALOGS[idx];
-          if (!dlg) { result = { success: false, error: 'No pending dialog at index ' + idx }; break; }
+          if (!dlg) { result = { success: false, error: 'No pending dialog (none in the MAIN world or the isolated world)' }; break; }
           var act = params.action || 'accept';
           // Phase 3 (2026-08-15): clear the auto-resolve timer — the agent is
           // resolving explicitly, so the 30s fallback must not double-fire.
@@ -339,7 +366,63 @@
           else if (dlg.type === 'prompt') { var pv = (act === 'dismiss') ? null : (params.value !== undefined && params.value !== null ? params.value : dlg.defaultValue); if (dlg._res) dlg._res(pv); WS_DIALOGS.splice(idx, 1); result = { success: true, handled: 'prompt', value: pv }; }
           break;
         }
-function handleReadClipboard() {
+  // ═══ MAIN-WORLD DIALOGS (2026-09-25) ═══
+  // The isolated-world WS_DIALOGS queue only ever saw dialogs raised by other
+  // isolated-world code, never the PAGE's own alert/confirm/prompt. The MAIN
+  // world hook (extension/dialog-hook.js) publishes them to a DOM attribute;
+  // read it here so status/dialog see what the page actually raised.
+  function readMainWorldDialogs() {
+    var out = [];
+    try {
+      var raw = document.documentElement.getAttribute('data-ws-dialogs');
+      if (!raw) return out;
+      var arr = JSON.parse(raw);
+      if (Array.isArray(arr)) out = arr;
+    } catch (_) { /* never let a parse break page state */ }
+    return out;
+  }
+  // Dialogs that already fired and were auto-answered. alert() is synchronous,
+  // so the page continues the moment it is raised — the dialog can never still
+  // be "pending" when an agent looks. Without this history the agent had no way
+  // to know a confirmation prompt had appeared and been waved through, which is
+  // a silent-wrong-outcome, not just a missing feature.
+  function readRecentMainWorldDialogs() {
+    var out = [];
+    try {
+      var raw = document.documentElement.getAttribute('data-ws-dialogs-recent');
+      if (!raw) return out;
+      var arr = JSON.parse(raw);
+      if (Array.isArray(arr)) out = arr;
+    } catch (_) { /* never let a parse break page state */ }
+    return out;
+  }
+  // Ask the MAIN-world hook to resolve one of its dialogs. It exposes
+  // __wsResolveDialog on window, but from the isolated world that is a
+  // DIFFERENT global — so go through a CustomEvent the hook listens for.
+  function resolveMainWorldDialog(id, action, value) {
+    return new Promise(function (resolve) {
+      try {
+        var h = '__wsMainWorldDialogReply';
+        document.documentElement.setAttribute(h, '');
+        var ev = new CustomEvent('__wsResolveDialog', {
+          detail: { id: id, action: action, value: value, replyAttr: h },
+        });
+        document.dispatchEvent(ev);
+        // The hook writes the outcome back to the attribute; a microtask +
+        // short poll is enough because its work is synchronous.
+        var tries = 0;
+        var iv = setInterval(function () {
+          tries++;
+          var v = document.documentElement.getAttribute(h);
+          if (v) { clearInterval(iv); try { resolve(JSON.parse(v)); } catch (_) { resolve({ success: true }); } }
+          else if (tries > 20) { clearInterval(iv); resolve({ success: false, error: 'dialog hook did not answer' }); }
+        }, 25);
+      } catch (e) {
+        resolve({ success: false, error: String((e && e.message) || e) });
+      }
+    });
+  }
+  function handleReadClipboard() {
   // navigator.clipboard.readText() needs the document focused AND the
   // clipboardRead permission; in a backgrounded tab it silently returns
   // '' or throws NotAllowedError. Fall back to execCommand('paste')

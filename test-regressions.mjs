@@ -711,7 +711,11 @@ test('cs-src: the built artifact carries a navigable banner per part', () => {
     .filter(f => f.endsWith('.js')).sort();
   for (const f of files) {
     const src = readFileSync(new URL('./extension/cs-src/' + f, import.meta.url), 'utf8');
-    const firstLine = src.split('\r\n')[0];
+    // 2026-09-25: split on ANY line ending. This test split on CRLF only, so
+    // in a clean LF checkout firstLine became the ENTIRE file and the
+    // "artifact includes the banner" assertion could never match — one of the
+    // two CI failures that went unnoticed on every push since 07:00.
+    const firstLine = src.split(/\r\n|\r|\n/)[0];
     assert(firstLine.startsWith('/* '), `${f} starts with its banner`);
     assert(onDisk.includes(firstLine), `artifact includes the banner for ${f}`);
   }
@@ -1406,8 +1410,14 @@ test('guide: the shipped guide must not teach the measured-false doctrines (2026
     'the guide must state that script mode re-routes through the MAIN world');
   assert(/main_world_exec/.test(SRV_SRC),
     'the evaluate handler must implement the MAIN-world fallback');
-  assert(!/JS dialogs: action:"accept"/.test(SRV_SRC),
-    'the guide must not present JS dialog capture as a working surface');
+  // 2026-09-25: JS dialog capture was declared impossible here on the strength
+  // of one measurement. It was a world-split bug, now fixed with a MAIN-world
+  // hook, so this assertion had to be INVERTED — it was pinning the limitation
+  // rather than the requirement.
+  assert(/CAPTURES THE PAGE'S OWN alert\/confirm\/prompt/.test(SRV_SRC),
+    'the guide must state that the page\'s own JS dialogs are captured');
+  assert(/recentDialogs/.test(SRV_SRC),
+    'the guide must tell agents to check recentDialogs after a destructive-looking click');
   assert(/SYNTHETIC KeyboardEvents only/.test(SRV_SRC),
     'press_key must state it performs no default browser actions');
   assert(/TAB SCOPING MODEL/.test(SRV_SRC) && /jobs do NOT get separate profiles/.test(SRV_SRC),
@@ -1427,12 +1437,16 @@ test('docs: README does not advertise capabilities the audit proved absent', () 
   // false against the running code, and a visitor reads the README before the
   // guide. Each assertion below corresponds to a claim that was live here.
   const README = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
-  assert(!/overrides `window\.alert\/confirm\/prompt` and captures them/.test(README),
-    'README must not claim JS dialogs are captured (the page alert bypasses the override)');
-  assert(!/Native browser dialogs.*captured\/resolved/.test(README),
-    'README must not list JS dialogs as a solved limitation');
-  assert(/not reliably captured/.test(README),
-    'README must state JS dialogs are not a reliable surface');
+  // 2026-09-25: inverted — JS dialog capture was declared impossible on the
+  // strength of one measurement, but it was a world-split bug (the isolated-world
+  // override is never called by page code). A MAIN-world hook now captures them,
+  // so the README must state the working behavior.
+  assert(!/are \*\*not reliably captured\*\*/.test(README),
+    'README must no longer say JS dialogs are not reliably captured — they are, via a MAIN-world hook');
+  assert(/MAIN-world hook shadows the three functions/.test(README),
+    'README must explain how JS dialogs are captured');
+  assert(/recentDialogs/.test(README),
+    'README must document recentDialogs (dialogs that already fired)');
   assert(!/blocked by strict page CSP/.test(README),
     'README must not scope the evaluate CSP block to "strict sites" only');
   assert(!/Use `evaluate\{query`/i.test(README) || /re-routes/i.test(README),
@@ -1548,6 +1562,75 @@ test('docs: the guide states the TRUE tool count and lists every registered tool
     'the guide tool-list heading must state the real count');
   const missing = regs.filter((n) => !new RegExp('^  ' + n + '\\s', 'm').test(SRV_SRC));
   assert(missing.length === 0, 'registered but undocumented in the guide: ' + missing.join(', '));
+});
+
+// ═══ 2026-09-25 — JS dialogs, async evaluate, and the CRLF/CI fix ═══
+
+test('dialogs: a MAIN-world hook captures the PAGE\'s own alert/confirm/prompt', () => {
+  // The isolated-world override was never called by page code, so a page's own
+  // dialog was invisible AND Chrome auto-dismissed it in a background tab — a
+  // silent-wrong-outcome class (an agent could report a destructive step as
+  // successful when the user would have been asked about it).
+  const BG = readFileSync(new URL('./extension/background.js', import.meta.url), 'utf8');
+  const HOOK = readFileSync(new URL('./extension/dialog-hook.js', import.meta.url), 'utf8');
+  const READERS = readFileSync(new URL('./extension/cs-src/70-capture-and-readers.js', import.meta.url), 'utf8');
+  const ART = readFileSync(new URL('./extension/websense-cs.js', import.meta.url), 'utf8');
+
+  assert(/async function registerDialogHook\(\)/.test(BG), 'background must register the dialog hook');
+  assert((BG.match(/registerDialogHook\(\);/g) || []).length >= 3,
+    'the dialog hook must be registered on install, on startup, and at top level');
+  assert(/id: 'ws-dialog-hook'/.test(BG) && /world: 'MAIN'/.test(BG) && /runAt: 'document_start'/.test(BG),
+    'the dialog hook must be a MAIN-world document_start registration');
+
+  for (const fn of ['alert', 'confirm', 'prompt']) {
+    assert(HOOK.includes("install('" + fn + "'"), 'the hook must shadow ' + fn);
+  }
+  assert(/data-ws-dialogs'/.test(HOOK) && /data-ws-dialogs-recent/.test(HOOK),
+    'the hook must publish both the pending list and the recent history');
+  assert(/AUTO_MS = 30000/.test(HOOK),
+    'confirm/prompt must auto-answer so a page can never wedge');
+  assert(/pending\.filter\(\(d\) => !d\.done\)/.test(HOOK),
+    'only UNRESOLVED dialogs may be published as pending');
+
+  assert(/function readMainWorldDialogs\(\)/.test(READERS), 'the CS must read the MAIN-world queue');
+  assert(/function readRecentMainWorldDialogs\(\)/.test(READERS), 'the CS must read the recent history');
+  assert(/readMainWorldDialogs\(\)\.slice/.test(READERS), 'page_state must include the MAIN-world dialogs');
+  assert(/recentDialogs:/.test(READERS), 'page_state must expose recentDialogs');
+  assert(/source: 'main_world'/.test(READERS), 'handle_dialog must report which world it answered');
+  assert(/readMainWorldDialogs/.test(ART), 'the built artifact must contain the dialog reader');
+});
+
+test('evaluate: script mode is async-capable, returns statement values, and reports real errors', () => {
+  // The MAIN-world fallback serialized a Promise to {} (JSON.stringify), so an
+  // async script came back empty and the agent had to hand-roll polling.
+  assert(/__wsEvalOut/.test(SRV_SRC), 'the MAIN-world bridge must use a side channel for the value');
+  assert(/Promise\.resolve\(__r\)/.test(SRV_SRC),
+    'the bridge must resolve the value in the page before serializing');
+  assert(/script threw: /.test(SRV_SRC),
+    'a real script error must be reported as itself, not masked by the CSP error');
+  assert(/splitTopLevel/.test(SRV_SRC),
+    'statement blocks must return their last expression (var x = 7; x * 6 -> 42)');
+  // main_world_exec must NOT be in the tab-management set: those ops are never
+  // stamped with the session's bound tab, and the fallback died with
+  // "main_world_exec: tabId required".
+  const m = SRV_SRC.match(/const SESSION_TAB_OPS = new Set\(\[([\s\S]*?)\]\)/);
+  assert(m, 'SESSION_TAB_OPS must exist');
+  assert(!/main_world_exec/.test(m[1]),
+    'main_world_exec is a PAGE op and must be stampable with the session bound tab');
+});
+
+test('repo: line endings pinned so the generated artifact is byte-reproducible in CI', () => {
+  // No .gitattributes + core.autocrlf=true meant the Windows checkout had CRLF
+  // and the Linux CI checkout had LF, so the "artifact is in sync with a fresh
+  // build" guard failed in CI (126 passed, 2 failed) while passing locally.
+  const GA = readFileSync(new URL('./.gitattributes', import.meta.url), 'utf8');
+  assert(/text=auto eol=lf/.test(GA), 'the repo must normalize to LF');
+  assert(/extension\/websense-cs\.js text eol=lf/.test(GA),
+    'the generated artifact must be pinned to LF (a test byte-compares it)');
+  assert(/extension\/cs-src\/\*\* text eol=lf/.test(GA), 'the CS sources must be pinned to LF');
+  const EX = readFileSync(new URL('./tools/export-guide.mjs', import.meta.url), 'utf8');
+  assert(/normalizeEol/.test(EX),
+    'the guide exporter must normalize EOLs before comparing (CI saw MODEL_PROMPT.md as stale)');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

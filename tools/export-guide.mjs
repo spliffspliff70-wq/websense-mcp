@@ -43,8 +43,16 @@ function extractGuide(src) {
   return src.slice(open + 1, i);
 }
 
-const guide = extractGuide(readFileSync(SRV, 'utf8'));
-const md = readFileSync(MD, 'utf8');
+// 2026-09-25: normalize EOLs before comparing or writing. This repo had no
+// .gitattributes and ran with core.autocrlf=true, so on Windows the guide
+// literal and MODEL_PROMPT.md were both CRLF (comparison passed) while a clean
+// LF checkout produced LF — and the committed mirror was stale, failing CI with
+// "MODEL_PROMPT.md is STALE". Byte-comparing platform-dependent line endings is
+// the bug; compare the normalized text and always write LF.
+const normalizeEol = (s) => s.replace(/\r\n/g, '\n');
+
+const guide = normalizeEol(extractGuide(readFileSync(SRV, 'utf8')));
+const md = normalizeEol(readFileSync(MD, 'utf8'));
 const force = process.argv.includes('--force');
 
 // The guide block is the fence whose FIRST line starts with "WebSense MCP".

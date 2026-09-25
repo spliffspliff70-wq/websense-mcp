@@ -1,5 +1,8 @@
 node_modules/
 *.log
+# Runtime server output (hub logs, restart-script captures). Never source.
+logs/
+*.err
 *.pem
 __pycache__/
 *.pyc

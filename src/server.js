@@ -251,7 +251,12 @@ const SESSION_TAB_OPS = new Set(['list_tabs','switch_tab','close_tab',
   'list_frames','download_state','tab_contents','bind_tab','transfer_text',
   'switch_tab_and_read','list_windows','focus_window','move_tab_to_window',
   'ax_state','ax_read','ax_click','ax_type',
-  'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen','extension_reload','main_world_exec']);
+  'get_window_tabs','get_tab_info','get_active_tab','cookie_op','download_op','respawn_offscreen','extension_reload']);
+// 2026-09-25: 'main_world_exec' was in this set, which is the TAB-MANAGEMENT
+// set — those ops are never stamped with the session's bound tab. The main_world
+// TOOL resolves its own tab before sending, so nothing noticed; but the
+// evaluate{script} CSP fallback sends main_world_exec un-stamped and it died
+// with "main_world_exec: tabId required". It is a PAGE op and belongs here.
 
 // Surface the auto-bind to the CALLER (safeHandler calls this on every result).
 // Without this the fix would be invisible again — which is the exact failure
@@ -649,7 +654,7 @@ THE 31 TOOLS — what each absorbed from the old 65-tool surface:
   ax               native accessibility tree via chrome.debugger (Chrome's EXTENSION API — ALLOWED, unlike a CDP debug port): action:"state"|"read"|"click"|"type" + tabId (+ match/role/name). For canvas SPAs & chrome:// pages
   screenshot       captureVisibleTab → PNG/JPEG dataUrl for a vision model
   press_key        key + modifiers ["ctrl","shift","alt","meta"], optional ref target. SYNTHETIC KeyboardEvents only — it does NOT perform default browser actions: ctrl+a does not select, letter keys do not insert text. It fires page JS key handlers and nothing else. Use type_text for text entry.
-  dialog           DOM [role=dialog] modals: close by clicking their ref; status{kind:"page}.hasModal is visibility-BLIND (hidden modals count too). JS window.alert/confirm/prompt are NOT reliably captured (the page's alert bypasses the content-script override and does not block) — do not build a flow that depends on catching them. action:"accept"|"dismiss" + index/value (old handle_dialog) — or keystroke:true + key:"enter|escape|tab|f5|ctrl+c" + value typed first (old dismiss_dialog, OS-level)
+  dialog           JS dialogs: action:"accept"|"dismiss" + value (prompt). CAPTURES THE PAGE'S OWN alert/confirm/prompt via a MAIN-world hook — status lists them in pendingDialogs (waiting) and recentDialogs (already fired); the answer reaches the page's promise. Check recentDialogs after any destructive-looking click. DOM [role=dialog] modals: close by ref (hasModal/dialogCount are visibility-BLIND). keystroke:true + key for OS-level dialogs (enter|escape|tab|f5|ctrl+c)
   session          action:"reset" (clears map + tab binding — this map is GLOBAL to the hub, so reset wipes every session's history) | "map" (exploration graph) | "mermaid" (flowchart export). History stores the text you typed.
   network_log      captured fetch/XHR since last call (clear, maxEntries) — see the fuller note below the tool list
   clipboard        action:"copy" (text) | "read"
@@ -1305,39 +1310,103 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     const cspBlocked = box.cspBlocked === true
       || /CSP blocked|unsafe-eval|Content Security Policy/i.test(String(box.error || (typeof rr === 'string' ? rr : '')));
     if (!cspBlocked) return textResult(r);
-    const tabId = o.tabId || sessionTabOf() || server?._wsBoundTabId || null;
-    if (!tabId) {
-      return textResult({ success: false, error: 'script mode: isolated-world eval is CSP-blocked and no target tab is bound (pass tabId, or tabs{action:"bind"} first)', cspBlocked: true });
-    }
+    // 2026-09-25: do NOT resolve a tab here. Every page op is routed through the
+    // central stamper, which injects this session's bound tab when a command
+    // carries none — the same mechanism click/type_text rely on. Resolving it
+    // locally was both redundant and wrong: `server` is not in scope inside this
+    // registration callback, so the binding was always undefined and the
+    // fallback silently dead-ended (measured: evaluate{script} kept returning the
+    // CSP error even with an explicit tabId). Send it un-stamped and let the
+    // router do its job.
     try {
-      // Wrap the caller's script as an expression-bodied function so arbitrary
-      // statements/expressions both work, exactly like main_world{func}.
-      //
-      // NOT async: the SW serializes with JSON.stringify, and an async function
-      // returns a PROMISE, which stringifies to {} — measured: the async wrapper
-      // came back as result:{} instead of 2 (2026-09-25). A sync function whose
-      // body is an expression returns the value correctly.
+      // Wrap the caller's script so BOTH shapes work:
+      //  - a bare expression  → `return (EXPR);`
+      //  - statement block    → run it; the last expression's value is returned
+      // A bare `1+1` inside `(function(){ 1+1 })` evaluates and DISCARDS the
+      // value (measured 2026-09-25: result came back null), so the expression
+      // form has to be returned explicitly.
+      const src = String(o.script || 'null').trim();
+      // A statement block's value is its LAST expression, but we cannot know
+      // where that is without parsing. Split on top-level semicolons and return
+      // the final non-empty chunk — so `var x = 7; x * 6` yields 42 rather than
+      // null. Chunks are rejoined so statements with `;` inside strings survive.
+      const splitTopLevel = (text) => {
+        const parts = []; let cur = ''; let q = null; let depth = 0;
+        for (let i = 0; i < text.length; i++) {
+          const ch = text[i];
+          if (q) { cur += ch; if (ch === q && text[i - 1] !== '\\\\') q = null; continue; }
+          if (ch === '"' || ch === "'" || ch === '`') { q = ch; cur += ch; continue; }
+          if (ch === '(' || ch === '[' || ch === '{') depth++;
+          if (ch === ')' || ch === ']' || ch === '}') depth--;
+          if (ch === ';' && depth === 0) { parts.push(cur); cur = ''; continue; }
+          cur += ch;
+        }
+        if (cur.trim()) parts.push(cur);
+        return parts;
+      };
+      const chunks = splitTopLevel(src);
+      let body;
+      if (chunks.length > 1) {
+        const last = chunks[chunks.length - 1].trim();
+        const head = chunks.slice(0, -1).join(';');
+        body = head + '; return (' + last + ');';
+      } else if (/(^|[;{}])\s*(var|let|const|if|for|while|function|throw|try|switch|do)\b/.test(src)) {
+        body = src;   // single statement that has no value of its own
+      } else {
+        body = 'return (' + src + ');';
+      }
+      const bridge = 'window.__wsEvalOut = {done:false};'
+        + ' (function(){ try {'
+        + '  var __r = (function(){ ' + body + ' }).call(window);'
+        + '  Promise.resolve(__r).then(function(v){'
+        + '    try { window.__wsEvalOut = {done:true, value: (function(){'
+        + '      try { return JSON.parse(JSON.stringify(v === undefined ? null : v)); }'
+        + '      catch(_){ return String(v); } })() }; } catch(_){}'
+        + '  }, function(e){'
+        + '    try { window.__wsEvalOut = {done:true, error: String((e && e.message) || e)}; } catch(_){}'
+        + '  });'
+        + ' } catch(e) {'
+        + '  try { window.__wsEvalOut = {done:true, error: String((e && e.message) || e)}; } catch(_){}'
+        + ' } })();';
       const viaMain = await getActiveHub().send({
         type: 'main_world_exec',
-        tabId,
-        func: '() => { return (' + String(o.script || 'null') + '); }',
+        tabId: o.tabId,   // undefined → the router stamps the session's bound tab
+        func: '() => { ' + bridge + ' return true; }',
         args: [],
         allFrames: false,
       });
-      const mbox = (viaMain && typeof viaMain === 'object' && viaMain.data && typeof viaMain.data === 'object') ? viaMain.data : (viaMain || {});
-      const results = Array.isArray(mbox.results) ? mbox.results : null;
-      if (results && results.length) {
-        const first = results[0] || {};
-        if (first.error) return textResult(r); // real script error → don't mask it
-        return textResult({ success: true, result: (first.result === undefined ? null : first.result), via: 'main_world', note: 'script mode ran in the page MAIN world (chrome.userScripts) because the isolated-world eval path is CSP-blocked by the extension policy', frameId: first.frameId });
+      const mbox0 = (viaMain && typeof viaMain === 'object' && viaMain.data && typeof viaMain.data === 'object') ? viaMain.data : (viaMain || {});
+      if (mbox0 && mbox0.error) {
+        // The bridge itself could not run (no tab, no userScripts, restricted
+        // page). Say so plainly instead of pretending the CSP error was final.
+        return textResult({ success: false, error: 'script mode: isolated-world eval is CSP-blocked and the MAIN-world fallback is unavailable — ' + String(mbox0.error), originalError: box.error });
       }
-      // Relay answered but not in the shape we expect — say so instead of
-      // silently returning the CSP error, which reads as "this is impossible".
-      return textResult({ ...(typeof r === 'object' && r ? r : {}), success: false,
-        error: 'script mode: isolated-world eval is CSP-blocked and the MAIN-world fallback returned no result',
-        mainWorldFallback: mbox, originalError: box.error });
+      // Poll the side channel briefly: a synchronous script is already done, a
+      // promise settles on a microtask. 2s ceiling keeps a hanging promise from
+      // wedging the call.
+      const deadline = Date.now() + 2000;
+      let out = null;
+      while (Date.now() < deadline) {
+        const poll = await getActiveHub().send({
+          type: 'main_world_exec',
+          tabId: o.tabId,
+          func: '() => (window.__wsEvalOut || null)',
+          args: [],
+          allFrames: false,
+        });
+        const pb = (poll && typeof poll === 'object' && poll.data && typeof poll.data === 'object') ? poll.data : (poll || {});
+        const first = Array.isArray(pb.results) && pb.results[0] ? pb.results[0] : null;
+        if (first && first.result) {
+          out = first.result;
+          if (out && out.done) break;
+        }
+        await new Promise((res) => setTimeout(res, 40));
+      }
+      if (out && out.error) return textResult({ success: false, error: 'script threw: ' + out.error, via: 'main_world' });
+      if (out && out.done) return textResult({ success: true, result: (out.value === undefined ? null : out.value), via: 'main_world', note: 'script ran in the page MAIN world (chrome.userScripts, no eval) because the isolated-world eval path is CSP-blocked by the extension policy' });
+      return textResult({ success: false, error: 'script mode: the MAIN-world fallback did not return a value within 2s (a pending promise that never settles?)', via: 'main_world', originalError: box.error });
     } catch (fallbackErr) {
-      return textResult({ ...(typeof r === 'object' && r ? r : {}), success: false,
+      return textResult({ success: false,
         error: 'script mode: isolated-world eval is CSP-blocked; MAIN-world fallback failed — ' + String((fallbackErr && fallbackErr.message) || fallbackErr),
         originalError: box.error });
     }

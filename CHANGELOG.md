@@ -3,6 +3,62 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.6] — 2026-09-25
+
+JS dialogs are now visible, `evaluate{script}` handles async, and CI is green
+again.
+
+### JS dialogs — the page's own `alert`/`confirm`/`prompt` are now captured
+
+The content script overrode `window.alert/confirm/prompt` in its **isolated**
+world. Page code runs in the **main** world and never touched those copies, so a
+page's own dialog was invisible: `status` reported `pendingDialogs: []` while a
+`confirm()` was blocking the page — and in a background tab Chrome silently
+auto-dismissed the native dialog, so the page just continued. That is a
+**silent-wrong-outcome** class, not a missing feature: an agent could report a
+destructive step as successful when the user would have been asked about it.
+
+A MAIN-world hook (`extension/dialog-hook.js`, registered the same way as the
+console and network hooks) now shadows the three functions and publishes them to
+a DOM attribute the content script reads. `dialog action:"accept"|"dismiss"`
+resolves them, and the answer really reaches the page:
+
+- `confirm` → the page's promise resolves `true` (accept) or `false` (dismiss)
+- `prompt` → the page's promise resolves the supplied value
+- `alert` → recorded in `status.recentDialogs` with its message
+
+`status` gained `recentDialogs`: dialogs that already fired, including ones that
+were auto-answered. `alert()` is synchronous, so the page continues the instant
+it is raised — the agent needs to know it *happened*, not that it is waiting.
+Confirm/prompt still auto-answer after 30s so the page can never wedge.
+
+### `evaluate{script}` — async, statements, and honest errors
+
+The script-mode fallback to the MAIN world works end to end:
+
+- **async scripts** now resolve in the page and are read back, so
+  `new Promise(r => setTimeout(() => r("OK"), 250))` returns `"OK"`. Previously
+  a promise serialized to `{}` and you had to hand-roll polling.
+- **statement blocks** return their last expression's value (`var x = 7; x * 6`
+  → `42`).
+- **real script errors** are reported as themselves (`script threw: Cannot read
+  properties of null`) instead of being masked by the CSP error.
+
+Also fixed on the way: `main_world_exec` was listed among the tab-management ops,
+so it was never stamped with the session's bound tab and the fallback died with
+`main_world_exec: tabId required`.
+
+### CI — the repo had been failing on every push since 07:00
+
+There was no `.gitattributes` and the Windows checkout ran with
+`core.autocrlf=true`, so a fresh Linux checkout produced LF while the committed
+artifact was CRLF. The "artifact is in sync with a fresh build" guard therefore
+failed in CI (126 passed, 2 failed) while passing locally. Added `.gitattributes`
+pinning the generated artifact and its sources to LF, and made
+`tools/export-guide.mjs` normalize line endings before comparing (the mirror was
+stale in CI for the same reason). Verified in a clean LF-only clone before
+pushing.
+
 ## [1.4.5] — 2026-09-25
 
 A full 31-tool live audit against a controlled workbench (60+ verdicts, every

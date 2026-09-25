@@ -48,6 +48,26 @@ async function registerNetworkHook() {
   }
 }
 
+// 2026-09-25: same MAIN-world pattern for alert/confirm/prompt. The content
+// script's isolated-world override never saw the page's own dialogs (measured:
+// a real alert() left pendingDialogs:[]), and in a background tab Chrome
+// silently auto-dismisses them — so the page continued with no agent able to
+// see or answer. The hook publishes to a DOM attribute the CS reads.
+async function registerDialogHook() {
+  try {
+    await chrome.scripting.registerContentScripts([{
+      id: 'ws-dialog-hook',
+      matches: ['<all_urls>'],
+      js: ['dialog-hook.js'],
+      runAt: 'document_start',
+      world: 'MAIN',
+      allFrames: true,
+    }]);
+  } catch (e) {
+    // Duplicate ID → already registered.
+  }
+}
+
 // ═══ Offscreen Document Management ═══
 
 let offscreenCreating = null;
@@ -936,12 +956,14 @@ async function handleTabControl(action, payload) {
 chrome.runtime.onInstalled.addListener(() => {
   registerConsoleHook();
   registerNetworkHook();
+  registerDialogHook();
   setupOffscreen().catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
   registerConsoleHook();
   registerNetworkHook();
+  registerDialogHook();
   setupOffscreen().catch(() => {});
 });
 
@@ -950,6 +972,7 @@ chrome.runtime.onStartup.addListener(() => {
 setupOffscreen().catch(() => {});
 registerConsoleHook();
 registerNetworkHook();
+registerDialogHook();
 
 // ═══ AX BRIDGE via chrome.debugger (Phase 4, 2026-08-15) ═══
 // chrome.debugger is only available in the background service worker.
