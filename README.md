@@ -1,14 +1,19 @@
 # WebSense MCP
 
+[![Release](https://img.shields.io/github/release/spliffspliff70-wq/websense-mcp?display_name=tag)](https://github.com/spliffspliff70-wq/websense-mcp/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4?logo=googlechrome&logoColor=white)](extension/manifest.json)
+
 > Non-vision, AI-native web automation via the Semantic Action Graph. No screenshots, no CDP, no bot detection.
 
 ## Quick Start
 
-1. `npm install` in `E:\local_memstore\websense`
-2. Load the extension: `chrome://extensions` → Developer mode → Load unpacked → select `E:\local_memstore\websense\extension`. It auto-connects to the WebSocket hub (no launcher page).
-3. Register the MCP server in your client. **Cline** (`C:\Users\Ali\.cline\cline_mcp_settings.json`):
+1. `git clone https://github.com/spliffspliff70-wq/websense-mcp && cd websense-mcp && npm install`
+2. Load the extension: `chrome://extensions` → Developer mode → Load unpacked → select
+   `extension/`. It auto-connects to the WebSocket hub on port 38401 (no launcher page).
+3. Register the MCP server in your client (stdio, or `--http` for the streamable-HTTP transport):
 ```json
-{ "mcpServers": { "websense": { "command": "node", "args": ["E:/local_memstore/websense/src/server.js"], "env": { "PORT": "38401" } } } }
+{ "mcpServers": { "websense": { "command": "node", "args": ["src/server.js"] } } }
 ```
 4. Call any tool (e.g. `explore_page`). Flow: `MCP → WS → Extension → Content Script → DOM`.
 
