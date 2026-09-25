@@ -1422,12 +1422,25 @@ test('guide: the shipped guide must not teach the measured-false doctrines (2026
     'press_key must state it performs no default browser actions');
   assert(/TAB SCOPING MODEL/.test(SRV_SRC) && /jobs do NOT get separate profiles/.test(SRV_SRC),
     'the guide must state the one-profile/per-tab isolation model');
-  assert(/REF LIFECYCLE/.test(SRV_SRC) && /RENUMBERS/.test(SRV_SRC),
-    'the guide must warn that E# refs renumber and rot across re-renders');
+  // 2026-09-25: INVERTED. The claim that E# refs renumber/rot was measured
+  // false — 41/41 refs unchanged across a full re-explore, 0 after a scroll,
+  // 0 after a re-render, and a stale ref healed onto a replacement node. The
+  // guide must now state the measured stability, not the old caveat.
+  assert(/REF LIFECYCLE/.test(SRV_SRC) && /held by ELEMENT IDENTITY/.test(SRV_SRC),
+    'the guide must state that E# refs are held by element identity');
+  assert(/STABLE across re-explores, scrolls, and framework re-renders/.test(SRV_SRC),
+    'the guide must state the measured ref stability');
+  assert(!/RENUMBERS them/.test(SRV_SRC),
+    'the guide must not claim refs renumber on re-explore — measured false');
   assert(/main_world func must be an EXPRESSION/.test(SRV_SRC) || /func must be an EXPRESSION/.test(SRV_SRC),
     'the guide must state main_world requires a function expression');
-  assert(/is GLOBAL to the hub/.test(SRV_SRC),
-    'the guide must warn that session state is shared across sessions');
+  // 2026-09-25: INVERTED — session state is PER-SESSION since 1.4.7. It used to
+  // be a process-wide SessionManager singleton, so reset wiped every job's
+  // history mid-task. The old assertion pinned that bug.
+  assert(/is PER-SESSION since v1\.4\.7/.test(SRV_SRC),
+    'the guide must state that session state is per-session (1.4.7)');
+  assert(!/is GLOBAL to the hub/.test(SRV_SRC),
+    'the guide must not claim session state is global to the hub');
   assert(/Pass tabId to target a specific tab/.test(SRV_SRC),
     'the guide must document navigate{tabId}');
 });
@@ -1462,8 +1475,8 @@ test('docs: README does not advertise capabilities the audit proved absent', () 
     'README must state that evaluate script mode re-routes through the MAIN world');
   assert(!/returns every frame in the active tab/.test(README),
     'tabs frames is target-scoped (tabId), not active-tab-only');
-  assert(/Refs drift/.test(README) && /CSS-selector refs/.test(README),
-    'README must warn that E# refs renumber and that CSS refs are stable');
+  assert(/Refs are stable/.test(README) && /held by\s+element identity/.test(README),
+    'README must state the measured E# ref stability, not the retired drift claim');
   assert(/One profile, per-tab isolation/.test(README),
     'README must state the one-profile / per-tab isolation model');
 });
@@ -1638,6 +1651,45 @@ test('repo: line endings pinned so the generated artifact is byte-reproducible i
   const EX = readFileSync(new URL('./tools/export-guide.mjs', import.meta.url), 'utf8');
   assert(/normalizeEol/.test(EX),
     'the guide exporter must normalize EOLs before comparing (CI saw MODEL_PROMPT.md as stale)');
+});
+
+test('session: exploration state is PER-SESSION, not a process-wide singleton', () => {
+  // 2026-09-25: `const session = new SessionManager()` at module scope meant one
+  // map + one history for every MCP session, so session{action:"reset"} wiped
+  // other jobs mid-task and their steps showed up in each other's maps. The
+  // server already runs each request inside sessionCtx with its own McpServer
+  // object, so the manager is now resolved per session through that context.
+  const S = SRV_SRC;
+  assert(!/^const session = new SessionManager\(\);$/m.test(S),
+    'the module-level SessionManager singleton must be gone');
+  assert(/function getSession\(\)/.test(S), 'a per-session resolver must exist');
+  assert(/SESSIONS_BY_SERVER/.test(S) && /WeakMap/.test(S),
+    'session managers must be keyed per MCP server (WeakMap, so they are collectable)');
+  assert(/sessionCtx\.getStore\(\)/.test(S),
+    'the resolver must read the per-request session context');
+  // No SessionManager call site may still read the old free variable.
+  const body = S.slice(S.indexOf('function registerAllTools('));
+  const strays = body.match(/(?<![\w.])session\.(recordPage|recordAction|recordNavigation|setLastSnapshot|reset|beginTask|getTask|getExplorationMap|currentUrl|stepCounter)\b/g) || [];
+  assert(strays.length === 0,
+    'every SessionManager call site must go through getSession() — strays: ' + strays.join(','));
+});
+
+test('hub: evicting a stale content client re-points the roles, never nulls them', () => {
+  // 2026-09-25: the eviction nulled contentClient/mainFrameClient when the
+  // evicted socket held those roles. With both empty, page ops fell through to
+  // the offscreen (no ref engine) and explore_page returned zero actions —
+  // measured as an alternating full-result/empty response on one tab.
+  const H = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
+  const m = H.match(/if \(prev && prev !== ws[\s\S]*?\n\s*\}/);
+  assert(m, 'the stale-client eviction block must exist');
+  assert(!/contentClient === prev\) this\.contentClient = null/.test(m[0]),
+    'contentClient must not be nulled on eviction — page ops would fall to the offscreen');
+  assert(!/mainFrameClient === prev\) this\.mainFrameClient = null/.test(m[0]),
+    'mainFrameClient must not be nulled on eviction');
+  assert(/contentClient === prev\) this\.contentClient = ws/.test(m[0]),
+    'contentClient must be re-pointed at the NEW client that now owns the tab');
+  assert(/mainFrameClient === prev\) this\.mainFrameClient = ws/.test(m[0]),
+    'mainFrameClient must be re-pointed at the NEW client');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

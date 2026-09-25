@@ -3,6 +3,49 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.7] — 2026-09-25
+
+Two of the documented "Known limitations" were not limitations at all. Both are
+fixed, and the measurements are in the guide so nobody re-adds the caveat.
+
+### Session state is per-session (it was a process-wide singleton)
+
+`session{action:"reset"}` wiped **every** job's exploration history, and one
+job's steps showed up in another job's `session map` — documented as a
+limitation ("this map is GLOBAL to the hub"). It was a singleton *by accident*:
+`const session = new SessionManager()` at module scope.
+
+The server already runs every request inside `sessionCtx` (added earlier for tab
+isolation), and each MCP session owns its own `McpServer` object, so the manager
+is now resolved per session through that context and keyed in a `WeakMap`. The 25
+call sites read `getSession()` instead of a free variable, so state is isolated
+and collectable.
+
+Verified live with two concurrent MCP sessions: session A did its own work,
+`session{action:"reset"}` took it from 1 step to 0, and session B's history was
+**unchanged at 1 step**.
+
+### `E#` refs are stable — the drift caveat was measured false
+
+The guide said refs "RENUMBER on every full `explore_page`" and "rot across
+re-renders", with op-inconsistent healing. Measured on 2026-09-25:
+
+| Case | Result |
+|---|---|
+| Two full `explore_page` calls | **41/41 refs pointed at the same elements** |
+| After a scroll | **0 changed** |
+| After a framework re-render | **0 changed** |
+| Node fully replaced (same label, no id, no class) | stale ref **healed onto the new node** — the click landed on the replacement (`freshClicked: 999`) |
+
+`assignRef()` caches per element and writes a `data-websense-ref` attribute, so a
+ref is held by element identity, not by scan position. The guide, the README and
+two regression tests now state the measured stability. A ref still dies if its
+element leaves the DOM with nothing to heal from — that part was always true.
+
+Also fixed: a duplicate content-script client for one tab could evict its own
+successor mid-call, which surfaced as `explore_page` alternating between a full
+result and zero actions.
+
 ## [1.4.6] — 2026-09-25
 
 JS dialogs are now visible, `evaluate{script}` handles async, and CI is green

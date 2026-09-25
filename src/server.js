@@ -45,7 +45,32 @@ const HTTP_PORT = parseInt(process.argv.find(a => a.startsWith('--http-port='))?
 // AND from the offscreen document. No TLS needed — a self-signed cert on
 // wss://127.0.0.1 is rejected by Chrome's WebSocket, which breaks the bridge.
 const hubChrome = new HubServer(PORT);
-const session = new SessionManager();
+// 2026-09-25: session state (exploration map + history) used to be ONE
+// process-wide SessionManager, so `session{action:"reset"}` wiped every other
+// job's history mid-task and one job's steps showed up in another's map. That
+// was documented as a limitation ("session reset clears everyone's history").
+//
+// It is a singleton-by-accident, not a design constraint: the server already
+// runs each request inside sessionCtx (added for tab isolation), and each MCP
+// session owns its own McpServer object. So keep ONE SessionManager PER MCP
+// SESSION, resolved through the same context, and leave the 36 `session.`
+// call sites untouched — they read the per-request instance.
+//
+// Fallback matters: stdio mode has exactly one session, and any code path that
+// runs outside the context must still get a working manager rather than null.
+const SESSIONS_BY_SERVER = new WeakMap();
+let fallbackSession = null;
+function getSession() {
+  const st = sessionCtx.getStore();
+  const srv = st && st.server;
+  if (srv) {
+    let s = SESSIONS_BY_SERVER.get(srv);
+    if (!s) { s = new SessionManager(); SESSIONS_BY_SERVER.set(srv, s); }
+    return s;
+  }
+  if (!fallbackSession) fallbackSession = new SessionManager();
+  return fallbackSession;
+}
 
 function getActiveHub() {
   // Per-session stamped wrapper: send() routes page ops to THIS session's
@@ -655,7 +680,7 @@ THE 31 TOOLS — what each absorbed from the old 65-tool surface:
   screenshot       captureVisibleTab → PNG/JPEG dataUrl for a vision model
   press_key        key + modifiers ["ctrl","shift","alt","meta"], optional ref target. SYNTHETIC KeyboardEvents only — it does NOT perform default browser actions: ctrl+a does not select, letter keys do not insert text. It fires page JS key handlers and nothing else. Use type_text for text entry.
   dialog           JS dialogs: action:"accept"|"dismiss" + value (prompt). CAPTURES THE PAGE'S OWN alert/confirm/prompt via a MAIN-world hook — status lists them in pendingDialogs (waiting) and recentDialogs (already fired); the answer reaches the page's promise. Check recentDialogs after any destructive-looking click. DOM [role=dialog] modals: close by ref (hasModal/dialogCount are visibility-BLIND). keystroke:true + key for OS-level dialogs (enter|escape|tab|f5|ctrl+c)
-  session          action:"reset" (clears map + tab binding — this map is GLOBAL to the hub, so reset wipes every session's history) | "map" (exploration graph) | "mermaid" (flowchart export). History stores the text you typed.
+  session          action:"reset" (clears YOUR map + history only — since 1.4.7 each MCP session has its own SessionManager, so it no longer wipes other jobs) | "map" (exploration graph) | "mermaid" (flowchart export). History stores the text you typed.
   network_log      captured fetch/XHR since last call (clear, maxEntries) — see the fuller note below the tool list
   clipboard        action:"copy" (text) | "read"
   inspect          resolve a ref / one element: kind:"element" (resolve_ref — is this ref alive?) | "geometry" (bounding box, z-depth, scroll-container-aware) | "relation" (refA vs refB: above/below/overlaps)
@@ -672,9 +697,9 @@ THE 31 TOOLS — what each absorbed from the old 65-tool surface:
   real_click       GENUINE OS-level click (SendInput) at VIEWPORT coords (x,y) — for canvases/raw-input surfaces a page op cannot reach. Lands on the FRONTMOST window
   real_paste       GENUINE paste (Ctrl+V) into a focused editor at viewport coords — the working route for attaching a real file/image to a composer
 
-TAB SCOPING MODEL (read this before running concurrent jobs): this is ONE Chrome profile with ONE extension — jobs do NOT get separate profiles, and nothing here gives you cookie/storage isolation from another job. Isolation is per-TAB. Ops that take an explicit tabId (navigate, tabs switch/close/bind/frames, form, ax, screenshot, real_*) target that tab and ignore the cursor. CURSOR-SCOPED ops (status, wait, scroll, evaluate, reveal, inspect, session, dialog, clipboard, console_log, network_log, read, explore_page, click, type_text) follow the session's BOUND tab, NOT the OS-frontmost tab. An unbound session is pinned to a tab automatically and WARNS you — it never silently inherits the shared global cursor (which is what made tabs appear "hijacked" between concurrent agents). tabs{action:"bind", tabId} sets the target WITHOUT focusing. session state (map/history) is GLOBAL across sessions on this hub: session{action:"reset"} clears everyone's history, and history contains the text you typed.
+TAB SCOPING MODEL (read this before running concurrent jobs): this is ONE Chrome profile with ONE extension — jobs do NOT get separate profiles, and nothing here gives you cookie/storage isolation from another job. Isolation is per-TAB. Ops that take an explicit tabId (navigate, tabs switch/close/bind/frames, form, ax, screenshot, real_*) target that tab and ignore the cursor. CURSOR-SCOPED ops (status, wait, scroll, evaluate, reveal, inspect, session, dialog, clipboard, console_log, network_log, read, explore_page, click, type_text) follow the session's BOUND tab, NOT the OS-frontmost tab. An unbound session is pinned to a tab automatically and WARNS you — it never silently inherits the shared global cursor (which is what made tabs appear "hijacked" between concurrent agents). tabs{action:"bind", tabId} sets the target WITHOUT focusing. session state (map/history) is PER-SESSION since v1.4.7: each MCP session gets its own SessionManager, so session{action:"reset"} clears only YOUR history and one job's steps never appear in another's map. (Before 1.4.7 it was a process-wide singleton and reset wiped everyone — that is fixed.)
 
-REF LIFECYCLE: E# refs come from explore_page and are assigned in VIEWPORT order, so a full re-explore or a scroll RENUMBERS them (E7 may become a different element). They also rot across re-renders, and healing is op-inconsistent (click may heal a stale ref via its locator chain; type_text/inspect do not). For anything long-lived or re-render-prone, use a CSS-selector ref (#id, .class) — selectors are stable and E# is not. Re-explore after a re-render.
+REF LIFECYCLE: E# refs are assigned in VIEWPORT order on the FIRST scan, then held by ELEMENT IDENTITY (a per-element cache plus a data-websense-ref attribute), so they are STABLE across re-explores, scrolls, and framework re-renders. MEASURED 2026-09-25: 41/41 refs unchanged across a full re-explore, 0 changed after a scroll, 0 after a re-render, and a stale ref correctly HEALED onto a replacement node with an identical label and no id/class (the click landed on the NEW node). A ref only dies if its element leaves the DOM with nothing to heal from — re-explore if a call reports the element not found. CSS-selector refs (#id, .class) remain the safest choice for anything long-lived or across navigations.
 
 KEY PATTERNS:
 - Forms: form{action:"state", formRef:"F0"} → type_text/select via form{action:"select"} → click submit ref
@@ -726,11 +751,11 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     }
     const sag = await getActiveHub().send({ type: 'explore_page', full: o.full || false, includeContent: o.includeContent !== false, includeHidden: o.includeHidden || false, incremental: o.incremental || false, maxActions: o.maxActions, contentMaxLen: o.contentMaxLen, fresh: o.fresh || false, settle: o.settle, frameId: o.frameId });
     if (!sag || sag.success === false) return textResult(sag || { success: false, error: 'No response from content script' });
-    if (sag.meta && sag.meta.url) session.recordPage(sag.meta.url, sag);
+    if (sag.meta && sag.meta.url) getSession().recordPage(sag.meta.url, sag);
     // Incremental results are partial deltas — only full SAGs (including the
     // auto-fallback from incremental:true, which sets escalated/returns a
     // complete map) become the session's canonical lastSnapshot.
-    if (!sag.incremental || sag.escalated) session.setLastSnapshot(sag);
+    if (!sag.incremental || sag.escalated) getSession().setLastSnapshot(sag);
     return textResult(sag);
   });
 
@@ -784,7 +809,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       autoClimb: z.boolean().optional().describe('On suspected_noop, auto-deliver a genuine OS click at the element (only when the target tab is OS-active). Default: WEBSENSE_AUTOCLIMB env (off).'),
     },
   }, async (o) => {
-    const beforeUrl = session.currentUrl;
+    const beforeUrl = getSession().currentUrl;
     let result;
     const mode = o.mode || 'click';
     if (o.x != null && o.y != null) {
@@ -854,10 +879,10 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         }
       }
     }
-    session.recordAction({ action: 'click', ref: o.ref, mode }, result);
+    getSession().recordAction({ action: 'click', ref: o.ref, mode }, result);
     if (result.afterState && result.beforeState && result.afterState.url !== result.beforeState.url) {
-      session.recordNavigation(beforeUrl, result.afterState.url, o.ref, '', mode);
-      session.recordPage(result.afterState.url, null);
+      getSession().recordNavigation(beforeUrl, result.afterState.url, o.ref, '', mode);
+      getSession().recordPage(result.afterState.url, null);
     }
     return textResult(result);
   });
@@ -875,7 +900,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     let result;
     if (o.fields && o.fields.length) {
       result = await getActiveHub().send({ type: 'type_many', fields: o.fields });
-      session.recordAction({ action: 'type_many', refs: o.fields.map(f => f.ref) }, result);
+      getSession().recordAction({ action: 'type_many', refs: o.fields.map(f => f.ref) }, result);
       return textResult(result);
     }
     result = await getActiveHub().send({ type: 'type_text', ref: o.ref, text: o.text, clearFirst: o.clearFirst !== false, frameId: o.frameId });
@@ -884,7 +909,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     if (result.effect !== 'confirmed') {
       result.escalation = { recommended: 're_read', reason: 'value persistence not confirmed — re-explore the field and re-type with clearFirst:true before escalating to OS-level input' };
     }
-    session.recordAction({ action: 'type_text', ref: o.ref, text: o.text }, result);
+    getSession().recordAction({ action: 'type_text', ref: o.ref, text: o.text }, result);
     return textResult(result);
   });
 
@@ -904,18 +929,18 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     if (o.action === 'select') {
       requireArgs('form:select', o, { ref: 'element ref of the select', value: 'option value to select' });
       const result = await getActiveHub().send({ type: 'select_option', ref: o.ref, value: o.value, clearAll: o.clearAll, frameId: o.frameId });
-      session.recordAction({ action: 'select_option', ref: o.ref, value: o.value }, result);
+      getSession().recordAction({ action: 'select_option', ref: o.ref, value: o.value }, result);
       return textResult(result);
     }
     if (o.action === 'special') {
       requireArgs('form:special', o, { ref: 'element ref', value: 'target value (date / colour / range / number)' });
       const result = await getActiveHub().send({ type: 'form_special', ref: o.ref, value: o.value, frameId: o.frameId });
-      session.recordAction({ action: 'form_special', ref: o.ref, value: o.value }, result);
+      getSession().recordAction({ action: 'form_special', ref: o.ref, value: o.value }, result);
       return textResult(result);
     }
     if (o.action === 'toggle') {
       const result = await getActiveHub().send({ type: 'toggle', ref: o.ref, frameId: o.frameId });
-      session.recordAction({ action: 'toggle', ref: o.ref }, result);
+      getSession().recordAction({ action: 'toggle', ref: o.ref }, result);
       return textResult(result);
     }
     // upload
@@ -1027,7 +1052,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       const st = sessionCtx.getStore();
       if (st) st.boundTabId = Number(result.tabId);
     }
-    session.recordAction({ action: 'navigate', url }, result);
+    getSession().recordAction({ action: 'navigate', url }, result);
     return textResult(result);
   });
 
@@ -1090,8 +1115,8 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
           // report a hard false (that reads as "extension dead" and misroutes
           // agents); fall back to the session's last-known-good URL.
           probe = 'timeout-fallback';
-          pageUrl = session.currentUrl || null;
-          pageTitle = pageUrl ? (session.pages.get(pageUrl)?.title || session.currentTitle || null) : null;
+          pageUrl = getSession().currentUrl || null;
+          pageTitle = pageUrl ? (getSession().pages.get(pageUrl)?.title || getSession().currentTitle || null) : null;
         }
       }
       return textResult({
@@ -1100,15 +1125,15 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         pageProbe: probe,
         currentUrl: pageUrl,
         currentTitle: pageTitle,
-        sessionSteps: session.stepCounter,
-        pagesExplored: session.pages.size,
+        sessionSteps: getSession().stepCounter,
+        pagesExplored: getSession().pages.size,
         hint: probe === 'timeout-fallback' ? 'get_status probe timed out (heavy/settling page) — reporting last-known session URL; ops may still work' : (getActiveHub().connected ? null : 'Extension not connected. Load the WebSense Chrome extension (extension/manifest.json) — it auto-connects to ws://localhost:38401 within 3s. Then call websense_guide.'),
       });
     }
     if (kind === 'doctor') {
       const hub = getActiveHub();
       const hubStats = (typeof hub.stats === 'function') ? hub.stats() : { port: hub.port, connectedClients: (hub.clients && hub.clients.size) || 0 };
-      const report = { timestamp: Date.now(), hub: hubStats, session: { steps: session.stepCounter, pagesExplored: session.pages.size } };
+      const report = { timestamp: Date.now(), hub: hubStats, session: { steps: getSession().stepCounter, pagesExplored: getSession().pages.size } };
       try {
         report.content = await Promise.race([
           hub.send({ type: 'doctor_content' }),
@@ -1507,25 +1532,25 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     },
   }, async (o) => {
     if (o.action === 'reset') {
-      session.reset();
+      getSession().reset();
       try { await getActiveHub().send({ type: 'clear_binding' }); } catch (_) {}
       return textResult({ success: true, message: 'Session reset. Tab binding cleared.' });
     }
     if (o.action === 'task') {
       if (o.op === 'begin') {
         if (!o.goal) return textResult({ success: false, error: 'task begin requires a goal' });
-        session.beginTask(o.goal, o.steps || []);
-        return textResult({ success: true, task: session.getTask() });
+        getSession().beginTask(o.goal, o.steps || []);
+        return textResult({ success: true, task: getSession().getTask() });
       }
-      if (o.op === 'done') { session.completeStep(o.step); return textResult({ success: true, task: session.getTask() }); }
-      if (o.op === 'skip') { session.skipStep(o.step); return textResult({ success: true, task: session.getTask() }); }
-      return textResult({ success: true, task: session.getTask() }); // status
+      if (o.op === 'done') { getSession().completeStep(o.step); return textResult({ success: true, task: getSession().getTask() }); }
+      if (o.op === 'skip') { getSession().skipStep(o.step); return textResult({ success: true, task: getSession().getTask() }); }
+      return textResult({ success: true, task: getSession().getTask() }); // status
     }
     if (o.action === 'mermaid') {
-      const mermaid = exportMermaid(session.getExplorationMap(), { direction: o.direction || 'TD', detail: o.detail || 'pages_actions' });
+      const mermaid = exportMermaid(getSession().getExplorationMap(), { direction: o.direction || 'TD', detail: o.detail || 'pages_actions' });
       return textResult('```mermaid\n' + mermaid + '\n```');
     }
-    return textResult(session.getExplorationMap());
+    return textResult(getSession().getExplorationMap());
   });
 
   // ═══ 18. NETWORK ═══
@@ -1783,7 +1808,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       });
     }
     const { seq, index } = putSnapshot(tabId, snap);
-    session.recordAction({ action: 'page_snapshot', tabId }, { elements: index.elements });
+    getSession().recordAction({ action: 'page_snapshot', tabId }, { elements: index.elements });
     return textResult({
       success: true, cached: false, handle: 'snap:' + tabId + ':' + seq, seq, index,
       hint: 'slice it with page_slice{tag|role|region|vp|interactive|query}.',

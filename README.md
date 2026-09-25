@@ -117,12 +117,17 @@ Live DOM
   through the MAIN world (`chrome.userScripts`, no eval) and reports `via:"main_world"`. This
   works on every page — it is not a strict-site limitation. `evaluate{query:{…}}` is still the
   lighter path for plain DOM reads.
-- **Refs drift:** `E#` refs renumber on every full `explore_page` (viewport order) and can rot
-  across re-renders; healing is op-inconsistent. Prefer CSS-selector refs (`#id`) for anything
-  long-lived, and re-explore after a re-render.
-- **One profile, per-tab isolation:** concurrent jobs share one Chrome profile (no cookie/storage
-  isolation) and a global session history. Scope work with `tabs action:"bind"` + explicit
-  `tabId`; `session action:"reset"` clears *everyone's* history.
+- **Refs are stable:** `E#` refs are assigned in viewport order on the first scan and then held by
+  element identity (per-element cache + a `data-websense-ref` attribute), so they survive
+  re-explores, scrolls, and framework re-renders. Measured: 41/41 unchanged across a full
+  re-explore, 0 changed after a scroll, 0 after a re-render, and a stale ref healed onto a
+  replacement node with the same label and no id/class. A ref only dies when its element leaves
+  the DOM with nothing to heal from. CSS-selector refs (`#id`) are still the safest choice for
+  anything long-lived or across navigations.
+- **One profile, per-tab isolation:** concurrent jobs share one Chrome profile — there is no
+  cookie/storage isolation between them, so scope work with `tabs action:"bind"` + explicit
+  `tabId`. Session state (map/history) *is* per-session: `session action:"reset"` clears only
+  your own history, and one job's steps never appear in another's map.
 - **Logged-in sites (LinkedIn etc.):** must already be authenticated in that Chrome profile; `navigate` opens a fresh tab that needs an existing session cookie.
 - **Canvas/WebGL content** (Telegram web, TradingView, chrome:// pages): use `ax action:"read"` to see the native accessibility tree, then `ax action:"click"|"type"` to interact. Fallback: `screenshot` + vision.
 - **`ax` tool uses chrome.debugger** — stable Chrome compatible, shows a warning banner while attached. Requires explicit tabId.

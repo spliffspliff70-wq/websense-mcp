@@ -174,8 +174,13 @@ export class HubServer {
           if (prev && prev !== ws && prev.readyState === 1) {
             console.error('[websense] evicting stale content client ' + prev.cid + ' for tab ' + msg.tabId + ' (new ' + ws.cid + ')');
             try { prev.close(4000, 'superseded by fresh content script'); } catch (_) {}
-            if (this.contentClient === prev) this.contentClient = null;
-            if (this.mainFrameClient === prev) this.mainFrameClient = null;
+            // 2026-09-25: the old code NULLed contentClient/mainFrameClient when
+            // the evicted socket held those roles, leaving them empty — page ops
+            // then fell through to the offscreen, which has no ref engine, and
+            // explore_page returned zero actions. Point them at the NEW client
+            // instead: it is the one that owns the tab now.
+            if (this.contentClient === prev) this.contentClient = ws;
+            if (this.mainFrameClient === prev) this.mainFrameClient = ws;
           }
           this.contentByTab.set(Number(msg.tabId), ws);
           ws.tabId = Number(msg.tabId);
