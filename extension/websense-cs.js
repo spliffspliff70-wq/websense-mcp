@@ -360,7 +360,7 @@
       // Only reached when the hub routes here (a live direct bridge). Relay to the
       // SW, which performs chrome.runtime.reload(). Fire-and-forget on purpose:
       // the SW dies mid-call, so awaiting its response would hang. 2026-09-11.
-      case 'extension_reload': { try { chrome.runtime.sendMessage({ type: 'extension_reload' }); } catch (_) {} return { success: true, message: 'reload relayed to the service worker' }; }
+      case 'extension_reload': { setTimeout(function () { try { chrome.runtime.sendMessage({ type: 'TAB_CONTROL', action: 'extension_reload', payload: {} }); } catch (_) {} }, 100); return { success: true, message: 'extension_reload relayed to the service worker (reload in ~100ms)' }; }
       case 'discover_actions': { const sag = await extractActionGraph({ includeContent: false, full: false, includeHidden: false, maxActions: params.maxActions || DEFAULT_MAX_ACTIONS, frameId: params.frameId }); return sag.actions; }
       case 'click': { var b = getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); return { success: true, ref: params.ref, ...(cr && typeof cr === 'object' ? cr : {}), beforeState: b, afterState: getQuickState() }; }
       case 'type_text': { var r = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); r.ref = params.ref; return r; }
@@ -382,9 +382,12 @@
       case 'copy_to_clipboard': return nativeCopyToClipboard(params.text);
       case 'form_state': return getFormState(params.formRef, params.frameId);
       case 'action_preview': return getActionPreview(params.ref);
-      case 'dropdown_options': return getDropdownOptions(resolveRef(params.ref));
-      case 'tab_contents': return getTabContents(resolveRef(params.ref));
-      case 'accordion_contents': return getAccordionContents(resolveRef(params.ref));
+      // Pass the RAW ref — these readers resolve internally (70-capture).
+      // Pre-resolving here made them re-resolve an Element via the string-keyed
+      // ref map → always null → "Element not found" on this direct-WS path.
+      case 'dropdown_options': return getDropdownOptions(params.ref);
+      case 'tab_contents': return getTabContents(params.ref);
+      case 'accordion_contents': return getAccordionContents(params.ref);
       case 'page_state': return getPageState(params.frameId);
       case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; var et=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; et+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; return { text: et }; }
       case 'read_content': return readContent(params);
@@ -789,8 +792,31 @@
     if (el.getAttribute('alt')) return el.getAttribute('alt').trim();
     const text = fullText(el);
     if (text) return text.slice(0, 100);
-    if (el.value && el.tagName !== 'SELECT') return String(el.value).slice(0, 50);
+    // 2026-09-25 PRIVACY FIX: never surface a password field's value as its
+    // label. This fallback put the live secret into EVERY surface that prints a
+    // label — explore_page actions, read diffs, DELTA diffs, dialog/tab readers
+    // — so a typed password leaked into tool output, the session map, and the
+    // per-action diffs. Passwords are write-only from the agent's side: they
+    // get filled, never echoed back.
+    if (el.value && el.tagName !== 'SELECT' && !isSensitiveValueField(el)) return String(el.value).slice(0, 50);
     return '';
+  }
+  // Single source of truth for "this field's value must never be printed".
+  // Covers type=password plus the two autocomplete spellings apps use for
+  // masked fields and one-time codes.
+  function isSensitiveValueField(el) {
+    if (!el || el.tagName !== 'INPUT') return false;
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'password') return true;
+    const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+    return ac === 'current-password' || ac === 'new-password' || ac === 'one-time-code';
+  }
+  // Value + a "there is something here" flag, with the secret stripped. Readers
+  // that dump every field's value use this so a filled password never comes
+  // back in a tool result.
+  function maskedValue(el) {
+    var v = (el && el.value != null) ? el.value : '';
+    return { value: isSensitiveValueField(el) ? '' : v, hasValue: !!v };
   }
 
   // ═══ Pseudo-element / CSS content text (innerText misses ::before/::after) ═══
@@ -1054,7 +1080,11 @@
       const formRef = assignRef(form);
       const fields = Array.from(form.querySelectorAll('input,select,textarea')).filter((el)=>el.type!=='hidden').map((input) => {
         const tag = input.tagName.toLowerCase();
-        return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:input.value||'', required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
+        // 2026-09-25 PRIVACY: the forms section echoed every field's value, so
+        // explore_page's form map and form{action:"state"} both printed a
+        // filled password in cleartext. Mask sensitive values here too.
+        const mv = maskedValue(input);
+        return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:mv.value, hasValue:mv.hasValue, required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
       });
       const sb = findSubmitButton(form); const sub = isFormSubmittable(form);
       return { ref:formRef, id:form.id||'', method:(form.method||'get').toLowerCase(), action:form.action||'', fields, submitRef:sb?assignRef(sb):null, submitLabel:sb?getLabel(sb):'', submitEnabled:sb?!sb.disabled&&sub:false, submitDisabledReason:sb?(sb.disabled?detectDisabledReason(sb):(!sub?'required_fields_not_met':null)):null };
@@ -1076,7 +1106,9 @@
     // Fallback: rebuild for just this form (extractForms may skip hidden forms)
     const fields = Array.from(el.querySelectorAll('input,select,textarea')).filter((i)=>i.type!=='hidden').map((input) => {
       const tag = input.tagName.toLowerCase();
-      return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:input.value||'', required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
+      // 2026-09-25 PRIVACY: same masking as extractForms above.
+      const mv = maskedValue(input);
+      return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:mv.value, hasValue:mv.hasValue, required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
     });
     const sb = findSubmitButton(el); const sub = isFormSubmittable(el);
     return { success: true, form: { ref: formRef, id: el.id||'', method:(el.method||'get').toLowerCase(), action:el.action||'', fields, submitRef:sb?assignRef(sb):null, submitLabel:sb?getLabel(sb):'', submitEnabled:sb?!sb.disabled&&sub:false, submitDisabledReason:sb?(sb.disabled?detectDisabledReason(sb):(!sub?'required_fields_not_met':null)):null } };
@@ -2028,6 +2060,11 @@
         const state = extractState(el);
         const label = getLabel(el);
         const effect = predictEffect(el, classification, attrs);
+        // 2026-09-25 PRIVACY: `...state` spread the RAW el.value into every
+        // explore_page action, so a filled password appeared in the action list
+        // (and in any delta/session snapshot of it). Mask it for sensitive
+        // fields, keeping the has-a-value signal.
+        if (isSensitiveValueField(el)) state.value = '';
         const action = { ref, type: classification.type, subtype: classification.subtype, label, predictedEffect: effect, ...state };
         // Phase 4 (2026-08-15): surface frameId from explore_page iframe recursion.
         if (el.__wsFrameId != null && el.__wsFrameId !== 0) action.frameId = el.__wsFrameId;
@@ -2169,6 +2206,9 @@
         step = 'predictEffect';
         const effect = predictEffect(el, classification, attrs);
         step = 'build-action';
+        // 2026-09-25 PRIVACY: same masking as the async path above — never
+        // spread a password/OTP value into a published action.
+        if (isSensitiveValueField(el)) state.value = '';
         const action = { ref, type: classification.type, subtype: classification.subtype, label, predictedEffect: effect, ...state };
         // Phase 4 (2026-08-15): surface frameId from explore_page iframe recursion.
         if (el.__wsFrameId != null && el.__wsFrameId !== 0) action.frameId = el.__wsFrameId;
@@ -2836,9 +2876,14 @@
               success: matches,
               confirmed: matches ? (pass >= 2 ? 'value-persisted-after-settle' : 'value-persisted')
                 : (hasValidityIssue ? 'unconfirmed-shadow-input-text-missing' : false),
-              actualValue: finalVal.slice(0, 200),
+              // 2026-09-25 PRIVACY: a password/OTP field must not echo the
+              // text we just wrote. The agent can fill it and see `success`;
+              // it never needs the secret back. All three echoes (actualValue,
+              // expected) are stripped and a mask flag explains why.
+              actualValue: isSensitiveValueField(el) ? '' : finalVal.slice(0, 200),
+              actualValueMasked: isSensitiveValueField(el) || undefined,
               reverted: !matches,
-              expected: String(text).slice(0, 200),
+              expected: isSensitiveValueField(el) ? '' : String(text).slice(0, 200),
               validity,
               framework: hasValidityIssue ? 'custom-element' : undefined,
               note: matches
@@ -3083,7 +3128,12 @@
       if (q.state) {
         const d = document;
         const inputs = Array.prototype.slice.call(deepQueryAll('input,textarea,select')).map(function (i) {
-          return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: i.value, checked: !!(i.checked || i.selected) };
+          // 2026-09-25 PRIVACY: password/autocomplete-otp values are masked —
+          // this reader previously echoed EVERY input's value verbatim, so a
+          // filled password came back in the tool result (and in any session
+          // transcript that stored it).
+          const mv = maskedValue(i);
+          return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: mv.value, hasValue: mv.hasValue, checked: !!(i.checked || i.selected) };
         });
         return { success: true, mode: 'state', url: location.href, title: d.title, scrollY: window.scrollY, scrollH: (d.documentElement && d.documentElement.scrollHeight) || 0, inputCount: inputs.length, inputs: inputs.slice(0, 60) };
       }
@@ -3093,7 +3143,10 @@
       }
       if (q.inputs) {
         const ins = Array.prototype.slice.call(deepQueryAll('input,textarea,select')).map(function (i) {
-          return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: i.value, checked: !!(i.checked || i.selected), placeholder: i.placeholder || '', label: getLabel(i).slice(0, 60) };
+          // 2026-09-25 PRIVACY: same masking as q.state above — never echo a
+          // password / OTP field's value.
+          const mv = maskedValue(i);
+          return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: mv.value, hasValue: mv.hasValue, checked: !!(i.checked || i.selected), placeholder: i.placeholder || '', label: getLabel(i).slice(0, 60) };
         });
         return { success: true, mode: 'inputs', count: ins.length, inputs: ins.slice(0, 100) };
       }
@@ -3102,35 +3155,50 @@
       if (!el) return { success: true, mode: 'query', found: false, selector: q.selector,
         note: 'not found in the light DOM or in any OPEN shadow root. If the site uses a CLOSED shadow root no script can reach it — use explore_page refs or real_click at coordinates.' };
       const ex = q.extract || 'text';
+      // 2026-09-25 PRIVACY: an explicit `evaluate{query:{selector:"#pw",
+      // extract:"value"}}` used to return a password's live value verbatim —
+      // the last echo surface after the readers and type path were masked.
+      // Password/OTP fields now report value:'' plus hasValue so the agent can
+      // still ask "is it filled?" without ever holding the secret. `html` mode
+      // is masked too: a form's outerHTML can carry the value attribute.
+      const sensitive = isSensitiveValueField(el);
       let val;
-      if (ex === 'value') val = el.value !== undefined ? el.value : (el.textContent || '');
+      if (ex === 'value') val = sensitive ? '' : (el.value !== undefined ? el.value : (el.textContent || ''));
       else if (ex === 'attrs') { const o = {}; for (let i = 0; i < el.attributes.length; i++) o[el.attributes[i].name] = el.attributes[i].value; val = o; }
-      else if (ex === 'html') val = el.outerHTML;
+      else if (ex === 'html') val = sensitive ? '[html withheld: sensitive field]' : el.outerHTML;
       else val = el.textContent || '';
       if (q.all) {
         const els = deepQueryAll(q.selector);
         const arr = [];
         for (let i = 0; i < els.length && i < (q.maxLen || 100); i++) {
           const e = els[i];
-          if (ex === 'value') arr.push(e.value !== undefined ? e.value : (e.textContent || ''));
+          if (ex === 'value') arr.push(isSensitiveValueField(e) ? '' : (e.value !== undefined ? e.value : (e.textContent || '')));
           else if (ex === 'attrs') { const o = {}; for (let k = 0; k < e.attributes.length; k++) o[e.attributes[k].name] = e.attributes[k].value; arr.push(o); }
           else arr.push(e.textContent || '');
         }
         return { success: true, mode: 'query-all', found: true, count: arr.length, results: arr };
       }
-      return { success: true, mode: 'query', found: true, inShadow: isInShadow(el), value: val };
+      const out = { success: true, mode: 'query', found: true, inShadow: isInShadow(el), value: val };
+      if (sensitive) { out.hasValue = !!(el.value); out.valueMasked = true; }
+      return out;
     } catch (e) { return { success: false, error: String((e && e.message) || e) }; }
   }
-  function nativeTypeMany(fields) {
+  async function nativeTypeMany(fields) {
     // Batch-fill: one round trip for N fields. Each field: {ref, text, clearFirst?}
+    // 2026-09-25 FIX: nativeType is ASYNC (it waits 2 rAF + ~500ms settle to
+    // verify persistence) and this called it synchronously, so `r.success` was
+    // always undefined → every batch reported filled:0 / failed:N even though
+    // the fields were written. Also switched to resolveRefHealed so batch mode
+    // heals stale refs like single-field mode does (it was the ONLY type path
+    // still using the bare resolver — a rerender silently failed the whole batch).
     const results = [];
     if (!Array.isArray(fields)) return { success: false, error: 'fields must be an array' };
     for (const f of fields) {
       try {
-        const el = resolveRef(f.ref);
+        const el = await resolveRefHealed(f.ref);
         if (!el) { results.push({ ref: f.ref, success: false, error: 'Element not found' }); continue; }
-        const r = nativeType(el, f.text, f.clearFirst !== false);
-        results.push({ ref: f.ref, success: r.success, actualValue: r.actualValue });
+        const r = await nativeType(el, f.text, f.clearFirst !== false);
+        results.push({ ref: f.ref, success: !!r.success, actualValue: r.actualValue, confirmed: r.confirmed, reverted: !!r.reverted });
       } catch (e) {
         results.push({ ref: f.ref, success: false, error: String((e && e.message) || e) });
       }
@@ -3500,9 +3568,32 @@
     };
   }
   function getNetworkLog(clear, maxEntries) {
-    var entries = networkLog.slice(-maxEntries);
-    if (clear) networkLog = [];
-    return { entries, totalCaptured: networkLog.length, capturing: networkCapturing };
+    var max = maxEntries || 50;
+    // MAIN-world entries (2026-09-25): network-hook.js patches the PAGE's
+    // fetch/XHR, which is the only place real page traffic ever goes. The
+    // isolated-world patch above still catches calls made BY the content script
+    // (e.g. its own probes) — keep both, main first (it is the real traffic).
+    var mainWorld = [];
+    try {
+      var el = document.getElementById('__ws_net_buffer');
+      if (el) {
+        var parsed = JSON.parse(el.getAttribute('data-ws-net') || '[]');
+        if (Array.isArray(parsed)) mainWorld = parsed;
+      }
+    } catch (_) {}
+    var all = mainWorld.concat(networkLog);
+    var entries = all.slice(-max);
+    // totalCaptured must be read BEFORE clearing (2026-09-25): the old code
+    // cleared the array first and then reported networkLog.length, so every
+    // clear:true call reported totalCaptured:0 — a permanent "nothing was ever
+    // captured" lie that hid real traffic from the agent.
+    var total = all.length;
+    if (clear) {
+      networkLog = [];
+      try { var el2 = document.getElementById('__ws_net_buffer'); if (el2) el2.removeAttribute('data-ws-net'); } catch (_) {}
+    }
+    return { entries: entries, totalCaptured: total, capturing: networkCapturing || mainWorld.length > 0,
+             cleared: !!clear, mainWorldEntries: mainWorld.length, isolatedWorldEntries: networkLog.length };
   }
 
   // ═══ CONSOLE / JS-ERROR CAPTURE (2026-08-30 — parity with Hermes browser_console) ═══
@@ -3684,7 +3775,7 @@
                 case 'press_key': result=nativePressKeyEnhanced(params.key, params.ref, params.modifiers); break;
                 case 'evaluate': result=nativeEvaluate(params.script); break;
                 case 'evaluate_safe': result=nativeEvaluateSafe(params.query || {}); break;
-                case 'type_many': result=nativeTypeMany(params.fields); break;
+                case 'type_many': result=await nativeTypeMany(params.fields); break;
                 case 'hover': result=nativeHover(await resolveRefHealed(params.ref)); break;
                 case 'right_click': result=nativeRightClick(await resolveRefHealed(params.ref)); break;
                 case 'drag_drop': result=nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef)); break;
@@ -3719,7 +3810,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-048013ff',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-cfa6b95a',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

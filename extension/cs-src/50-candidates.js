@@ -330,6 +330,11 @@
         const state = extractState(el);
         const label = getLabel(el);
         const effect = predictEffect(el, classification, attrs);
+        // 2026-09-25 PRIVACY: `...state` spread the RAW el.value into every
+        // explore_page action, so a filled password appeared in the action list
+        // (and in any delta/session snapshot of it). Mask it for sensitive
+        // fields, keeping the has-a-value signal.
+        if (isSensitiveValueField(el)) state.value = '';
         const action = { ref, type: classification.type, subtype: classification.subtype, label, predictedEffect: effect, ...state };
         // Phase 4 (2026-08-15): surface frameId from explore_page iframe recursion.
         if (el.__wsFrameId != null && el.__wsFrameId !== 0) action.frameId = el.__wsFrameId;
@@ -471,6 +476,9 @@
         step = 'predictEffect';
         const effect = predictEffect(el, classification, attrs);
         step = 'build-action';
+        // 2026-09-25 PRIVACY: same masking as the async path above — never
+        // spread a password/OTP value into a published action.
+        if (isSensitiveValueField(el)) state.value = '';
         const action = { ref, type: classification.type, subtype: classification.subtype, label, predictedEffect: effect, ...state };
         // Phase 4 (2026-08-15): surface frameId from explore_page iframe recursion.
         if (el.__wsFrameId != null && el.__wsFrameId !== 0) action.frameId = el.__wsFrameId;

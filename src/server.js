@@ -78,7 +78,16 @@ function textResult(data) {
 // suspected_noop = before/after identical; unverifiable = no states to compare.
 function classifyEffect(result) {
   if (!result || result.success === false) return 'failed';
-  const b = result.beforeState, a = result.afterState;
+  // 2026-09-25 FIX: the RELAY path wraps payloads in {type,id,success,data:{…}}
+  // (hub round-trip via the offscreen), so beforeState/afterState live one level
+  // down. This function only ever looked at the top level, so on every relayed
+  // op it saw NO states and returned 'unverifiable' — which then triggered the
+  // automatic real_click escalation even for actions that demonstrably landed
+  // (measured: identical-state click → 'unverifiable' + real_click recommended,
+  // while a differing-state action ALSO reported unverifiable). Unwrap first,
+  // exactly like summarizeDelta does for the same envelope.
+  const box = (result && typeof result === 'object' && result.data && typeof result.data === 'object') ? result.data : result;
+  const b = box.beforeState, a = box.afterState;
   if (!b && !a) return 'unverifiable';
   if (b && a) {
     // URL change is the strongest signal
@@ -461,8 +470,16 @@ function summarizeDelta(res) {
         ref: r.ref, label: String(r.label == null ? '' : r.label).slice(0, 60), kind: 'removed',
       })));
   } else {
-    out.hint = 'NOTHING on the page changed. Treat this action as NOT LANDED — do not ' +
-      'assume success, and do not retry blindly without changing the approach.';
+    // 2026-09-25: the old hint said mutated:false means NOT LANDED. It does not.
+    // The fingerprint covers INTERACTIVE elements only, so these all report
+    // mutated:false while genuinely landing: non-action text changes, async
+    // handlers that settle after the diff, focus-only clicks, downloads, and
+    // _blank opens. Say what the signal actually means and what to read instead.
+    out.hint = 'NO INTERACTIVE-ELEMENT CHANGE detected. This is NOT proof the action did not land — the diff ' +
+      'fingerprints interactive elements only. It CAN miss: text/content changes outside those elements, async ' +
+      'handlers that settle after this diff, focus-only clicks, downloads, and new-tab opens. Confirm with a real ' +
+      'read (status / explore_page / read{diff} / main_world / the downloads or tabs store) before concluding ' +
+      '"not landed" and before retrying with a different approach.';
   }
   return out;
 }
@@ -612,7 +629,7 @@ Non-vision web automation via Chrome extension. No CDP debug port, no bot detect
 
 THE LOOP: explore_page → pick refs → act (click/type_text/form/scroll) → read result → repeat.
 
-DID IT LAND? Every mutating op (click, type_text, form, press_key, real_click, real_paste, main_world, evaluate, dialog) returns a SECOND block: DELTA (auto, after <op>): {mutated: true|false|null, ...}. Read that instead of spending an extra explore_page{incremental:true} call — it is the same diff, already paid for. mutated:false means the action did NOT land (do not assume success; change approach, do not retry blindly). mutated:null means no baseline existed yet on that tab, so that action seeded one and only the NEXT action is verifiable. Pass verify:false to skip the diff on a call you don't need checked.
+DID IT LAND? Every mutating op (click, type_text, form, press_key, real_click, real_paste, main_world, evaluate, dialog) returns a SECOND block: DELTA (auto, after <op>): {mutated: true|false|null, ...}. Read that instead of spending an extra explore_page{incremental:true} call — it is the same diff, already paid for. mutated:false means NO INTERACTIVE-ELEMENT CHANGE was detected — it is NOT proof the action failed: the diff fingerprints interactive elements only, so text/content changes elsewhere, async handlers that settle after the diff, focus-only clicks, downloads, and new-tab opens all report mutated:false while genuinely landing. Confirm with a real read (status / read{diff} / main_world / the downloads or tabs store) before concluding "not landed". mutated:null means no baseline existed yet on that tab, so that action seeded one and only the NEXT action is verifiable. Pass verify:false to skip the diff on a call you don't need checked.
 
 FULL PAGE MAP vs A SLICE: page_snapshot collects a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and returns only a small INDEX (counts + the dimensions you can slice by). page_slice then fetches ONE slice (tag/role/region/vp/interactive/query) at full fidelity. Use this when you need the whole page's shape or something the SAG does not show (off-viewport elements, the rest of a long page, a full tag/region inventory). It is also scroll-stable, so its index does not churn the way a viewport-filtered scan does. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 
@@ -621,38 +638,42 @@ THE 31 TOOLS — what each absorbed from the old 65-tool surface:
   explore_page     page map (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (added/changed/removed, no settle/content — you usually do NOT need this any more: mutating ops return a DELTA block automatically; first call returns full SAG)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
   click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)
-  type_text        fill one input (React-safe native setter) — or fields:[{ref,text},...] for batch (old type_many)
+  type_text        fill one input (React-safe native setter) — or fields:[{ref,text},...] for batch (old type_many). Batch fills are SEQUENTIAL with a persistence check per field, so a 50-field batch takes ~50s; it reports filled/failed from the verified result, not from whether the write was dispatched. Password/OTP values are never echoed back.
   form             action:"state" (form_state) | "select" (ref,value) | "toggle" | "upload" (ref,filePath)
-  reveal           pre-extract hidden content: kind:"dropdown" | "tabs" | "accordion"
+  reveal           pre-extract hidden content without opening it: kind:"dropdown" (ref = the trigger → its options) | "tabs" (ref optional → tab panels) | "accordion" (ref optional → details/summary). Works with E# or CSS refs.
   scroll           direction+amount (ticks, 1 tick ≈ 80% viewport) | y:<px> absolute (scroll_to) | intoView:"E5" (scroll_into_view)
   tabs             action:"list" | "switch" | "close" | "bind" (no focus) | "windows" | "focus" | "move" | "transfer" (cross-tab copy/paste) | "switchread"
   status           kind:"page" (page_state) | "bridge" (get_status) | "doctor" (diagnostics) | "downloads"
   wait             poll until conditions met (urlContains/hasModal/hasCaptcha/notLoading/pendingDialogsGt/selector/script/timeoutMs/pollMs) — old wait_for; or event:"dialog_open|navigation|network|..." — old wait_for_event
-  evaluate         script:<js> (eval, CSP-blocked on strict sites) — or query:{selector,extract,all,inputs,text,state} for CSP-proof no-eval reads (old evaluate_safe)
+  evaluate         script:<js> runs in the ISOLATED world via new Function, which the extension's own MV3 CSP blocks on EVERY page (not just "strict sites") — treat script mode as unavailable and use query mode. query:{selector,extract,all,inputs,text,state} is the CSP-proof no-eval read path (old evaluate_safe). Password/OTP values are always masked (value:"" + hasValue) on every read surface.
   ax               native accessibility tree via chrome.debugger (Chrome's EXTENSION API — ALLOWED, unlike a CDP debug port): action:"state"|"read"|"click"|"type" + tabId (+ match/role/name). For canvas SPAs & chrome:// pages
   screenshot       captureVisibleTab → PNG/JPEG dataUrl for a vision model
-  press_key        key + modifiers ["ctrl","shift","alt","meta"], optional ref target
-  dialog           JS dialogs: action:"accept"|"dismiss" + index/value (old handle_dialog) — or keystroke:true + key:"enter|escape|tab|f5|ctrl+c" + value typed first (old dismiss_dialog, OS-level)
-  session          action:"reset" (clears map + tab binding) | "map" (exploration graph) | "mermaid" (flowchart export)
-  network_log      captured fetch/XHR since last call (clear, maxEntries)
+  press_key        key + modifiers ["ctrl","shift","alt","meta"], optional ref target. SYNTHETIC KeyboardEvents only — it does NOT perform default browser actions: ctrl+a does not select, letter keys do not insert text. It fires page JS key handlers and nothing else. Use type_text for text entry.
+  dialog           DOM [role=dialog] modals: close by clicking their ref; status{kind:"page}.hasModal is visibility-BLIND (hidden modals count too). JS window.alert/confirm/prompt are NOT reliably captured (the page's alert bypasses the content-script override and does not block) — do not build a flow that depends on catching them. action:"accept"|"dismiss" + index/value (old handle_dialog) — or keystroke:true + key:"enter|escape|tab|f5|ctrl+c" + value typed first (old dismiss_dialog, OS-level)
+  session          action:"reset" (clears map + tab binding — this map is GLOBAL to the hub, so reset wipes every session's history) | "map" (exploration graph) | "mermaid" (flowchart export). History stores the text you typed.
+  network_log      captured fetch/XHR since last call (clear, maxEntries) — see the fuller note below the tool list
   clipboard        action:"copy" (text) | "read"
   inspect          resolve a ref / one element: kind:"element" (resolve_ref — is this ref alive?) | "geometry" (bounding box, z-depth, scroll-container-aware) | "relation" (refA vs refB: above/below/overlaps)
-  navigate         navigate the CURRENT tab to a URL (reuses the tab — no tab spam). newTab:true forces a fresh tab. An UNBOUND session gets its OWN tab automatically (it never inherits another session's tab)
-  main_world       run a COMPILED function expression in the page MAIN world (F12-insider view). CSP-proof — the escape hatch when evaluate is blocked
+  navigate         navigate a tab to a URL. Pass tabId to target a specific tab; omit it to reuse your BOUND tab (no tab spam). newTab:true forces a fresh tab. An UNBOUND session gets its OWN tab automatically (it never inherits another session's tab)
+  main_world       run a COMPILED function EXPRESSION in the page MAIN world (F12-insider view) — CSP-proof, the escape hatch when evaluate is blocked. func must be an EXPRESSION (() => …, async () => …); a statement body returns null with success:true and does nothing. This is the reliable way to READ what a click/type actually did
   page_snapshot    LOSSLESS inventory of the page, held server-side; returns only the INDEX (counts + sliceable dimensions + handle). Nothing is cut: not interactive-only, not in-viewport-only. Scroll-stable. fresh:true re-collects
   page_slice       fetch ONE slice of the snapshot at full fidelity: by tag / role / region / vp / interactive / query (+limit). Every record carries a usable locator, so you can act on what you fetch
-  console_log      captured browser console + JS errors since last call (the page telling you WHY something failed)
-  network_log      captured fetch/XHR since last call — the page's own API responses (often cleaner structured data than the DOM)
-  cookies          cookie session manager: action:"list" (metadata for a url — names/expiry, NEVER values) | "get" | "clear"
+  console_log      captured browser console + JS errors since last call (the page telling you WHY something failed) — a MAIN-world hook, so page logs ARE captured
+  network_log      captured PAGE fetch/XHR since last call (clear, maxEntries). A MAIN-world hook captures real page traffic; totalCaptured is the count BEFORE clearing, so a clear:true call still tells you what it just flushed. Header capture is off unless asked.
+  cookies          cookie session manager: action:"list" (metadata for a url — names/expiry, NEVER values) | "get" (returns values for a named cookie) | "clear"
   respawn_offscreen  force-close + recreate the offscreen document so the extension reloads fresh code (MV3 trap: the offscreen does NOT reload with the extension card)
   extension_reload   reload the WebSense extension itself
   real_activate_tab  OS-INPUT ONLY — genuinely activates a tab (SendInput). Page ops NEVER need this; it exists solely to precede real_click/real_paste
   real_click       GENUINE OS-level click (SendInput) at VIEWPORT coords (x,y) — for canvases/raw-input surfaces a page op cannot reach. Lands on the FRONTMOST window
   real_paste       GENUINE paste (Ctrl+V) into a focused editor at viewport coords — the working route for attaching a real file/image to a composer
 
+TAB SCOPING MODEL (read this before running concurrent jobs): this is ONE Chrome profile with ONE extension — jobs do NOT get separate profiles, and nothing here gives you cookie/storage isolation from another job. Isolation is per-TAB. Ops that take an explicit tabId (navigate, tabs switch/close/bind/frames, form, ax, screenshot, real_*) target that tab and ignore the cursor. CURSOR-SCOPED ops (status, wait, scroll, evaluate, reveal, inspect, session, dialog, clipboard, console_log, network_log, read, explore_page, click, type_text) follow the session's BOUND tab, NOT the OS-frontmost tab. An unbound session is pinned to a tab automatically and WARNS you — it never silently inherits the shared global cursor (which is what made tabs appear "hijacked" between concurrent agents). tabs{action:"bind", tabId} sets the target WITHOUT focusing. session state (map/history) is GLOBAL across sessions on this hub: session{action:"reset"} clears everyone's history, and history contains the text you typed.
+
+REF LIFECYCLE: E# refs come from explore_page and are assigned in VIEWPORT order, so a full re-explore or a scroll RENUMBERS them (E7 may become a different element). They also rot across re-renders, and healing is op-inconsistent (click may heal a stale ref via its locator chain; type_text/inspect do not). For anything long-lived or re-render-prone, use a CSS-selector ref (#id, .class) — selectors are stable and E# is not. Re-explore after a re-render.
+
 KEY PATTERNS:
 - Forms: form{action:"state", formRef:"F0"} → type_text/select via form{action:"select"} → click submit ref
-- After every action: read the before/after + effect verdict (confirmed / suspected_noop / unverifiable). On suspected_noop do NOT retry blind — escalate (OS-level click via windows-control) or try an alternate path
+- After every action: read the before/after + effect verdict (confirmed / suspected_noop / unverifiable). Verdicts are WEAK evidence, not proof: suspected_noop means the measured state was identical (re-read the real outcome first — async work, downloads, new tabs all measure as identical), and unverifiable means the effect could not be measured at all. NEVER escalate straight to OS-level input (real_click) on suspected_noop/unverifiable: re-read the page first, and only use real_click when a page op provably cannot reach the element (canvas/raw-input/native surface).
 - Iframes: status{kind:"frames"}? No — list_frames lives under tabs{action:"frames"}; pass frameId to any element tool
 - Waits: wait{urlContains:"/dashboard"} beats manual poll loops; wait{event:"dialog_open"} after clicks that pop dialogs
 - Anti-patterns: no screenshots/vision for routine work; no CDP *debug port* (bot detection) — note chrome.debugger via the ax tool is NOT that and is allowed; no evaluate for routine reads (CSP); don't guess labels — read them from explore_page
@@ -772,8 +793,16 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     } else {
       result = await getActiveHub().send({ type: 'click', ref: o.ref, frameId: o.frameId });
       result.effect = classifyEffect(result);
-      if (result.effect !== 'confirmed') {
-        result.escalation = { recommended: 'real_click', reason: 'synthetic click produced no state change — React onClick handlers often ignore dispatched events; re-issue via a genuine OS-level click (windows-control/cua-driver foreground) or try explore_page{intent} for an alternate path' };
+      // 2026-09-25: recommend OS input ONLY for a REAL no-op (states compared,
+      // identical). 'unverifiable' means the effect could not be measured — that
+      // is NOT evidence the click failed, and auto-recommending real_click there
+      // is what produced the focus-steal loop: async handlers, downloads,
+      // _blank opens and focus-only clicks all change nothing measurable yet
+      // all landed. For unverifiable, re-read the actual page state first.
+      if (result.effect === 'suspected_noop') {
+        result.escalation = { recommended: 'real_click', reason: 'before/after quick state are IDENTICAL — the synthetic click measurably changed nothing. First re-read the page (wait for async work / check the real outcome); only if a page op provably cannot reach this element, re-issue via a genuine OS-level click (real_click).' };
+      } else if (result.effect === 'unverifiable') {
+        result.escalation = { recommended: 're_read', reason: 'effect could not be measured (no before/after state pair) — this is NOT a failure signal. Re-read the actual page (status/explore/main_world/DELTA) before retrying or escalating to OS input.' };
       }
       // P0#3 AUTO-CLIMB (2026-08-31): if the synthetic click no-op'd AND this
       // session's bound tab is the OS-active tab, resolve the element's
@@ -966,9 +995,9 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 9. NAVIGATE ═══
   reg(server, 'navigate', {
-    description: 'Navigate the CURRENT tab to a URL (reuses the tab — no tab spam). Pass newTab:true to open in a fresh tab instead. Returns tabId (session binding follows).',
-    inputSchema: { url: z.string(), newTab: z.boolean().optional().describe('Open in a new tab instead of reusing (default false)') },
-  }, async ({ url, newTab }) => {
+    description: 'Navigate a tab to a URL (reuses your bound tab — no tab spam). Pass tabId to target a specific tab; pass newTab:true to open in a fresh tab instead. Returns tabId (session binding follows).',
+    inputSchema: { url: z.string(), tabId: z.number().optional().describe('Target this tab. Omit to navigate your bound tab (fresh session gets a new tab). Ignored when newTab:true.'), newTab: z.boolean().optional().describe('Open in a new tab instead of reusing (default false)') },
+  }, async ({ url, tabId, newTab }) => {
     // An UNBOUND session must get its OWN tab. Reusing "the current tab" means reusing the
     // SHARED routing cursor, i.e. navigating whatever tab another agent happens to be on.
     // So on first use we force a fresh tab, then bind this session to it.
@@ -976,7 +1005,12 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     const hadBinding = !!(stBefore && stBefore.boundTabId != null)
       || !!(server && server._wsBoundTabId != null);
     const forceFresh = !hadBinding;
-    const result = await getActiveHub().send({ type: 'navigate', url, newTab: !!(newTab || forceFresh) });
+    // 2026-09-25: forward an explicit tabId. The schema used to have NO tabId,
+    // so callers' tabId was dropped before it could reach the offscreen — which
+    // DOES forward it and whose SW handler already honored it. The result looked
+    // like success but navigated the cursor tab instead (measured: a2-rerender
+    // request re-navigated the workbench).
+    const result = await getActiveHub().send({ type: 'navigate', url, newTab: !!(newTab || forceFresh), ...(tabId != null && !newTab && !forceFresh ? { tabId } : {}) });
     if (server && result && result.tabId) {
       server._wsBoundTabId = result.tabId;
       claimTab(server, result.tabId);
@@ -994,7 +1028,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 10. TABS ═══
   reg(server, 'tabs', {
-    description: 'Tab/window ops. bind routes page ops to a tab WITHOUT focus — page ops NEVER need activation. action:"list" | "switch" (tabId) | "close" (tabId) | "bind" (tabId — route page ops at this tab WITHOUT focusing; pass activate:true ONLY when you are about to do OS-level input, since real_click/real_paste hit the frontmost window) | "frames" (list iframes w/ frameId) | "windows" (all windows+tabs) | "focus" (windowId) | "move" (tabId,windowId) | "transfer" (fromTab,toTab,fromSelector,toSelector — atomic cross-tab copy/paste) | "switchread" (tabId,selector — switch+read in one).',
+    description: 'Tab/window ops. bind routes page ops to a tab WITHOUT focus — page ops NEVER need activation. action:"list" | "switch" (tabId) | "close" (tabId) | "bind" (tabId — route page ops at this tab WITHOUT focusing; pass activate:true ONLY when you are about to do OS-level input, since real_click/real_paste hit the frontmost window) | "frames" (tabId optional — list iframes w/ frameId for THAT tab; omit for your bound tab) | "windows" (all windows+tabs) | "focus" (windowId) | "move" (tabId,windowId) | "transfer" (fromTab,toTab,fromSelector,toSelector — atomic cross-tab copy/paste) | "switchread" (tabId,selector — switch+read in one).',
     inputSchema: {
       action: z.enum(['list', 'switch', 'close', 'bind', 'frames', 'windows', 'focus', 'move', 'transfer', 'switchread']).describe('Tab operation'),
       tabId: z.number().optional().describe('Target tab'),
@@ -1017,7 +1051,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       case 'bind':
         if (server) server._wsBoundTabId = o.tabId;
         return textResult(await getActiveHub().send({ type: 'bind_tab', tabId: o.tabId, activate: !!o.activate }));
-      case 'frames': return textResult(await getActiveHub().send({ type: 'list_frames' }));
+      case 'frames': return textResult(await getActiveHub().send({ type: 'list_frames', ...(o.tabId != null ? { tabId: o.tabId } : {}) }));
       case 'windows': return textResult(await getActiveHub().send({ type: 'list_windows' }));
       case 'focus': return textResult(await getActiveHub().send({ type: 'focus_window', windowId: o.windowId }));
       case 'move': return textResult(await getActiveHub().send({ type: 'move_tab_to_window', tabId: o.tabId, windowId: o.windowId }));
@@ -1155,14 +1189,30 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
             /CSP blocked|Content Security Policy|unsafe-eval/i.test(String((inner && inner.error) || ''))));
           if (o.selector != null) {
             let ok = false;
-            const r = await getActiveHub().send({ type: 'evaluate', script: '!!document.querySelector(' + JSON.stringify(o.selector) + ')' });
-            const inner = innerOf(r);
-            if (isCspBlocked(inner)) {
-              const r2 = await getActiveHub().send({ type: 'evaluate', script: 'querySelector(' + JSON.stringify(o.selector) + ')' });
-              const inner2 = innerOf(r2);
-              ok = !!(inner2.success !== false && (inner2.found === true || (inner2.result && inner2.result.found === true)));
+            // 2026-09-25 FIX: the selector branch used to send an EVAL probe
+            // (`!!document.querySelector(...)`) first, expect it to come back
+            // CSP-blocked, and only then send the no-eval safe-query form. That
+            // dependency never held: the eval probe never produced a usable
+            // value (the extension's own MV3 CSP blocks new Function on every
+            // page), so the fallback send never happened — measured 1 evaluate
+            // send per poll and a clean timeout even for a selector that
+            // evaluate{query} proves exists. Ask the no-eval path FIRST, which
+            // works on every page and needs no detection round-trip. The eval
+            // form is kept only as a last resort if the safe send throws.
+            const selJson = JSON.stringify(o.selector);
+            let inner = null;
+            try {
+              inner = innerOf(await getActiveHub().send({ type: 'evaluate', script: 'querySelector(' + selJson + ')' }));
+            } catch (_) { inner = null; }
+            if (inner) {
+              ok = !!(inner.success !== false && (inner.found === true || (inner.result && inner.result.found === true)));
             } else {
-              ok = !!(inner.success !== false && (inner.result === true || inner.result === 'true'));
+              // Last resort: the eval form, in case a page wires safeDomRead out.
+              try {
+                const r = await getActiveHub().send({ type: 'evaluate', script: '!!document.querySelector(' + selJson + ')' });
+                const i2 = innerOf(r);
+                ok = !!(i2 && !isCspBlocked(i2) && i2.success !== false && (i2.result === true || i2.result === 'true'));
+              } catch (_) { ok = false; }
             }
             if (!ok) domOk = false;
           }

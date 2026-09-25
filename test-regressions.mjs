@@ -1332,13 +1332,80 @@ test('delta: summarizeDelta unwraps the hub .data envelope (guards a real shippe
     'the delta test must run against the UNWRAPPED object');
 });
 
-test('delta: a caller can opt out per call, and a no-op is reported as not-landed', () => {
+test('delta: a caller can opt out per call, and a no-change delta is honestly scoped', () => {
   assert(/args\.verify === false/.test(SRV_SRC), 'withDelta must honour verify:false');
   assert(/verify: z\.boolean\(\)\.optional\(\)/.test(SRV_SRC),
     'mutating tools must expose a verify param so the diff can be skipped');
-  // The negative case is the whole point — it must say so loudly, not silently.
-  assert(/NOT LANDED/.test(SRV_SRC),
-    'a zero-change delta must explicitly say the action did NOT land');
+  // 2026-09-25: this test used to REQUIRE the phrase "NOT LANDED" — i.e. the
+  // regression suite itself pinned the false claim that mutated:false proves a
+  // failed action. Four measured false-negative classes (non-action text change,
+  // async handler settling after the diff, focus-only click, first-op seed) all
+  // report mutated:false while genuinely landing. The invariant now is that the
+  // hint scopes itself to what the fingerprint actually covers and points at a
+  // real read instead of asserting failure.
+  assert(!/Treat this action as NOT LANDED/.test(SRV_SRC),
+    'a zero-change delta must NOT claim the action did not land (fingerprints cover interactive elements only)');
+  assert(/NO INTERACTIVE-ELEMENT CHANGE detected/.test(SRV_SRC),
+    'a zero-change delta must state what it actually measured');
+  assert(/NOT proof the action did not land/.test(SRV_SRC),
+    'the hint must explicitly deny that mutated:false proves failure');
+});
+
+test('effect: classifyEffect unwraps the relay envelope, and unverifiable never escalates to OS input', () => {
+  // 2026-09-25: the relay wraps payloads as {type,id,success,data:{…}} so
+  // beforeState/afterState sit one level down. classifyEffect only read the top
+  // level, so EVERY relayed click returned 'unverifiable' — and the click handler
+  // then recommended real_click for anything non-confirmed, which is the
+  // focus-steal loop (async/download/_blank/focus actions all landed while the
+  // verdict said "retry with OS input").
+  assert(/const box = \(result && typeof result === 'object' && result\.data/.test(SRV_SRC),
+    'classifyEffect must unwrap the {data:{…}} relay envelope before reading states');
+  assert(/result\.effect === 'suspected_noop'/.test(SRV_SRC),
+    'OS-input escalation must be gated on a real measured no-op');
+  assert(/recommended: 're_read'/.test(SRV_SRC),
+    'an unverifiable effect must recommend re-reading the page, not OS input');
+  const realClickEscalations = (SRV_SRC.match(/recommended: 'real_click'/g) || []).length;
+  assert(realClickEscalations <= 2,
+    'real_click must not be recommended from a non-no-op verdict path');
+});
+
+test('wait: the selector condition asks the no-eval path first (2026-09-25)', () => {
+  // The branch used to probe with an EVAL first and only fall back to the
+  // no-eval safe-query form when that probe came back CSP-blocked. The probe
+  // NEVER produced a usable value (the extension's own CSP blocks it on every
+  // page), so the fallback send never ran: measured exactly 1 evaluate send per
+  // poll and a clean timeout for a selector that evaluate{query} proves exists.
+  const selBranch = SRV_SRC.slice(SRV_SRC.indexOf('if (o.selector != null)'), SRV_SRC.indexOf('if (domOk && o.script != null)'));
+  assert(/querySelector\(' \+ selJson/.test(selBranch),
+    'wait{selector} must send the no-eval querySelector form first');
+  assert(selBranch.indexOf('!!document.querySelector') > selBranch.indexOf('querySelector(1'),
+    'the eval form may only remain as a last-resort fallback, after the safe send');
+});
+
+test('guide: the shipped guide must not teach the measured-false doctrines (2026-09-25)', () => {
+  // Every assertion here corresponds to a claim that was live in the guide and
+  // was measured FALSE against the running code. The guide is the agent's only
+  // spec; a false line in it is a bug that ships to every caller.
+  assert(!/mutated:false means the action did NOT land/.test(SRV_SRC),
+    'the guide must not claim mutated:false proves an action did not land');
+  assert(!/On suspected_noop do NOT retry blind — escalate/.test(SRV_SRC),
+    'the guide must not tell agents to jump to OS-level input on suspected_noop');
+  assert(!/CSP-blocked on strict sites\)/.test(SRV_SRC),
+    'evaluate script mode is blocked on EVERY page (extension CSP), not only strict sites');
+  assert(!/JS dialogs: action:"accept"/.test(SRV_SRC),
+    'the guide must not present JS dialog capture as a working surface');
+  assert(/SYNTHETIC KeyboardEvents only/.test(SRV_SRC),
+    'press_key must state it performs no default browser actions');
+  assert(/TAB SCOPING MODEL/.test(SRV_SRC) && /jobs do NOT get separate profiles/.test(SRV_SRC),
+    'the guide must state the one-profile/per-tab isolation model');
+  assert(/REF LIFECYCLE/.test(SRV_SRC) && /RENUMBERS/.test(SRV_SRC),
+    'the guide must warn that E# refs renumber and rot across re-renders');
+  assert(/main_world func must be an EXPRESSION/.test(SRV_SRC) || /func must be an EXPRESSION/.test(SRV_SRC),
+    'the guide must state main_world requires a function expression');
+  assert(/is GLOBAL to the hub/.test(SRV_SRC),
+    'the guide must warn that session state is shared across sessions');
+  assert(/Pass tabId to target a specific tab/.test(SRV_SRC),
+    'the guide must document navigate{tabId}');
 });
 
 test('delta: the guide tells the agent to read the DELTA block instead of re-exploring', () => {

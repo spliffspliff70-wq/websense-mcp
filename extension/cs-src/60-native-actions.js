@@ -416,9 +416,14 @@
               success: matches,
               confirmed: matches ? (pass >= 2 ? 'value-persisted-after-settle' : 'value-persisted')
                 : (hasValidityIssue ? 'unconfirmed-shadow-input-text-missing' : false),
-              actualValue: finalVal.slice(0, 200),
+              // 2026-09-25 PRIVACY: a password/OTP field must not echo the
+              // text we just wrote. The agent can fill it and see `success`;
+              // it never needs the secret back. All three echoes (actualValue,
+              // expected) are stripped and a mask flag explains why.
+              actualValue: isSensitiveValueField(el) ? '' : finalVal.slice(0, 200),
+              actualValueMasked: isSensitiveValueField(el) || undefined,
               reverted: !matches,
-              expected: String(text).slice(0, 200),
+              expected: isSensitiveValueField(el) ? '' : String(text).slice(0, 200),
               validity,
               framework: hasValidityIssue ? 'custom-element' : undefined,
               note: matches
@@ -663,7 +668,12 @@
       if (q.state) {
         const d = document;
         const inputs = Array.prototype.slice.call(deepQueryAll('input,textarea,select')).map(function (i) {
-          return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: i.value, checked: !!(i.checked || i.selected) };
+          // 2026-09-25 PRIVACY: password/autocomplete-otp values are masked —
+          // this reader previously echoed EVERY input's value verbatim, so a
+          // filled password came back in the tool result (and in any session
+          // transcript that stored it).
+          const mv = maskedValue(i);
+          return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: mv.value, hasValue: mv.hasValue, checked: !!(i.checked || i.selected) };
         });
         return { success: true, mode: 'state', url: location.href, title: d.title, scrollY: window.scrollY, scrollH: (d.documentElement && d.documentElement.scrollHeight) || 0, inputCount: inputs.length, inputs: inputs.slice(0, 60) };
       }
@@ -673,7 +683,10 @@
       }
       if (q.inputs) {
         const ins = Array.prototype.slice.call(deepQueryAll('input,textarea,select')).map(function (i) {
-          return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: i.value, checked: !!(i.checked || i.selected), placeholder: i.placeholder || '', label: getLabel(i).slice(0, 60) };
+          // 2026-09-25 PRIVACY: same masking as q.state above — never echo a
+          // password / OTP field's value.
+          const mv = maskedValue(i);
+          return { tag: i.tagName.toLowerCase(), name: i.name || '', type: i.type || '', value: mv.value, hasValue: mv.hasValue, checked: !!(i.checked || i.selected), placeholder: i.placeholder || '', label: getLabel(i).slice(0, 60) };
         });
         return { success: true, mode: 'inputs', count: ins.length, inputs: ins.slice(0, 100) };
       }
@@ -682,35 +695,50 @@
       if (!el) return { success: true, mode: 'query', found: false, selector: q.selector,
         note: 'not found in the light DOM or in any OPEN shadow root. If the site uses a CLOSED shadow root no script can reach it — use explore_page refs or real_click at coordinates.' };
       const ex = q.extract || 'text';
+      // 2026-09-25 PRIVACY: an explicit `evaluate{query:{selector:"#pw",
+      // extract:"value"}}` used to return a password's live value verbatim —
+      // the last echo surface after the readers and type path were masked.
+      // Password/OTP fields now report value:'' plus hasValue so the agent can
+      // still ask "is it filled?" without ever holding the secret. `html` mode
+      // is masked too: a form's outerHTML can carry the value attribute.
+      const sensitive = isSensitiveValueField(el);
       let val;
-      if (ex === 'value') val = el.value !== undefined ? el.value : (el.textContent || '');
+      if (ex === 'value') val = sensitive ? '' : (el.value !== undefined ? el.value : (el.textContent || ''));
       else if (ex === 'attrs') { const o = {}; for (let i = 0; i < el.attributes.length; i++) o[el.attributes[i].name] = el.attributes[i].value; val = o; }
-      else if (ex === 'html') val = el.outerHTML;
+      else if (ex === 'html') val = sensitive ? '[html withheld: sensitive field]' : el.outerHTML;
       else val = el.textContent || '';
       if (q.all) {
         const els = deepQueryAll(q.selector);
         const arr = [];
         for (let i = 0; i < els.length && i < (q.maxLen || 100); i++) {
           const e = els[i];
-          if (ex === 'value') arr.push(e.value !== undefined ? e.value : (e.textContent || ''));
+          if (ex === 'value') arr.push(isSensitiveValueField(e) ? '' : (e.value !== undefined ? e.value : (e.textContent || '')));
           else if (ex === 'attrs') { const o = {}; for (let k = 0; k < e.attributes.length; k++) o[e.attributes[k].name] = e.attributes[k].value; arr.push(o); }
           else arr.push(e.textContent || '');
         }
         return { success: true, mode: 'query-all', found: true, count: arr.length, results: arr };
       }
-      return { success: true, mode: 'query', found: true, inShadow: isInShadow(el), value: val };
+      const out = { success: true, mode: 'query', found: true, inShadow: isInShadow(el), value: val };
+      if (sensitive) { out.hasValue = !!(el.value); out.valueMasked = true; }
+      return out;
     } catch (e) { return { success: false, error: String((e && e.message) || e) }; }
   }
-  function nativeTypeMany(fields) {
+  async function nativeTypeMany(fields) {
     // Batch-fill: one round trip for N fields. Each field: {ref, text, clearFirst?}
+    // 2026-09-25 FIX: nativeType is ASYNC (it waits 2 rAF + ~500ms settle to
+    // verify persistence) and this called it synchronously, so `r.success` was
+    // always undefined → every batch reported filled:0 / failed:N even though
+    // the fields were written. Also switched to resolveRefHealed so batch mode
+    // heals stale refs like single-field mode does (it was the ONLY type path
+    // still using the bare resolver — a rerender silently failed the whole batch).
     const results = [];
     if (!Array.isArray(fields)) return { success: false, error: 'fields must be an array' };
     for (const f of fields) {
       try {
-        const el = resolveRef(f.ref);
+        const el = await resolveRefHealed(f.ref);
         if (!el) { results.push({ ref: f.ref, success: false, error: 'Element not found' }); continue; }
-        const r = nativeType(el, f.text, f.clearFirst !== false);
-        results.push({ ref: f.ref, success: r.success, actualValue: r.actualValue });
+        const r = await nativeType(el, f.text, f.clearFirst !== false);
+        results.push({ ref: f.ref, success: !!r.success, actualValue: r.actualValue, confirmed: r.confirmed, reverted: !!r.reverted });
       } catch (e) {
         results.push({ ref: f.ref, success: false, error: String((e && e.message) || e) });
       }

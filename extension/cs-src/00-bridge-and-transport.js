@@ -352,7 +352,7 @@
       // Only reached when the hub routes here (a live direct bridge). Relay to the
       // SW, which performs chrome.runtime.reload(). Fire-and-forget on purpose:
       // the SW dies mid-call, so awaiting its response would hang. 2026-09-11.
-      case 'extension_reload': { try { chrome.runtime.sendMessage({ type: 'extension_reload' }); } catch (_) {} return { success: true, message: 'reload relayed to the service worker' }; }
+      case 'extension_reload': { setTimeout(function () { try { chrome.runtime.sendMessage({ type: 'TAB_CONTROL', action: 'extension_reload', payload: {} }); } catch (_) {} }, 100); return { success: true, message: 'extension_reload relayed to the service worker (reload in ~100ms)' }; }
       case 'discover_actions': { const sag = await extractActionGraph({ includeContent: false, full: false, includeHidden: false, maxActions: params.maxActions || DEFAULT_MAX_ACTIONS, frameId: params.frameId }); return sag.actions; }
       case 'click': { var b = getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); return { success: true, ref: params.ref, ...(cr && typeof cr === 'object' ? cr : {}), beforeState: b, afterState: getQuickState() }; }
       case 'type_text': { var r = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); r.ref = params.ref; return r; }
@@ -374,9 +374,12 @@
       case 'copy_to_clipboard': return nativeCopyToClipboard(params.text);
       case 'form_state': return getFormState(params.formRef, params.frameId);
       case 'action_preview': return getActionPreview(params.ref);
-      case 'dropdown_options': return getDropdownOptions(resolveRef(params.ref));
-      case 'tab_contents': return getTabContents(resolveRef(params.ref));
-      case 'accordion_contents': return getAccordionContents(resolveRef(params.ref));
+      // Pass the RAW ref — these readers resolve internally (70-capture).
+      // Pre-resolving here made them re-resolve an Element via the string-keyed
+      // ref map → always null → "Element not found" on this direct-WS path.
+      case 'dropdown_options': return getDropdownOptions(params.ref);
+      case 'tab_contents': return getTabContents(params.ref);
+      case 'accordion_contents': return getAccordionContents(params.ref);
       case 'page_state': return getPageState(params.frameId);
       case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; var et=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; et+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; return { text: et }; }
       case 'read_content': return readContent(params);

@@ -27,6 +27,27 @@ async function registerConsoleHook() {
   }
 }
 
+// ═══ MAIN-world network hook (2026-09-25) ═══
+// Same world split the console hook documents: page fetch/XHR live in the MAIN
+// world, so the content script's own copy of window.fetch is never called by
+// page code and network_log stayed empty. network-hook.js is registered the
+// same way and writes its ring buffer onto #__ws_net_buffer for the CS to read.
+async function registerNetworkHook() {
+  try {
+    await chrome.scripting.registerContentScripts([{
+      id: 'ws-network-hook',
+      matches: ['<all_urls>'],
+      js: ['network-hook.js'],
+      runAt: 'document_start',
+      world: 'MAIN',
+      allFrames: true,
+    }]);
+  } catch (e) {
+    // Duplicate ID → already registered; otherwise network_log degrades to
+    // isolated-world capture (empty on real pages, which is the old behaviour).
+  }
+}
+
 // ═══ Offscreen Document Management ═══
 
 let offscreenCreating = null;
@@ -519,14 +540,16 @@ async function handleTabControl(action, payload) {
       return { success: true, message: 'offscreen respawned' };
     }
     case 'extension_reload': {
-      // v4 (2026-08-31): full self-reload — chrome.runtime.reload() tears down
-      // ALL extension contexts (SW, offscreen, content scripts) and reloads
-      // everything from disk. The server-side extension_reload tool polls the
-      // hub until the fresh SW reconnects (~3s), so callers get one clean
-      // result. NOTE: this SW dies right here — the response never makes it
-      // back; the poll is the actual confirmation mechanism.
-      setTimeout(() => { try { chrome.runtime.reload(); } catch (_) {} }, 150);
-      return { success: true, message: 'reloading extension in 150ms' };
+      // v5 (2026-09-25): reload SYNCHRONOUSLY. The old bare setTimeout(150)
+      // only survived if Chrome happened to keep the SW alive after
+      // sendResponse returned — with no pending event it can suspend first,
+      // and the timer never fired: `extension_reload` reported reloadSent:true
+      // while the client-id set stayed identical for 15s (the false-success
+      // this case's v4 comment already warned about). No caller awaits this
+      // response (offscreen and the content script both relay fire-and-forget),
+      // so tearing down right here is safe: the hub's client-id poll IS the ack.
+      try { chrome.runtime.reload(); } catch (_) {}
+      return { success: true, message: 'reloading extension now' };
     }
     case 'get_window_tabs': {
       const tabs = await getAllTabs();
@@ -726,10 +749,20 @@ async function handleTabControl(action, payload) {
       return { success: true, url: (tab && tab.url) || '', title: (tab && tab.title) || '' };
     }
     case 'list_frames': {
-      const tab = await getActiveTab();
+      // 2026-09-25: honor an explicit tabId. This case used to call
+      // getActiveTab() unconditionally, so tabs{action:"frames", tabId:X}
+      // reported the OS-ACTIVE tab's frames — on a multi-tab box that handed
+      // back a completely different tab's frame list while claiming success
+      // (observed: asked about the workbench, got chat.z.ai's frames). Fall
+      // back to the bound tab, then the active tab, so an unbound session
+      // behaves as before.
+      const want = payload && payload.tabId ? parseInt(payload.tabId, 10) : boundTabId;
+      let tab = null;
+      if (want) { try { tab = await chrome.tabs.get(want); } catch (_) { tab = null; } }
+      if (!tab) tab = await getActiveTab();
       if (!tab) return { error: 'No active tab' };
       const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
-      return { success: true, tabId: tab.id, frames: (frames || []).map((f) => ({ frameId: f.frameId, url: f.url || '', parentFrameId: f.parentFrameId, errorOccurred: !!f.errorOccurred })) };
+      return { success: true, tabId: tab.id, requestedTabId: want || null, frames: (frames || []).map((f) => ({ frameId: f.frameId, url: f.url || '', parentFrameId: f.parentFrameId, errorOccurred: !!f.errorOccurred })) };
     }
     case 'tab_contents':
     case 'accordion_contents': {
@@ -821,7 +854,11 @@ async function handleTabControl(action, payload) {
         return { success: false, error: 'cookie_op failed: ' + (err.message || err) };
       }
     }
-    case 'doctor': {
+    case 'doctor':
+    case 'doctor_sw': { // 2026-09-25: server.js sends `doctor_sw` for the
+      // serviceWorker half of status{kind:doctor}, but only this `doctor` case
+      // existed → every doctor report carried serviceWorker.error "Unknown
+      // content action: doctor_sw". Same handler, two op names.
       // SW + site diagnostics: alarms, cookies (names + expiry ONLY — never
       // values), extension ID. Local-only; nothing leaves the machine.
       let alarms = [];
@@ -871,11 +908,13 @@ async function handleTabControl(action, payload) {
 
 chrome.runtime.onInstalled.addListener(() => {
   registerConsoleHook();
+  registerNetworkHook();
   setupOffscreen().catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
   registerConsoleHook();
+  registerNetworkHook();
   setupOffscreen().catch(() => {});
 });
 
@@ -883,6 +922,7 @@ chrome.runtime.onStartup.addListener(() => {
 // to recreate the offscreen when the service worker restarts
 setupOffscreen().catch(() => {});
 registerConsoleHook();
+registerNetworkHook();
 
 // ═══ AX BRIDGE via chrome.debugger (Phase 4, 2026-08-15) ═══
 // chrome.debugger is only available in the background service worker.

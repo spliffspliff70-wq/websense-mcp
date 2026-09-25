@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WS Test Workbench</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; max-width: 900px; }
+  section { border: 1px solid #ccc; border-radius: 6px; margin: 12px 0; padding: 10px 14px; }
+  h2 { font-size: 15px; margin: 4px 0 8px; }
+  #status { position: sticky; top: 0; background: #123; color: #9f9; padding: 6px 10px; font-family: monospace; z-index: 50; }
+  .tall { height: 600px; background: linear-gradient(#eee, #ddd); }
+  #innerScroll { height: 120px; overflow: auto; border: 1px solid #999; }
+  #innerScroll > div { height: 500px; background: repeating-linear-gradient(#fff 0 40px, #eef 40px 80px); }
+  [role=dialog] { border: 2px solid #333; padding: 12px; background: #fff; }
+  #editable { border: 1px dashed #88f; min-height: 40px; padding: 6px; }
+  .box { display:inline-block; width: 60px; height: 60px; background: #48f; margin: 4px; }
+  #dropzone.over { background: #4f8; }
+  #hoverme:hover { background: #fd0; }
+  #reactSim { width: 260px; }
+  pre { background: #f4f4f4; padding: 6px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="status">INIT</div>
+<script>window.__setStatus = function (s) { document.getElementById('status').textContent = s; };</script>
+
+<section id="sec-buttons">
+  <h2>Buttons</h2>
+  <button id="btn-inc" onclick="__setStatus('CLICK '+(window.__c=(window.__c||0)+1))">Increment</button>
+  <button id="btn-disabled" disabled>Disabled</button>
+  <button id="btn-delayed" onclick="setTimeout(function(){__setStatus('DELAYED_OK')},600)">Delayed 600ms</button>
+  <button id="btn-alert" onclick="alert('workbench-alert')">Alert</button>
+  <button id="btn-log" onclick="console.log('WB_LOG','hello',42); console.warn('WB_WARN'); console.error('WB_ERR','boom'); __setStatus('LOGGED')">Console x3</button>
+  <button id="btn-fetch" onclick="fetch('/pages/b2-source.html').then(function(r){return r.text()}).then(function(t){__setStatus('FETCH_OK len='+t.length)}).catch(function(e){__setStatus('FETCH_FAIL '+e)})">Fetch same-origin</button>
+  <button id="btn-xhr" onclick="var x=new XMLHttpRequest(); x.open('GET','/pages/b2-destination.html'); x.onload=function(){__setStatus('XHR_OK '+x.status)}; x.onerror=function(){__setStatus('XHR_ERR')}; x.send()">XHR</button>
+</section>
+
+<section id="sec-form">
+  <h2>Form controls</h2>
+  <label>Name <input id="txt" type="text" placeholder="type here" oninput="__setStatus('INPUT:'+this.value)"></label>
+  <label>Pass <input id="pw" type="password"></label>
+  <label>Num <input id="num" type="number" value="7"></label>
+  <label>Range <input id="rng" type="range" min="0" max="100" value="50" oninput="__setStatus('RANGE:'+this.value)"></label>
+  <label>Pick <select id="sel" onchange="__setStatus('SELECT:'+this.value)">
+    <option value="">--</option><option value="alpha">alpha</option><option value="beta">beta</option><option value="gamma">gamma</option>
+  </select></label>
+  <label><input type="checkbox" id="chk" onchange="__setStatus('CHECK:'+this.checked)"> checkbox</label>
+  <label><input type="radio" name="r" id="r1" onchange="__setStatus('RADIO:1')"><input type="radio" name="r" id="r2" onchange="__setStatus('RADIO:2')"> radios</label>
+  <button id="btn-submit" type="button" onclick="event.preventDefault(); __setStatus('SUBMIT_SENT')">Submit</button>
+  <div id="editable" contenteditable="true" data-testid="editor" oninput="__setStatus('EDITABLE:'+this.textContent.slice(0,40))">contenteditable area</div>
+  <input id="reactSim" data-reactsim="1" placeholder="react-like tracked input">
+  <pre id="reactLog">(no reactSim events)</pre>
+</section>
+
+<section id="sec-upload">
+  <h2>File upload</h2>
+  <input type="file" id="fileInput" data-testid="fileInput" multiple onchange="__setStatus('FILE:'+Array.prototype.map.call(this.files,function(f){return f.name}).join(','))">
+</section>
+
+<section id="sec-download">
+  <h2>Download</h2>
+  <a id="dlLink" download="wb.txt" href="data:text/plain;charset=utf-8,workbench%20download%20payload">Download via link</a>
+  <button id="btn-dlobj" onclick="var b=new Blob(['dl object ok'],{type:'text/plain'}); var u=URL.createObjectURL(b); var a=document.createElement('a'); a.href=u; a.download='wb_obj.txt'; document.body.appendChild(a); a.click(); a.remove(); __setStatus('DL_BLOB_SENT')">Download via Blob</button>
+</section>
+
+<section id="sec-clipboard">
+  <h2>Clipboard</h2>
+  <button id="btn-clipw" onclick="navigator.clipboard.writeText('WB_CLIP_'+Date.now()).then(function(){__setStatus('CLIP_WRITE_OK')}).catch(function(e){__setStatus('CLIP_WRITE_FAIL '+e.name)})">Write clipboard</button>
+  <button id="btn-clipr" onclick="navigator.clipboard.readText().then(function(t){__setStatus('CLIP_READ:'+t.slice(0,40))}).catch(function(e){__setStatus('CLIP_READ_FAIL '+e.name)})">Read clipboard</button>
+</section>
+
+<section id="sec-dialog">
+  <h2>Dialogs</h2>
+  <button id="btn-openmodal" onclick="document.getElementById('modal').style.display='block'; __setStatus('MODAL_OPEN')">Open modal</button>
+  <div id="modal" role="dialog" aria-modal="true" aria-label="WB modal" style="display:none">
+    <p>Modal body</p>
+    <button id="modalOk" onclick="document.getElementById('modal').style.display='none'; __setStatus('MODAL_OK')">OK</button>
+    <button id="modalCancel" onclick="document.getElementById('modal').style.display='none'; __setStatus('MODAL_CANCEL')">Cancel</button>
+  </div>
+</section>
+
+<section id="sec-nav">
+  <h2>Navigation</h2>
+  <a id="lnk-spa" href="#section-2" onclick="__setStatus('SPA_HASH')">Hash SPA link</a> |
+  <a id="lnk-page" href="/pages/b2-destination.html">Page link</a> |
+  <a id="lnk-newtab" href="/pages/form-basic.html" target="_blank">New-tab link</a> |
+  <a id="lnk-modalrc" href="javascript:void(0)" onclick="__setStatus('NOOP_LINK')">No-op link</a>
+</section>
+
+<section id="sec-scroll">
+  <h2>Scroll</h2>
+  <div id="outerScroll" style="height:260px;overflow:auto;border:1px solid #999">
+    <div class="tall">tall outer content <span id="innerAnchor">anchor deep in scroll</span></div>
+  </div>
+  <div id="innerScroll"><div>inner scroll content</div></div>
+</section>
+
+<section id="sec-hoverdrag">
+  <h2>Hover / Drag</h2>
+  <span id="hoverme" style="padding:4px 8px; border:1px solid #999">hover target</span>
+  <div class="box" id="dragMe" draggable="true">DRAG</div>
+  <div class="box" id="dropzone" ondragover="event.preventDefault(); this.classList.add('over')" ondragleave="this.classList.remove('over')" ondrop="event.preventDefault(); this.classList.remove('over'); __setStatus('DROPPED')">DROP</div>
+  <canvas id="cv" width="120" height="60" style="border:1px solid #888"></canvas>
+</section>
+
+<section id="sec-iframe">
+  <h2>Iframe (all_frames)</h2>
+  <iframe id="frame" src="/pages/form-basic.html" width="640" height="220" title="WB frame"></iframe>
+</section>
+
+<section id="sec-mutation">
+  <h2>Ref stability / mutation</h2>
+  <button id="btn-rerender" onclick="var el=document.getElementById('victim'); var n=el.cloneNode(false); n.textContent='RERENDER '+Date.now(); el.parentNode.replaceChild(n, el); __setStatus('RERENDERED')">Re-render #victim</button>
+  <span id="victim">victim original</span>
+  <button id="btn-tick" onclick="window.__tick = setInterval(function(){ var t=document.getElementById('ticker'); t.textContent='tick '+Date.now(); }, 1000); __setStatus('TICKER_ON')">Ticker on</button>
+  <button id="btn-tickoff" onclick="clearInterval(window.__tick); __setStatus('TICKER_OFF')">Ticker off</button>
+  <span id="ticker">tick idle</span>
+</section>
+
+<section id="sec-misc">
+  <h2>Misc</h2>
+  <details id="det"><summary>Advanced</summary><p id="detBody">hidden until open</p></details>
+  <div role="tablist">
+    <button role="tab" id="tab1" aria-selected="true" aria-controls="panel1" onclick="__setStatus('TAB:1')">One</button>
+    <button role="tab" id="tab2" aria-selected="false" aria-controls="panel2" onclick="__setStatus('TAB:2')">Two</button>
+  </div>
+  <div id="panel1" role="tabpanel">panel one</div>
+  <div id="panel2" role="tabpanel" hidden>panel two</div>
+  <div id="hovercss" style="transition:background .1s">styled target</div>
+  <p>Zero-height anchor: <span id="zeroH" style="display:inline-block;width:50px;height:0;overflow:hidden">zero</span></p>
+</section>
+
+<script>
+  // react-sim: emulate React's value tracker (native-setter override) to test type_text paths
+  (function () {
+    var el = document.getElementById('reactSim');
+    var proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    var tracker = { value: '' };
+    Object.defineProperty(el, 'value', {
+      get: function () { return tracker.value; },
+      set: function (v) { tracker.value = v; proto.set.call(el, v); document.getElementById('reactLog').textContent = 'reactSim set (native): ' + v; }
+    });
+    el.addEventListener('input', function () { document.getElementById('reactLog').textContent = 'reactSim input event: ' + el.value; });
+  })();
+  var ctx = document.getElementById('cv').getContext('2d');
+  ctx.fillStyle = '#48f'; ctx.fillRect(0, 0, 120, 60); ctx.fillStyle = '#fff'; ctx.font = '14px sans-serif'; ctx.fillText('WB', 48, 36);
+  window.__setStatus('READY');
+</script>
+</body>
+</html>

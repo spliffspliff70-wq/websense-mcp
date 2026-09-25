@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_PORT = 38401;
 const REQUEST_TIMEOUT = 30000;       // default for most ops
 const EXPLORE_TIMEOUT = 90000;       // heavy DOMs (x.com, lemonsqueezy) need more time
-const HEAVY_OPS = new Set(['explore_page', 'discover_actions']);
+const HEAVY_OPS = new Set(['explore_page', 'discover_actions', 'type_many']); // type_many: ~1s/field persistence verify (max 50 fields)
 const TLS_PORT = 38411;
 // Human-readable WebSocket readyState (read-only diagnostics).
 const READY_STATE_NAMES = { 0: 'CONNECTING', 1: 'OPEN', 2: 'CLOSING', 3: 'CLOSED' };
@@ -297,7 +297,7 @@ export class HubServer {
   // needs SW-world DataTransfer; network_log capture hooks run on the relay
   // path). Routing them to a healthy direct content-script socket made them
   // fail exactly when the bridge was otherwise at its best.
-  static get SW_REQUIRED_OPS() { return new Set(['upload_file', 'network_log']); }
+  static get SW_REQUIRED_OPS() { return new Set(['upload_file', 'network_log', 'doctor_sw']); }
 
   // Route a command to the best client:
   //  - TAB ops (navigate/list_tabs/switch_tab/close_tab/list_frames/
@@ -330,8 +330,16 @@ export class HubServer {
     // successful op). A content script stays alive, relays to the SW via
     // chrome.runtime, and the response returns over the CS's own WS.
     if (cmd && cmd.type === 'respawn_offscreen') {
-      const cs = this.mainFrameClient || this.contentClient || this.lastClient;
-      if (cs && cs.readyState === 1) return cs;
+      // Pick the first READY content script — never an offscreen (it kills its
+      // own document mid-reply → false "Extension disconnected" although the
+      // respawn succeeded), and never a dead-but-non-null pointer: the old code
+      // checked readyState only on the FIRST candidate, so one stale
+      // mainFrameClient shadowed a live contentClient and the op fell through
+      // to the offscreen (observed 2026-09-25). If no CS is ready the fall-
+      // through still works — the offscreen case now replies before dying.
+      const cs = [this.mainFrameClient, this.contentClient, this.lastClient]
+        .find((w) => w && w.readyState === 1 && w.clientSource !== 'offscreen');
+      if (cs) return cs;
     }
     // extension_reload must reach a client that can actually PERFORM it. Both the
     // offscreen and the content script handle it now (2026-09-11); prefer the

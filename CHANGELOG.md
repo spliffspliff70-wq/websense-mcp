@@ -3,6 +3,88 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.5] — 2026-09-25
+
+A full 31-tool live audit against a controlled workbench (60+ verdicts, every
+failure root-caused in source) turned up twelve real defects — including three
+where the shipped **guide and the regression suite itself taught the wrong
+thing**. All twelve are fixed here, each one verified live before the next.
+
+### The wrong-truth class (the expensive ones)
+
+- **`effect` was `unverifiable` for every relayed action.** `classifyEffect` read
+  `beforeState`/`afterState` off the top-level result, but the relay wraps
+  payloads as `{type,id,success,data:{…}}` — so the states were never found and
+  the verdict was always "could not measure". A mutating click now reports
+  `confirmed`, a genuinely inert one reports `suspected_noop`.
+- **The false-escalation trap.** Any non-`confirmed` verdict (including
+  "unverifiable") told the agent to escalate to a real OS-level click. Every
+  async handler, download, `_blank` open and focus-only click landed while the
+  verdict said "retry with OS input" — the focus-steal loop. OS input is now
+  recommended only for a *measured* no-op; unverifiable recommends re-reading
+  the page.
+- **`mutated:false` no longer claims the action failed.** The diff fingerprints
+  interactive elements only, so text changes elsewhere, handlers that settle
+  after the diff, focus-only clicks, downloads and new-tab opens all report
+  `mutated:false` while genuinely landing. The hint now states what it measured
+  and points at a real read. A regression test that *required* the old
+  "NOT LANDED" wording was itself pinning the false claim.
+
+### Functionality that never worked
+
+- **`network_log` captured nothing.** The fetch/XHR hooks patched the isolated
+  world, which page code never touches — 4 runs, 0 entries, while oracles proved
+  traffic. A new `network-hook.js` registers in the MAIN world (exactly as
+  `console-hook.js` already did) and the reader merges both logs: live, 2/2 real
+  page requests captured. `totalCaptured` is now read before clearing, so a
+  `clear:true` call no longer reports a permanent zero.
+- **`wait{selector}` could never succeed.** The branch sent an *eval* probe,
+  expected it CSP-blocked, and only then sent the no-eval safe-query form. The
+  extension's own MV3 CSP blocks the probe on every page, so the fallback was
+  never sent — measured 1 send per poll and a clean timeout for a selector that
+  `evaluate{query}` proves exists. The no-eval path is now asked first; all four
+  wait modes verified.
+- **`reveal{kind:dropdown}` failed on every direct-WS page** — the bridge passed a
+  pre-resolved *element* to a reader that resolves internally, so the second
+  resolve always missed. Same bug in `tab_contents`/`accordion_contents`.
+- **`status{kind:"doctor"}` always reported a service-worker error**
+  (`Unknown content action: doctor_sw`) — the server sent an op name the SW never
+  had, and it wasn't in the SW-routed set either.
+- **`navigate` and `tabs{action:"frames"}` silently dropped the `tabId` you
+  passed** — frames reported the *active* tab's iframes while claiming success.
+  Both now take and honor `tabId`.
+- **`type_text` batch counters were always wrong** (`filled:0, failed:N`): the
+  batch called the async `nativeType` synchronously, so `r.success` was always
+  undefined. Batch now awaits, heals stale refs, and reports verified counts.
+- **`extension_reload` usually did nothing while reporting success.** It called
+  `chrome.runtime.reload()` from the offscreen document, where the API is
+  unavailable (the throw was swallowed), and the SW's version relied on a
+  `setTimeout` that a suspending worker never ran. It now relays to the SW and
+  reloads synchronously — `reloadVerified:true` in ~400ms, repeatedly.
+- **`respawn_offscreen` always reported "Extension disconnected"** for a respawn
+  that had actually succeeded, because the offscreen awaited its own death before
+  replying. It now replies first, and routing prefers a live content script.
+
+### Privacy
+
+Password/OTP values were echoed back in **six** places: the label fallback, the
+`type_text` result (`actualValue` + `expected`), `evaluate{query}` value/html
+reads, the `inputs`/`state` readers, the explore action list, and the forms
+section. All are masked now (`value:""` plus `hasValue`/`*Masked` flags, so
+"is it filled?" still works). A canary sweep across 11 tool surfaces returns
+zero occurrences.
+
+### Guide and tests
+
+The guide now states the one-profile/per-tab isolation model, the ref lifecycle
+(E# renumbers per explore and rots across re-renders — prefer CSS refs), that
+`press_key` performs no default browser actions, that `evaluate{script}` is
+blocked on *every* page (the extension's own CSP, not "strict sites"), that JS
+dialogs are not a reliable surface, and that session state is global. 12 new
+static assertions pin these so a false claim cannot ship again.
+
+Tests: 113 → 126.
+
 ## [1.4.4] — 2026-09-21
 
 Two pieces that were measured but not wired are now on the surface: a programmatic **did-it-land flag** on every action, and a **lossless page inventory** you can slice by any dimension.
@@ -11,7 +93,7 @@ Two pieces that were measured but not wired are now on the surface: a programmat
 
 The weak `effect` verdict (beforeState/afterState) structurally cannot see mutations that change neither URL nor title — the proven case is liking a post (effect:unverifiable while the like did register). Knowing an input landed also cost an extra `explore_page{incremental:true}` round-trip per action.
 
-Every mutating op (`click`, `type_text`, `form`, `press_key`, `real_click`, `real_paste`, `main_world`, `evaluate`, `dialog`) now returns a SECOND block: `DELTA (auto, after <op>): {mutated: true|false|null, ...}`. It is the content script's own per-tab scan cache and element-fingerprint differ — so it catches changes before/after misses — computed automatically, as a separate content block so the payload can never be corrupted. `mutated:false` means the action did NOT land. `mutated:null` means no baseline existed yet on that tab (first action seeds one). `verify:false` skips it.
+Every mutating op (`click`, `type_text`, `form`, `press_key`, `real_click`, `real_paste`, `main_world`, `evaluate`, `dialog`) now returns a SECOND block: `DELTA (auto, after <op>): {mutated: true|false|null, ...}`. It is the content script's own per-tab scan cache and element-fingerprint differ — so it catches changes before/after misses — computed automatically, as a separate content block so the payload can never be corrupted. `mutated:false` means no interactive-element change was detected — see the 1.4.5 correction below, this was originally described too strongly. `mutated:null` means no baseline existed yet on that tab (first action seeds one). `verify:false` skips it.
 
 ### Page snapshot + addressable index + slice
 

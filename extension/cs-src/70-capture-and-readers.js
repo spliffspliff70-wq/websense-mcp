@@ -32,9 +32,32 @@
     };
   }
   function getNetworkLog(clear, maxEntries) {
-    var entries = networkLog.slice(-maxEntries);
-    if (clear) networkLog = [];
-    return { entries, totalCaptured: networkLog.length, capturing: networkCapturing };
+    var max = maxEntries || 50;
+    // MAIN-world entries (2026-09-25): network-hook.js patches the PAGE's
+    // fetch/XHR, which is the only place real page traffic ever goes. The
+    // isolated-world patch above still catches calls made BY the content script
+    // (e.g. its own probes) — keep both, main first (it is the real traffic).
+    var mainWorld = [];
+    try {
+      var el = document.getElementById('__ws_net_buffer');
+      if (el) {
+        var parsed = JSON.parse(el.getAttribute('data-ws-net') || '[]');
+        if (Array.isArray(parsed)) mainWorld = parsed;
+      }
+    } catch (_) {}
+    var all = mainWorld.concat(networkLog);
+    var entries = all.slice(-max);
+    // totalCaptured must be read BEFORE clearing (2026-09-25): the old code
+    // cleared the array first and then reported networkLog.length, so every
+    // clear:true call reported totalCaptured:0 — a permanent "nothing was ever
+    // captured" lie that hid real traffic from the agent.
+    var total = all.length;
+    if (clear) {
+      networkLog = [];
+      try { var el2 = document.getElementById('__ws_net_buffer'); if (el2) el2.removeAttribute('data-ws-net'); } catch (_) {}
+    }
+    return { entries: entries, totalCaptured: total, capturing: networkCapturing || mainWorld.length > 0,
+             cleared: !!clear, mainWorldEntries: mainWorld.length, isolatedWorldEntries: networkLog.length };
   }
 
   // ═══ CONSOLE / JS-ERROR CAPTURE (2026-08-30 — parity with Hermes browser_console) ═══
@@ -216,7 +239,7 @@
                 case 'press_key': result=nativePressKeyEnhanced(params.key, params.ref, params.modifiers); break;
                 case 'evaluate': result=nativeEvaluate(params.script); break;
                 case 'evaluate_safe': result=nativeEvaluateSafe(params.query || {}); break;
-                case 'type_many': result=nativeTypeMany(params.fields); break;
+                case 'type_many': result=await nativeTypeMany(params.fields); break;
                 case 'hover': result=nativeHover(await resolveRefHealed(params.ref)); break;
                 case 'right_click': result=nativeRightClick(await resolveRefHealed(params.ref)); break;
                 case 'drag_drop': result=nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef)); break;

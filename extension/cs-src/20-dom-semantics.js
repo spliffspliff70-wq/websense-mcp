@@ -85,8 +85,31 @@
     if (el.getAttribute('alt')) return el.getAttribute('alt').trim();
     const text = fullText(el);
     if (text) return text.slice(0, 100);
-    if (el.value && el.tagName !== 'SELECT') return String(el.value).slice(0, 50);
+    // 2026-09-25 PRIVACY FIX: never surface a password field's value as its
+    // label. This fallback put the live secret into EVERY surface that prints a
+    // label — explore_page actions, read diffs, DELTA diffs, dialog/tab readers
+    // — so a typed password leaked into tool output, the session map, and the
+    // per-action diffs. Passwords are write-only from the agent's side: they
+    // get filled, never echoed back.
+    if (el.value && el.tagName !== 'SELECT' && !isSensitiveValueField(el)) return String(el.value).slice(0, 50);
     return '';
+  }
+  // Single source of truth for "this field's value must never be printed".
+  // Covers type=password plus the two autocomplete spellings apps use for
+  // masked fields and one-time codes.
+  function isSensitiveValueField(el) {
+    if (!el || el.tagName !== 'INPUT') return false;
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'password') return true;
+    const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+    return ac === 'current-password' || ac === 'new-password' || ac === 'one-time-code';
+  }
+  // Value + a "there is something here" flag, with the secret stripped. Readers
+  // that dump every field's value use this so a filled password never comes
+  // back in a tool result.
+  function maskedValue(el) {
+    var v = (el && el.value != null) ? el.value : '';
+    return { value: isSensitiveValueField(el) ? '' : v, hasValue: !!v };
   }
 
   // ═══ Pseudo-element / CSS content text (innerText misses ::before/::after) ═══
@@ -350,7 +373,11 @@
       const formRef = assignRef(form);
       const fields = Array.from(form.querySelectorAll('input,select,textarea')).filter((el)=>el.type!=='hidden').map((input) => {
         const tag = input.tagName.toLowerCase();
-        return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:input.value||'', required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
+        // 2026-09-25 PRIVACY: the forms section echoed every field's value, so
+        // explore_page's form map and form{action:"state"} both printed a
+        // filled password in cleartext. Mask sensitive values here too.
+        const mv = maskedValue(input);
+        return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:mv.value, hasValue:mv.hasValue, required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
       });
       const sb = findSubmitButton(form); const sub = isFormSubmittable(form);
       return { ref:formRef, id:form.id||'', method:(form.method||'get').toLowerCase(), action:form.action||'', fields, submitRef:sb?assignRef(sb):null, submitLabel:sb?getLabel(sb):'', submitEnabled:sb?!sb.disabled&&sub:false, submitDisabledReason:sb?(sb.disabled?detectDisabledReason(sb):(!sub?'required_fields_not_met':null)):null };
@@ -372,7 +399,9 @@
     // Fallback: rebuild for just this form (extractForms may skip hidden forms)
     const fields = Array.from(el.querySelectorAll('input,select,textarea')).filter((i)=>i.type!=='hidden').map((input) => {
       const tag = input.tagName.toLowerCase();
-      return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:input.value||'', required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
+      // 2026-09-25 PRIVACY: same masking as extractForms above.
+      const mv = maskedValue(input);
+      return { ref:assignRef(input), tag, type:input.type||(tag==='select'?'select':tag), name:input.name||'', label:findFieldLabel(input), placeholder:input.placeholder||'', value:mv.value, hasValue:mv.hasValue, required:input.required, valid:input.validity?input.validity.valid:null, error:input.validationMessage||null, checked:input.checked||false, disabled:input.disabled, options:tag==='select'?extractSelectOptions(input):undefined };
     });
     const sb = findSubmitButton(el); const sub = isFormSubmittable(el);
     return { success: true, form: { ref: formRef, id: el.id||'', method:(el.method||'get').toLowerCase(), action:el.action||'', fields, submitRef:sb?assignRef(sb):null, submitLabel:sb?getLabel(sb):'', submitEnabled:sb?!sb.disabled&&sub:false, submitDisabledReason:sb?(sb.disabled?detectDisabledReason(sb):(!sub?'required_fields_not_met':null)):null } };

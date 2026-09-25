@@ -216,26 +216,30 @@ async function handleTabOperation(message) {
       return { success: true, tabId: nid, reused: !!(r4 && r4.reused) };
     }
     case 'extension_reload': {
-      // 2026-09-11: THIS CASE WAS MISSING and is why `extension_reload` never
-      // worked. Only background.js (the SW) had this case, but the hub routes
-      // ops to whichever client is live — and on strict-CSP sites the direct
-      // content-script bridge is dead, so the OFFSCREEN is the client that
-      // receives the request. The message fell through this switch, nothing
-      // happened, and the hub still reported `reloadSent: true` because that
-      // only ever meant "the WS send succeeded".
-      //
-      // chrome.runtime.reload() is available in any extension context, so do it
-      // directly here rather than relaying to the SW: no round-trip, and no
-      // awaiting a worker that dies mid-call. Delay slightly so this response
-      // can flush over the WS before the context tears down.
-      setTimeout(function () { try { chrome.runtime.reload(); } catch (_) {} }, 50);
-      return { success: true, message: 'reloading extension from offscreen in 50ms' };
+      // 2026-09-25: do NOT call chrome.runtime.reload() from here — it is not
+      // available in an offscreen document: the call throws and the old
+      // try/catch swallowed it, so the reload never ran while this case still
+      // replied success (observed twice: reply flushed, client ids unchanged
+      // for 15s). RELAY to the SW, whose handleTabControl case performs the
+      // reload where the API actually exists. Delay 100ms so this WS reply
+      // flushes first — once the extension tears down, the reply is gone.
+      setTimeout(function () { try { sendTabControl('extension_reload', {}); } catch (_) {} }, 100);
+      return { success: true, message: 'extension_reload relayed to the service worker (reload in ~100ms)' };
     }
-    case 'list_frames': { return await sendTabControl('list_frames', {}); }
+    case 'list_frames': { return await sendTabControl('list_frames', { ...(message.tabId ? { tabId: message.tabId } : {}) }); }
     case 'download_state': { return await sendTabControl('download_state', {}); }
     case 'download_op': { return await sendTabControl('download_op', message); }
     case 'cookie_op': { return await sendTabControl('cookie_op', message); }
-    case 'respawn_offscreen': { return await sendTabControl('respawn_offscreen', {}); }
+    case 'respawn_offscreen': {
+      // Reply FIRST, then relay (2026-09-25): awaiting sendTabControl here made
+      // this document die (the SW closes it) before the reply was constructed,
+      // so the hub always reported a false "Extension disconnected" for a
+      // respawn that had actually succeeded (observed 2026-09-25: c11→c12 swap
+      // landed, tool said failure). Delay 50ms so the WS reply flushes; the SW
+      // then closes + recreates the offscreen doc from disk.
+      setTimeout(function () { try { sendTabControl('respawn_offscreen', {}); } catch (_) {} }, 50);
+      return { success: true, message: 'offscreen respawn initiated' };
+    }
     case 'main_world_exec': {
       // MAIN-world insider op (2026-09-01): relay straight to the SW —
       // chrome.scripting.executeScript({world:'MAIN'}) runs a compiled
