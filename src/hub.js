@@ -281,7 +281,17 @@ export class HubServer {
       if (this.contentClient === ws) this.contentClient = null;
       if (this.mainFrameClient === ws) this.mainFrameClient = null;
       if (this.offscreenClient === ws) this.offscreenClient = null;
-      if (ws.tabId) this.contentByTab.delete(ws.tabId);
+      // 2026-09-25: this used to delete the tab's registration UNCONDITIONALLY.
+      // When a superseded/stale content script finally disconnected it wiped the
+      // NEW client's entry for that same tab, and page ops then fell through to
+      // the offscreen (no ref engine, no dialog reader) — measured as
+      // page_state reporting empty dialogs and explore_page returning zero
+      // actions while the correct client was connected and healthy. Only remove
+      // the mapping if it still points at THIS socket.
+      if (ws.tabId) {
+        const mapped = this.contentByTab.get(Number(ws.tabId));
+        if (mapped === ws) this.contentByTab.delete(Number(ws.tabId));
+      }
       this.connected = this.clients.size > 0;
       console.error('[websense] Client disconnected (' + cid + ') — remaining ' + this.clients.size);
       // Reject ONLY the pendings that were routed to THIS client (per-client

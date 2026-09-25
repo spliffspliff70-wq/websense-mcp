@@ -1692,5 +1692,20 @@ test('hub: evicting a stale content client re-points the roles, never nulls them
     'mainFrameClient must be re-pointed at the NEW client');
 });
 
+test('hub: a disconnecting stale client never unregisters the tab\'s NEW client', () => {
+  // 2026-09-25: `if (ws.tabId) this.contentByTab.delete(ws.tabId)` ran on every
+  // close. A superseded content script disconnecting wiped the NEW client's
+  // registration for that tab, so page ops fell through to the offscreen (no ref
+  // engine, no dialog reader) — measured: page_state reported zero dialogs and
+  // explore_page returned zero actions while the healthy client was connected.
+  const H = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
+  assert(!/if \(ws\.tabId\) this\.contentByTab\.delete\(ws\.tabId\);/.test(H),
+    'the unconditional contentByTab.delete on close must be gone');
+  assert(/const mapped = this\.contentByTab\.get\(Number\(ws\.tabId\)\)/.test(H),
+    'the close handler must read the current mapping for the tab');
+  assert(/if \(mapped === ws\) this\.contentByTab\.delete\(Number\(ws\.tabId\)\)/.test(H),
+    'the close handler must only remove the mapping when it still points at THIS socket');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
