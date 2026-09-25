@@ -1441,12 +1441,19 @@ test('docs: README does not advertise capabilities the audit proved absent', () 
   // strength of one measurement, but it was a world-split bug (the isolated-world
   // override is never called by page code). A MAIN-world hook now captures them,
   // so the README must state the working behavior.
-  assert(!/are \*\*not reliably captured\*\*/.test(README),
-    'README must no longer say JS dialogs are not reliably captured — they are, via a MAIN-world hook');
-  assert(/MAIN-world hook shadows the three functions/.test(README),
-    'README must explain how JS dialogs are captured');
-  assert(/recentDialogs/.test(README),
-    'README must document recentDialogs (dialogs that already fired)');
+  // 2026-09-25: the README stated the OLD dialog limitation in "Known limitations"
+  // while the "Dialog handling" section above it documented the FIX. Two sections,
+  // two truths, shipped together. Assert the limitation list cannot contradict the
+  // feature list again.
+  const dialogSection = README.slice(README.indexOf('## Dialog handling'), README.indexOf('## Iframes'));
+  const limitsSection = README.slice(README.indexOf('## Known limitations'), README.indexOf('## v1.4.5'));
+  assert(/are captured/.test(dialogSection) && /MAIN-world hook shadows the three functions/.test(dialogSection),
+    'the Dialog handling section must state that JS dialogs are captured');
+  assert(!/not reliably captured/.test(limitsSection),
+    'Known limitations must not repeat the retired "dialogs are not captured" claim');
+  assert(/auto-dismisses/.test(limitsSection),
+    'the real remaining dialog limitation (hidden tab) must be stated');
+
   assert(!/blocked by strict page CSP/.test(README),
     'README must not scope the evaluate CSP block to "strict sites" only');
   assert(!/Use `evaluate\{query`/i.test(README) || /re-routes/i.test(README),

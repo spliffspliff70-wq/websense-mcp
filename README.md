@@ -108,10 +108,10 @@ Live DOM
 - **Frame-Aware:** targets iframes via `frameId`; no DOM region is unreachable.
 
 ## Known limitations
-- **JS dialogs** (`alert`/`confirm`/`prompt`) are not reliably captured — the page's own
-  `window.alert` bypasses the content-script override. Use DOM `[role=dialog]` modals, or
-  `dialog keystroke:true` for OS-level dialogs. (`dialog action:"accept"|"dismiss"` still
-  handles anything that reaches the queue.)
+- **`dialog` cannot answer a native dialog raised while the tab is hidden** — Chrome auto-dismisses
+  those before the page can be reached. A MAIN-world hook records them either way
+  (`status.recentDialogs`), so you can see that one fired, but the answer comes from the hook's
+  auto-resolution rather than from you. Activate the tab first if the answer matters.
 - **`evaluate` script mode** runs your JS and returns its value. The isolated-world path
   (`new Function`) is blocked by the **extension's own MV3 CSP**, so it transparently re-routes
   through the MAIN world (`chrome.userScripts`, no eval) and reports `via:"main_world"`. This
