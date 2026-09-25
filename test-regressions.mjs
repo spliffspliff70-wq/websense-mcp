@@ -1766,5 +1766,107 @@ test('consolidation: no op has TWO implementations (one per transport dispatcher
     'network_log must not answer "not available from content bridge" on any path');
 });
 
+test('background-only: no page op can activate, focus, or raise a window', () => {
+  // Ali's standing directive (2026-09-13): "please stop stealing focus work in
+  // background", restated 2026-09-25 as "make sure additionally that websense
+  // remains a background tool". Page ops travel by tabId over
+  // chrome.tabs.sendMessage and MUST NOT activate anything. Three tools are the
+  // ONLY sanctioned exceptions and they are OS-input by design: real_activate_tab,
+  // real_click, real_paste.
+  //
+  // This guard scans the source for the activation side-effects that would break
+  // that contract. It exists because the failure is invisible: a page op that
+  // activates still SUCCEEDS, it just steals the user's cursor mid-task.
+  const src = SRV_SRC;
+  const FORBIDDEN_IN_HANDLERS = [
+    /active:\s*true/,                       // any handler forcing activation
+    /windows\.update\(/,                     // raising a Chrome window
+    /chrome\.windows\.update/,
+    // An actual CALL to the window-raiser — not the op NAME appearing in a SW
+    // op-list or in an OS tool's own description, both of which are legitimate.
+    /type:\s*'focus_window'|\.focusWindow\(|send\(\s*\{\s*type:\s*'focus_window'/,
+  ];
+  // The three OS-input tools are allowed to own focus. Isolate them.
+  const osToolZones = ['real_activate_tab', 'real_click', 'real_paste']
+    .map((n) => {
+      const i = src.indexOf("reg(server, '" + n + "'");
+      if (i === -1) return null;
+      const j = src.indexOf("reg(server, '", i + 10);
+      return src.slice(i, j === -1 ? src.length : j);
+    })
+    .filter(Boolean);
+  const osZoneText = osToolZones.join('\n');
+  const pageOpText = src.split(osZoneText).join(' '); // everything that is NOT an OS tool
+
+  for (const re of FORBIDDEN_IN_HANDLERS) {
+    // tabs{action:"focus"} is the ONE sanctioned foreground action outside the
+    // three OS tools. It is removed from the scan only where it is DISCLOSED as
+    // OS-LEVEL (the schema action list) or where it is the sanctioned case label;
+    // every other occurrence still fails the guard.
+    const scrubbed = pageOpText
+      .replace(/case 'focus':[^\n]*/g, '')
+      .replace(/action:"focus"[^\n]*OS-LEVEL[^\n]*/g, '');
+    const m = scrubbed.match(re);
+    assert(!m,
+      'a page op must not activate/raise a window (found ' + m + ') — page ops are background-only; '
+      + 'real_activate_tab / real_click / real_paste are the only sanctioned focus tools');
+  }
+  // The sanctioned exceptions must be DISCLOSED, not silent — a model reading the
+  // tabs schema must not find an unlabelled window-raiser among page ops. Match
+  // the DETAILED entry for each action (`"move" (tabId,windowId — OS-LEVEL`), not
+  // the summary near the front, which groups them as "focus"/"move".
+  assert(/"focus" \(windowId[^)]*OS-LEVEL/.test(src),
+    'tabs action:"focus" raises a window and must be labelled OS-LEVEL in its own entry');
+  assert(/"move" \(tabId,windowId[^)]*OS-LEVEL/.test(src),
+    'tabs action:"move" can change which window is frontmost and must be labelled OS-LEVEL in its own entry');
+  // tabs{bind} must document that it does NOT need activation.
+  assert(/bind[^\n]{0,400}(without|WITHOUT)[^\n]{0,80}focus/i.test(src) || /route page ops to a tab WITHOUT focus/i.test(src),
+    'tabs bind must still advertise that it routes page ops WITHOUT focusing');
+});
+
+test('hub: a pong carrying a request id is a RESULT, not a swallowed keep-alive', () => {
+  // 2026-09-25, measured on github.com via the relay. The hub dropped every
+  // message with type 'pong', assuming a bare pong is only a keep-alive. But the
+  // content script answers `ping` with an envelope whose type IS 'pong' (the
+  // <op>_result naming for op='ping'), and it carries the request id — so the
+  // reply was discarded and the caller waited the full 30s timeout. Measured
+  // 30,011 / 30,033 / 30,012 ms (3/3) while every other relay op answered in
+  // <=15ms. A keep-alive has no id; a result always does.
+  const s = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
+  assert(/msg\.type === 'pong' && msg\.id == null/.test(s),
+    "the pong keep-alive filter must be gated on the ABSENCE of a request id, or `ping` times out for 30s on the relay");
+  assert(!/if \(msg\.type === 'pong'\) return;/.test(s),
+    "a bare `if (msg.type === 'pong') return;` swallows the ping RESULT envelope");
+});
+
+test('background-only: the ONE automatic foreground case is disclosed, not silent', () => {
+  // Ali, 2026-09-25, verbatim: "keep the auto-restore, but say so in the tool
+  // docs + report when it fires". A minimized Chrome window has a 0x0 viewport,
+  // so every page read returns empty and no background work can proceed; the
+  // offscreen therefore restores that window to 'normal' before relaying. Kept
+  // deliberately — but it must (a) be the ONLY such case, (b) report itself, and
+  // (c) be documented in the guide agents actually read.
+  const off = readFileSync(new URL('./extension/offscreen.js', import.meta.url), 'utf8');
+  assert(/windowWasRestored = true/.test(off),
+    'the auto-restore must set the flag it reports');
+  assert(/out\.windowRestored = true/.test(off),
+    'a page op that restored the window must REPORT it (windowRestored:true), not pop the window silently');
+  assert(/WebSense restored it to read the page/.test(off),
+    'the report must explain WHY the window came to the front');
+  // it must only fire for minimized/collapsed, never for an occluded window
+  const m = /win\.state === 'minimized' \|\| win\.state === 'collapsed'/.test(off);
+  assert(m, 'the auto-restore must be gated on minimized/collapsed only');
+  // and the guide must state the complete foreground list
+  const s = SRV_SRC;
+  assert(/WHAT TOUCHES THE FOREGROUND/.test(s),
+    'the guide must enumerate what takes the foreground');
+  assert(/windowRestored:true/.test(s) && /MINIMIZED or COLLAPSED/.test(s),
+    'the guide must disclose the automatic minimized-window restore');
+  assert(/never uploads; the working route is real_paste/.test(s),
+    'the guide must say that attaching a real file to a composer needs the foreground');
+  assert(/Native file dialogs[\s\S]{0,120}need the foreground/.test(s),
+    'the guide must say native file dialogs have no background path');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

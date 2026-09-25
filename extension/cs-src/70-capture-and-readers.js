@@ -276,14 +276,14 @@
         case 'copy_to_clipboard': result=nativeCopyToClipboard(params.text); break;
         case 'upload_file': result = await doUploadFile(params); break;case 'network_log': if (!networkCapturing) startNetworkCapture(); result=getNetworkLog(params.clear !== false, params.maxEntries || 50); break;
         case 'console_log': if (!consoleCapturing) startConsoleCapture(); result=getConsoleLog(params.clear !== false, params.maxEntries || 100); break;
-        case 'dropdown_options': result=getDropdownOptions(params.ref); break;
+        case 'dropdown_options': result=readDropdownOptions(params.ref); break;
         case 'tab_contents': result=getTabContents(params.ref); break;
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
-        case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
+        case 'form_state': result = getFormState(params.formRef, params.frameId); break;
         case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'__CS_BUILD__',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
-        case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
-        case 'read_content': result = readContent(params); break;
+        case 'extract_text': result = readTextWindow(params.selector || 'body', params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000), params.offset||0); break;
+      case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;
         case 'resolve_ref': {
           const el = resolveRef(params.ref);

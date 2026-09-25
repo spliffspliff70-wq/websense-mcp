@@ -157,7 +157,17 @@ export class HubServer {
         else if (ws.clientSource === 'offscreen') this.offscreenClient = ws;
         return;
       }
-      if (msg.type === 'pong') return;
+      // 2026-09-25 FIX (measured, 3/3 reproducible). The offscreen INTERCEPTS the
+      // `ping` op and answers it itself with a bare keep-alive-shaped reply:
+      //   offscreen.js: if (msg.type === 'ping') { send({ type: 'pong', id: msg.id }); return; }
+      // This filter dropped every message with type 'pong' — including that one,
+      // which CARRIES the request id — so the reply was discarded and the caller
+      // waited the full 30s timeout. Measured on github.com via the relay:
+      // 30,011 / 30,033 / 30,012 ms, while every other relay op answered in <=15ms.
+      // The content script's own `ping` case in 70-capture is therefore never
+      // reached on the relay; only the direct-WS path uses it.
+      // A bare keep-alive has no id; a result always does. Gate on the id.
+      if (msg.type === 'pong' && msg.id == null) return;
       if (msg.type === 'tab_identified') {
         // Content script tells us which tab it lives in. Track main-frame
         // scripts per tab so page ops can route directly.

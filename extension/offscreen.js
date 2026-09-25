@@ -95,11 +95,22 @@ async function dispatchToContent(message) {
   // yields a 0x0 viewport — every page read returns empty (PITFALL 31) and the
   // external Python helper was the only recovery. Now the SW restores the
   // window before relaying the page op so reads work without user intervention.
+  //
+  // 2026-09-25 (Ali, verbatim: "keep the auto-restore, but say so in the tool
+  // docs + report when it fires"). This is the ONE place a background page op
+  // touches the OS window, and it is kept deliberately: a minimized window has a
+  // 0x0 viewport, so every read comes back empty and no amount of background
+  // work can proceed. It only fires when the window is already minimized or
+  // collapsed — it never raises a window that is merely occluded or in the
+  // background — and the fact that it fired is now REPORTED to the caller rather
+  // than happening silently, so a user whose window pops up learns WHY.
+  var windowWasRestored = false;
   if (tabInfo && tabInfo.windowId != null) {
     try {
       var win = await chrome.windows.get(tabInfo.windowId);
       if (win && (win.state === 'minimized' || win.state === 'collapsed')) {
         await chrome.windows.update(tabInfo.windowId, { state: 'normal' });
+        windowWasRestored = true;
       }
     } catch (_) { /* window query can fail on some pages — non-fatal */ }
   }
@@ -110,7 +121,17 @@ async function dispatchToContent(message) {
       payload: message,
       targetTabId: tabId,
     }).then(function(response) {
-      resolve(response || { error: 'No response from content script' });
+      var out = response || { error: 'No response from content script' };
+      // 2026-09-25 (Ali: "say so in the tool docs + report when it fires"). If this
+      // page op had to un-minimize the window to get a non-0x0 viewport, SAY SO in
+      // the result rather than letting the window pop up with no explanation.
+      if (windowWasRestored && out && typeof out === 'object' && !out.error) {
+        out.windowRestored = true;
+        out.note = (out.note ? out.note + ' ' : '') +
+          'This window was MINIMIZED, so its viewport was 0x0 and every read came back empty. ' +
+          'WebSense restored it to read the page — that is why it came to the front.';
+      }
+      resolve(out);
     }).catch(function(err) {
       resolve({ error: err instanceof Error ? err.message : String(err) });
     });
@@ -373,7 +394,13 @@ function connect() {
     var msg;
     try { msg = JSON.parse(event.data); } catch (_) { return; }
     if (msg.type === 'ready') return;
-    if (msg.type === 'ping') { send({ type: 'pong', id: msg.id }); return; }
+    // 2026-09-25: this reply is the ANSWER to a `ping` op, not a keep-alive. It
+  // carries the request id, so the hub correlates it (the hub's bare-pong filter
+  // is gated on the ABSENCE of an id). It previously sent only {type,id} — no
+  // `success` and no `data` — so the hub settled it as a FAILURE and the caller
+  // got "Unknown error" instead of a pong. Measured: relay ping went from a
+  // 30s timeout, to 2-24ms but failing, to a correct pong with this shape.
+  if (msg.type === 'ping') { send({ type: 'pong', id: msg.id, success: true, data: { pong: true, url: (typeof location !== 'undefined' ? location.href : '') } }); return; }
     processMessage(msg);
   });
 

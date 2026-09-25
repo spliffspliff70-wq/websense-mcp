@@ -378,6 +378,20 @@
     } catch (e) { return { success: false, error: e.message }; }
   }
 
+  // 2026-09-25 CONSOLIDATION: extracted verbatim from the direct-WS switch so
+  // the relay switch calls the same function. The two copies were byte-identical
+  // apart from the local variable name, so this changes no behaviour — it just
+  // removes the second place a fix could land.
+  function readTextWindow(sel, ml, off) {
+    const el = document.querySelector(sel);
+    const txt = el ? fullText(el) : '';
+    let out = el ? txt.slice(off, off + ml) : 'Element not found for selector: ' + sel;
+    if (off + ml < txt.length) out += '\n...[TRUNCATED — call extract_text again with offset=' + (off + ml) + ' for the next window]';
+    return { text: out };
+  }
+
+  function readDropdownOptions(ref) { return getDropdownOptions(ref); }
+
   async function wsDispatchPage(msg) {
     var params = msg;
     switch (msg.type) {
@@ -424,11 +438,11 @@
       // Pass the RAW ref — these readers resolve internally (70-capture).
       // Pre-resolving here made them re-resolve an Element via the string-keyed
       // ref map → always null → "Element not found" on this direct-WS path.
-      case 'dropdown_options': return getDropdownOptions(params.ref);
+      case 'dropdown_options': return readDropdownOptions(params.ref);
       case 'tab_contents': return getTabContents(params.ref);
       case 'accordion_contents': return getAccordionContents(params.ref);
       case 'page_state': return getPageState(params.frameId);
-      case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; var et=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; et+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; return { text: et }; }
+      case 'extract_text': return readTextWindow(params.selector || 'body', params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000), params.offset||0);
       case 'read_content': return readContent(params);
       case 'dump_markdown': return nativeDumpMarkdown(params);
       case 'resolve_ref': {
