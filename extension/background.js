@@ -499,16 +499,43 @@ async function handleTabControl(action, payload) {
       // BACKGROUND-TAB FALLBACK (2026-08-31, OSS 24-tool sweep): captureVisibleTab
       // only captures the VISIBLE tab — on a background/bound tab it fails with
       // "image readback failed". Fall back to chrome.debugger Page.captureScreenshot
-      // on the BOUND tab (same transport the ax tool already uses; brief debugging
+      // on the target tab (same transport the ax tool already uses; brief debugging
       // infobar appears). Now a background tab screenshots fine.
       const fmt = (payload.format === 'jpeg' || payload.format === 'jpg') ? 'jpeg' : 'png';
+      // 2026-09-25: captureVisibleTab has NO tab argument — it always grabs the
+      // OS-ACTIVE tab. So when the caller asked for a SPECIFIC tab, the visible
+      // path silently returned a DIFFERENT tab's screen while reporting success
+      // (measured: screenshot{tabId:github-tab} returned pixel-identical output to
+      // screenshot{} while an unrelated tab was active). That is a correctness AND
+      // privacy problem — another tab's content can land in a vision call. When a
+      // tabId is given and it is not the active tab, go straight to the debugger
+      // path instead of trying the visible capture.
+      const wantTabId = payload.tabId ? parseInt(payload.tabId, 10)
+        : (typeof boundTabId === 'number' ? boundTabId : null);
+      let activeId = null;
+      try { const at = await getActiveTab(); activeId = at ? at.id : null; } catch (_) {}
+      if (wantTabId && activeId !== wantTabId) {
+        try {
+          const target = { tabId: wantTabId };
+          try { await chrome.debugger.attach(target, '1.3'); } catch (_) { /* already attached is fine */ }
+          try {
+            const res = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: fmt, quality: fmt === 'jpeg' ? (payload.quality || 80) : undefined });
+            return { success: true, dataUrl: 'data:image/' + fmt + ';base64,' + res.data, mime: 'image/' + fmt, mode: 'debugger-fallback', tabId: wantTabId, note: 'target tab is not the OS-active tab; captured via chrome.debugger (no activation, no focus change)' };
+          } finally {
+            try { await chrome.debugger.detach(target); } catch (_) {}
+          }
+        } catch (dbgErr) {
+          return { error: 'screenshot failed for tab ' + wantTabId + ' (not the active tab; debugger capture: ' + (dbgErr.message || dbgErr) + ')' };
+        }
+      }
       try {
         const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: fmt, quality: payload.quality || 80 });
-        return { success: true, dataUrl: dataUrl, mime: 'image/' + fmt, mode: 'visible' };
+        return { success: true, dataUrl: dataUrl, mime: 'image/' + fmt, mode: 'visible', tabId: activeId };
       } catch (visibleErr) {
-        // Bound tab is backgrounded (or capture refused) — debugger fallback.
+        // No specific tab requested (or it IS the active one) and the visible
+        // capture failed — debugger fallback on the bound tab.
         try {
-          const tabId = (typeof boundTabId === 'number') ? boundTabId : (payload.tabId ? parseInt(payload.tabId, 10) : null);
+          const tabId = wantTabId;
           if (!tabId) return { error: 'captureVisibleTab failed: ' + (visibleErr.message || visibleErr) + ' — and no bound tab for debugger fallback' };
           const target = { tabId };
           try { await chrome.debugger.attach(target, '1.3'); } catch (_) { /* already attached is fine */ }

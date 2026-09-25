@@ -110,9 +110,11 @@ Live DOM
   `window.alert` bypasses the content-script override. Use DOM `[role=dialog]` modals, or
   `dialog keystroke:true` for OS-level dialogs. (`dialog action:"accept"|"dismiss"` still
   handles anything that reaches the queue.)
-- **`evaluate` script mode** uses `new Function` (eval) and is blocked by the **extension's own
-  MV3 CSP on every page** — not only strict sites. Use `evaluate{query:{…}}` (no-eval reads) or
-  `main_world{func}` for arbitrary JS.
+- **`evaluate` script mode** runs your JS and returns its value. The isolated-world path
+  (`new Function`) is blocked by the **extension's own MV3 CSP**, so it transparently re-routes
+  through the MAIN world (`chrome.userScripts`, no eval) and reports `via:"main_world"`. This
+  works on every page — it is not a strict-site limitation. `evaluate{query:{…}}` is still the
+  lighter path for plain DOM reads.
 - **Refs drift:** `E#` refs renumber on every full `explore_page` (viewport order) and can rot
   across re-renders; healing is op-inconsistent. Prefer CSS-selector refs (`#id`) for anything
   long-lived, and re-explore after a re-render.

@@ -645,7 +645,7 @@ THE 31 TOOLS — what each absorbed from the old 65-tool surface:
   tabs             action:"list" | "switch" | "close" | "bind" (no focus) | "windows" | "focus" | "move" | "transfer" (cross-tab copy/paste) | "switchread"
   status           kind:"page" (page_state) | "bridge" (get_status) | "doctor" (diagnostics) | "downloads"
   wait             poll until conditions met (urlContains/hasModal/hasCaptcha/notLoading/pendingDialogsGt/selector/script/timeoutMs/pollMs) — old wait_for; or event:"dialog_open|navigation|network|..." — old wait_for_event
-  evaluate         script:<js> runs in the ISOLATED world via new Function, which the extension's own MV3 CSP blocks on EVERY page (not just "strict sites") — treat script mode as unavailable and use query mode. query:{selector,extract,all,inputs,text,state} is the CSP-proof no-eval read path (old evaluate_safe). Password/OTP values are always masked (value:"" + hasValue) on every read surface.
+  evaluate         script:<js> runs and RETURNS ITS VALUE. The isolated-world path uses new Function, which the extension's own MV3 CSP blocks — so on a CSP block it transparently re-routes through the MAIN world (chrome.userScripts, no eval) and reports via:"main_world". Works on every page. query:{selector,extract,all,inputs,text,state} is the no-eval read path (preferred for plain reads). Password/OTP values are always masked.
   ax               native accessibility tree via chrome.debugger (Chrome's EXTENSION API — ALLOWED, unlike a CDP debug port): action:"state"|"read"|"click"|"type" + tabId (+ match/role/name). For canvas SPAs & chrome:// pages
   screenshot       captureVisibleTab → PNG/JPEG dataUrl for a vision model
   press_key        key + modifiers ["ctrl","shift","alt","meta"], optional ref target. SYNTHETIC KeyboardEvents only — it does NOT perform default browser actions: ctrl+a does not select, letter keys do not insert text. It fires page JS key handlers and nothing else. Use type_text for text entry.
@@ -1269,9 +1269,10 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 12. EVALUATE ═══
   reg(server, 'evaluate', {
-    description: 'Run JS on the page (extension isolated world, async-aware) — OR CSP-proof no-eval reads via query:{selector,extract:"value|text|attrs|html",all,inputs,text,state}. evaluate is eval-based: blocked on strict-CSP pages (LinkedIn, HN) — use query mode there. PRINCIPLE 5: verify what the page actually accepted.',
+    description: 'Run JS on the page, or do a CSP-proof no-eval DOM read. script:<js> runs and RETURNS A VALUE; on strict-CSP pages (and by default in MV3) it transparently re-routes through the MAIN world (chrome.userScripts) and reports via:"main_world". query:{selector,extract:"value|text|attrs|html",all,inputs,text,state} is the no-eval read path. Password/OTP values are always masked. PRINCIPLE 5: verify what the page actually accepted.',
     inputSchema: {
-      script: z.string().optional().describe('JS to execute (eval mode)'),
+      script: z.string().optional().describe('JS to execute. A bare expression or statements both work; the value of the final expression is returned.'),
+      tabId: z.number().optional().describe('Target tab (default: your session-bound tab)'),
       query: z.object({
         selector: z.string().optional(),
         extract: z.enum(['value', 'text', 'attrs', 'html']).optional(),
@@ -1284,7 +1285,63 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     },
   }, async (o) => {
     if (o.query) return textResult(await getActiveHub().send({ type: 'evaluate_safe', query: o.query }));
-    return textResult(await getActiveHub().send({ type: 'evaluate', script: o.script }));
+    const r = await getActiveHub().send({ type: 'evaluate', script: o.script });
+    // 2026-09-25: script mode's isolated-world path uses new Function, which the
+    // extension's OWN MV3 CSP blocks (script-src 'self' 'wasm-unsafe-eval') — so
+    // it was dead on EVERY page, not just "strict sites". That was never an
+    // architectural limit: chrome.userScripts.execute — the engine main_world
+    // already uses — injects raw code into the MAIN world and needs no eval, and
+    // the page's own CSP does not apply. So a CSP-blocked script now FALLS BACK
+    // to that route instead of dead-ending, and the result says so. If the relay
+    // is unavailable the original honest error is returned unchanged.
+    //
+    // NORMALIZE FIRST: on the relay path the payload can arrive as a JSON STRING
+    // (textResult passes strings through verbatim). Measuring the CSP fields on
+    // a string finds nothing, so cspBlocked evaluated false and the dead-end was
+    // returned — which is why this branch looked unreachable.
+    let rr = r;
+    if (typeof rr === 'string') { try { rr = JSON.parse(rr); } catch (_) { /* keep the string */ } }
+    const box = (rr && typeof rr === 'object' && rr.data && typeof rr.data === 'object') ? rr.data : (rr || {});
+    const cspBlocked = box.cspBlocked === true
+      || /CSP blocked|unsafe-eval|Content Security Policy/i.test(String(box.error || (typeof rr === 'string' ? rr : '')));
+    if (!cspBlocked) return textResult(r);
+    const tabId = o.tabId || sessionTabOf() || server?._wsBoundTabId || null;
+    if (!tabId) {
+      return textResult({ success: false, error: 'script mode: isolated-world eval is CSP-blocked and no target tab is bound (pass tabId, or tabs{action:"bind"} first)', cspBlocked: true });
+    }
+    try {
+      // Wrap the caller's script as an expression-bodied function so arbitrary
+      // statements/expressions both work, exactly like main_world{func}.
+      //
+      // NOT async: the SW serializes with JSON.stringify, and an async function
+      // returns a PROMISE, which stringifies to {} — measured: the async wrapper
+      // came back as result:{} instead of 2 (2026-09-25). A sync function whose
+      // body is an expression returns the value correctly.
+      const viaMain = await getActiveHub().send({
+        type: 'main_world_exec',
+        tabId,
+        func: '() => { return (' + String(o.script || 'null') + '); }',
+        args: [],
+        allFrames: false,
+      });
+      const mbox = (viaMain && typeof viaMain === 'object' && viaMain.data && typeof viaMain.data === 'object') ? viaMain.data : (viaMain || {});
+      const results = Array.isArray(mbox.results) ? mbox.results : null;
+      if (results && results.length) {
+        const first = results[0] || {};
+        if (first.error) return textResult(r); // real script error → don't mask it
+        return textResult({ success: true, result: (first.result === undefined ? null : first.result), via: 'main_world', note: 'script mode ran in the page MAIN world (chrome.userScripts) because the isolated-world eval path is CSP-blocked by the extension policy', frameId: first.frameId });
+      }
+      // Relay answered but not in the shape we expect — say so instead of
+      // silently returning the CSP error, which reads as "this is impossible".
+      return textResult({ ...(typeof r === 'object' && r ? r : {}), success: false,
+        error: 'script mode: isolated-world eval is CSP-blocked and the MAIN-world fallback returned no result',
+        mainWorldFallback: mbox, originalError: box.error });
+    } catch (fallbackErr) {
+      return textResult({ ...(typeof r === 'object' && r ? r : {}), success: false,
+        error: 'script mode: isolated-world eval is CSP-blocked; MAIN-world fallback failed — ' + String((fallbackErr && fallbackErr.message) || fallbackErr),
+        originalError: box.error });
+    }
+    return textResult(r);
   });
 
   // ═══ 13. AX BRIDGE ═══

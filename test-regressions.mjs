@@ -1396,7 +1396,16 @@ test('guide: the shipped guide must not teach the measured-false doctrines (2026
   assert(!/On suspected_noop do NOT retry blind — escalate/.test(SRV_SRC),
     'the guide must not tell agents to jump to OS-level input on suspected_noop');
   assert(!/CSP-blocked on strict sites\)/.test(SRV_SRC),
-    'evaluate script mode is blocked on EVERY page (extension CSP), not only strict sites');
+    'evaluate script mode is not a strict-site limitation (it falls back to the MAIN world)');
+  // 2026-09-25: script mode USED to be declared dead on every page. It is not —
+  // it falls back to chrome.userScripts, so the guide must not tell agents to
+  // avoid it.
+  assert(!/treat script mode as unavailable/.test(SRV_SRC),
+    'the guide must not tell agents evaluate script mode is unavailable — it works via the MAIN world');
+  assert(/re-routes through the MAIN world/.test(SRV_SRC),
+    'the guide must state that script mode re-routes through the MAIN world');
+  assert(/main_world_exec/.test(SRV_SRC),
+    'the evaluate handler must implement the MAIN-world fallback');
   assert(!/JS dialogs: action:"accept"/.test(SRV_SRC),
     'the guide must not present JS dialog capture as a working surface');
   assert(/SYNTHETIC KeyboardEvents only/.test(SRV_SRC),
@@ -1425,9 +1434,11 @@ test('docs: README does not advertise capabilities the audit proved absent', () 
   assert(/not reliably captured/.test(README),
     'README must state JS dialogs are not a reliable surface');
   assert(!/blocked by strict page CSP/.test(README),
-    'README must not scope the evaluate CSP block to "strict sites" only — it is every page');
-  assert(/on \*every\* page/.test(README),
-    'README must state the evaluate script-mode CSP block applies to every page');
+    'README must not scope the evaluate CSP block to "strict sites" only');
+  assert(!/Use `evaluate\{query`/i.test(README) || /re-routes/i.test(README),
+    'README must not tell users to avoid evaluate script mode — it works via the MAIN world');
+  assert(/re-routes\s+through the MAIN world/.test(README),
+    'README must state that evaluate script mode re-routes through the MAIN world');
   assert(!/returns every frame in the active tab/.test(README),
     'tabs frames is target-scoped (tabId), not active-tab-only');
   assert(/Refs drift/.test(README) && /CSS-selector refs/.test(README),
