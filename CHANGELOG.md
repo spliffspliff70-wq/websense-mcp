@@ -5,212 +5,37 @@ Format based on [Keep a Changelog](https://keepachangelog.com/), versioning foll
 
 ## [1.4.7] — 2026-09-25
 
-Two of the documented "Known limitations" were not limitations at all. Both are
-fixed, and the measurements are in the guide so nobody re-adds the caveat.
+- Session state (map/history) is per-session: `session{action:"reset"}` no longer wipes other jobs.
+- The "E# refs renumber" caveat was measured false and retired; the guide states the measured stability.
+- Hub: evicting a stale content-script client re-points the client roles instead of clearing them,
+  which stopped `explore_page` from intermittently returning zero actions.
 
-### Session state is per-session (it was a process-wide singleton)
-
-`session{action:"reset"}` wiped **every** job's exploration history, and one
-job's steps showed up in another job's `session map` — documented as a
-limitation ("this map is GLOBAL to the hub"). It was a singleton *by accident*:
-`const session = new SessionManager()` at module scope.
-
-The server already runs every request inside `sessionCtx` (added earlier for tab
-isolation), and each MCP session owns its own `McpServer` object, so the manager
-is now resolved per session through that context and keyed in a `WeakMap`. The 25
-call sites read `getSession()` instead of a free variable, so state is isolated
-and collectable.
-
-Verified live with two concurrent MCP sessions: session A did its own work,
-`session{action:"reset"}` took it from 1 step to 0, and session B's history was
-**unchanged at 1 step**.
-
-### `E#` refs are stable — the drift caveat was measured false
-
-The guide said refs "RENUMBER on every full `explore_page`" and "rot across
-re-renders", with op-inconsistent healing. Measured on 2026-09-25:
-
-| Case | Result |
-|---|---|
-| Two full `explore_page` calls | **41/41 refs pointed at the same elements** |
-| After a scroll | **0 changed** |
-| After a framework re-render | **0 changed** |
-| Node fully replaced (same label, no id, no class) | stale ref **healed onto the new node** — the click landed on the replacement (`freshClicked: 999`) |
-
-`assignRef()` caches per element and writes a `data-websense-ref` attribute, so a
-ref is held by element identity, not by scan position. The guide, the README and
-two regression tests now state the measured stability. A ref still dies if its
-element leaves the DOM with nothing to heal from — that part was always true.
-
-Also fixed: a duplicate content-script client for one tab could evict its own
-successor mid-call, which surfaced as `explore_page` alternating between a full
-result and zero actions.
 
 ## [1.4.6] — 2026-09-25
 
-JS dialogs are now visible, `evaluate{script}` handles async, and CI is green
-again.
+- JS dialogs: the page's own `alert`/`confirm`/`prompt` are captured by a MAIN-world hook and are
+  answerable; `status` gained `recentDialogs` for dialogs that already fired.
+- `evaluate{script}`: async-capable (a Promise resolves in the page), statement blocks return their
+  last expression, and a real script error is reported as itself.
+- Routing: `main_world_exec` is no longer treated as tab-management, so it receives the session's
+  bound tab.
+- CI: fixed the CRLF bugs that failed every push (no `.gitattributes`, a CRLF-hardcoded builder, and
+  two line-ending-sensitive tests).
 
-### JS dialogs — the page's own `alert`/`confirm`/`prompt` are now captured
-
-The content script overrode `window.alert/confirm/prompt` in its **isolated**
-world. Page code runs in the **main** world and never touched those copies, so a
-page's own dialog was invisible: `status` reported `pendingDialogs: []` while a
-`confirm()` was blocking the page — and in a background tab Chrome silently
-auto-dismissed the native dialog, so the page just continued. That is a
-**silent-wrong-outcome** class, not a missing feature: an agent could report a
-destructive step as successful when the user would have been asked about it.
-
-A MAIN-world hook (`extension/dialog-hook.js`, registered the same way as the
-console and network hooks) now shadows the three functions and publishes them to
-a DOM attribute the content script reads. `dialog action:"accept"|"dismiss"`
-resolves them, and the answer really reaches the page:
-
-- `confirm` → the page's promise resolves `true` (accept) or `false` (dismiss)
-- `prompt` → the page's promise resolves the supplied value
-- `alert` → recorded in `status.recentDialogs` with its message
-
-`status` gained `recentDialogs`: dialogs that already fired, including ones that
-were auto-answered. `alert()` is synchronous, so the page continues the instant
-it is raised — the agent needs to know it *happened*, not that it is waiting.
-Confirm/prompt still auto-answer after 30s so the page can never wedge.
-
-### `evaluate{script}` — async, statements, and honest errors
-
-The script-mode fallback to the MAIN world works end to end:
-
-- **async scripts** now resolve in the page and are read back, so
-  `new Promise(r => setTimeout(() => r("OK"), 250))` returns `"OK"`. Previously
-  a promise serialized to `{}` and you had to hand-roll polling.
-- **statement blocks** return their last expression's value (`var x = 7; x * 6`
-  → `42`).
-- **real script errors** are reported as themselves (`script threw: Cannot read
-  properties of null`) instead of being masked by the CSP error.
-
-Also fixed on the way: `main_world_exec` was listed among the tab-management ops,
-so it was never stamped with the session's bound tab and the fallback died with
-`main_world_exec: tabId required`.
-
-### CI — the repo had been failing on every push since 07:00
-
-There was no `.gitattributes` and the Windows checkout ran with
-`core.autocrlf=true`, so a fresh Linux checkout produced LF while the committed
-artifact was CRLF. The "artifact is in sync with a fresh build" guard therefore
-failed in CI (126 passed, 2 failed) while passing locally. Added `.gitattributes`
-pinning the generated artifact and its sources to LF, and made
-`tools/export-guide.mjs` normalize line endings before comparing (the mirror was
-stale in CI for the same reason). Verified in a clean LF-only clone before
-pushing.
 
 ## [1.4.5] — 2026-09-25
 
-A full 31-tool live audit against a controlled workbench (60+ verdicts, every
-failure root-caused in source) turned up twelve real defects — including three
-where the shipped **guide and the regression suite itself taught the wrong
-thing**. All twelve are fixed here, each one verified live before the next.
+Full 31-tool live audit; twelve defects fixed, each verified before the next.
+- Truth: the action `effect` verdict no longer reads `unverifiable` for every relayed action;
+  OS-input escalation is gated on a measured no-op; `mutated:false` no longer claims an action failed.
+- Now working (previously never did): `network_log` captures page traffic, `wait{selector}` succeeds,
+  `reveal kind:"dropdown"` resolves, `status kind:"doctor"` reports a live service worker,
+  `navigate`/`tabs frames` honor `tabId`, batch `type_text` counts are honest, `extension_reload`
+  really reloads, `respawn_offscreen` stops reporting false failures.
+- Privacy: password/OTP values are masked on every surface that can echo them.
+- Docs: the in-tool guide and README state the measured behavior; `MODEL_PROMPT.md` is generated
+  from the guide with a test that fails on drift.
 
-> The audit's working documents (the code map, the per-tool verdict table, the
-> guide cross-check) are intentionally **not** published. They describe the
-> pre-1.4.5 code as current, which would mislead anyone reading them after this
-> release, and they carried local detail (home paths, live tab IDs, the
-> operator's own tab titles) that has no business in a public repo. The
-> CHANGELOG entry below is the durable record; the CHANGES themselves and their
-> regression tests are the proof.
-
-### The wrong-truth class (the expensive ones)
-
-- **`effect` was `unverifiable` for every relayed action.** `classifyEffect` read
-  `beforeState`/`afterState` off the top-level result, but the relay wraps
-  payloads as `{type,id,success,data:{…}}` — so the states were never found and
-  the verdict was always "could not measure". A mutating click now reports
-  `confirmed`, a genuinely inert one reports `suspected_noop`.
-- **The false-escalation trap.** Any non-`confirmed` verdict (including
-  "unverifiable") told the agent to escalate to a real OS-level click. Every
-  async handler, download, `_blank` open and focus-only click landed while the
-  verdict said "retry with OS input" — the focus-steal loop. OS input is now
-  recommended only for a *measured* no-op; unverifiable recommends re-reading
-  the page.
-- **`mutated:false` no longer claims the action failed.** The diff fingerprints
-  interactive elements only, so text changes elsewhere, handlers that settle
-  after the diff, focus-only clicks, downloads and new-tab opens all report
-  `mutated:false` while genuinely landing. The hint now states what it measured
-  and points at a real read. A regression test that *required* the old
-  "NOT LANDED" wording was itself pinning the false claim.
-
-### Functionality that never worked
-
-- **`network_log` captured nothing.** The fetch/XHR hooks patched the isolated
-  world, which page code never touches — 4 runs, 0 entries, while oracles proved
-  traffic. A new `network-hook.js` registers in the MAIN world (exactly as
-  `console-hook.js` already did) and the reader merges both logs: live, 2/2 real
-  page requests captured. `totalCaptured` is now read before clearing, so a
-  `clear:true` call no longer reports a permanent zero.
-- **`wait{selector}` could never succeed.** The branch sent an *eval* probe,
-  expected it CSP-blocked, and only then sent the no-eval safe-query form. The
-  extension's own MV3 CSP blocks the probe on every page, so the fallback was
-  never sent — measured 1 send per poll and a clean timeout for a selector that
-  `evaluate{query}` proves exists. The no-eval path is now asked first; all four
-  wait modes verified.
-- **`reveal{kind:dropdown}` failed on every direct-WS page** — the bridge passed a
-  pre-resolved *element* to a reader that resolves internally, so the second
-  resolve always missed. Same bug in `tab_contents`/`accordion_contents`.
-- **`status{kind:"doctor"}` always reported a service-worker error**
-  (`Unknown content action: doctor_sw`) — the server sent an op name the SW never
-  had, and it wasn't in the SW-routed set either.
-- **`navigate` and `tabs{action:"frames"}` silently dropped the `tabId` you
-  passed** — frames reported the *active* tab's iframes while claiming success.
-  Both now take and honor `tabId`.
-- **`type_text` batch counters were always wrong** (`filled:0, failed:N`): the
-  batch called the async `nativeType` synchronously, so `r.success` was always
-  undefined. Batch now awaits, heals stale refs, and reports verified counts.
-- **`extension_reload` usually did nothing while reporting success.** It called
-  `chrome.runtime.reload()` from the offscreen document, where the API is
-  unavailable (the throw was swallowed), and the SW's version relied on a
-  `setTimeout` that a suspending worker never ran. It now relays to the SW and
-  reloads synchronously — `reloadVerified:true` in ~400ms, repeatedly.
-- **`respawn_offscreen` always reported "Extension disconnected"** for a respawn
-  that had actually succeeded, because the offscreen awaited its own death before
-  replying. It now replies first, and routing prefers a live content script.
-
-### Privacy
-
-Password/OTP values were echoed back in **six** places: the label fallback, the
-`type_text` result (`actualValue` + `expected`), `evaluate{query}` value/html
-reads, the `inputs`/`state` readers, the explore action list, and the forms
-section. All are masked now (`value:""` plus `hasValue`/`*Masked` flags, so
-"is it filled?" still works). A canary sweep across 11 tool surfaces returns
-zero occurrences.
-
-### `real_input.py activate-tab` — a silent lie, now verified and self-checking
-
-`activate-tab` used `TabItem.click_input()`, which **silently no-ops on Chrome
-tab items** — and the script still exited 0 with `{"success": true}`. A caller
-had no way to detect that nothing had happened. A/B tested against real Chrome:
-`click_input()` left the active tab unchanged while reporting success;
-`select()` (SelectionItemPattern) actually switched it. It now also **verifies**
-the match appears in the post-activation window title and returns
-`success:false` (exit 1) when it does not, so the failure is detectable instead
-of silent. (This is a *second* `activate-tab` fix — the circular-`--gate` bug
-fixed earlier is already in the published file.)
-
-### Guide and tests
-
-The guide now states the one-profile/per-tab isolation model, the ref lifecycle
-(E# renumbers per explore and rots across re-renders — prefer CSS refs), that
-`press_key` performs no default browser actions, that `evaluate{script}` is
-blocked on *every* page (the extension's own CSP, not "strict sites"), that JS
-dialogs are not a reliable surface, and that session state is global. 12 new
-static assertions pin these so a false claim cannot ship again.
-
-**`MODEL_PROMPT.md` is now generated, not hand-maintained.** It was a mirror of
-a *21-tool* guide the server had already replaced, so it kept teaching the false
-doctrines long after the guide itself was fixed. `tools/export-guide.mjs`
-extracts the live `websense_guide` text from `src/server.js`; `--check` runs in
-`npm test`, so the mirror and the served prompt can never diverge silently
-again. One existing test had been pinning that divergence (it demanded an exact
-uppercase string only the hand-edited copy produced) — now case-insensitive.
-
-Tests: 113 → 127.
 
 ## [1.4.4] — 2026-09-21
 
