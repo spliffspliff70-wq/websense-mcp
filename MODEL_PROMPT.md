@@ -1,130 +1,98 @@
-# WebSense — Model Prompt (what `websense_guide` returns)
+# WebSense — Model Prompt (MIRROR of what `websense_guide` returns)
 
-This is the instruction text the AI model receives when it calls `websense_guide` — the
-entry point for every WebSense session. It is kept here as documentation and as the single
-source of truth for the in-tool prompt.
+`src/server.js` is the **single source of truth** for the in-tool prompt. The
+block below is generated from it, so this file can never drift into teaching an
+agent something the running server does not say.
 
-> **⚠️ DRIFT RESOLVED — re-verified 2026-09-21 (source of truth: `src/server.js`).**
-> The RUNNING server exposes **31 tools** (`tools/list` over `http://127.0.0.1:9222/mcp`;
-> 31 `reg(server, …)` registrations in `src/server.js`). The `websense_guide` text in
-> `src/server.js` now states **31** as well, and its tool list was completed to cover all
-> 31 (it previously documented only 20 — `navigate`, `main_world`, `page_snapshot`,
-> `page_slice`, `console_log`, `network_log`, `cookies`, `respawn_offscreen`,
-> `extension_reload`, `real_activate_tab`, `real_click`, `real_paste` were missing).
-> The prompt text below still contains the older **21** string in places — this file only
-> mirrors the src-owned text, so treat `src/server.js` as authoritative.
+To regenerate after changing the guide text in `src/server.js`:
+
+```
+node tools/export-guide.mjs        # rewrites the fenced block below
+```
+
+> **What changed on 2026-09-25.** This file used to be a hand-maintained copy of
+> a 21-tool guide that the server had long since replaced with a 31-tool one —
+> a mirror of a deleted document, with its own stale claims (mutated:false means
+> "not landed", JS dialogs "captured, NOT blocking", evaluate blocked only on
+> "strict sites", escalate to real_click on unverifiable). It is now generated
+> from the live text, and three regression tests assert the mirror is fresh so
+> the drift cannot come back.
+
 > Also note: `websense_doctor` is **not** a tool (it is `status kind:"doctor"`), and
-> `evaluate_safe` is **not** a tool (it is `evaluate {query:{…}}`) — the old→new map below
-> is correct about that, and `src/server.js:53` documents the absorption.
+> `evaluate_safe` is **not** a tool (it is `evaluate {query:{…}}`).
 
 ---
 
 ```
-WebSense MCP — Model Guide
-============================
-Non-vision web automation. You drive a real Chrome (your profile, cookies, no bot detection)
-via a Semantic Action Graph. NO screenshots, NO CDP debug port, NO vision model, NO eval. Everything is
-structured JSON. Works on LinkedIn, GitHub, Google — any strict-CSP site — including
-React/Vue/Angular apps.
+WebSense MCP — Guide (31 consolidated tools)
+==============================================
+Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
-THE LOOP (autonomous):
-1. explore_page → returns every interactive element with a ref (E0, E1…), its action type,
-   predicted effect, forms (F0…), and page content. Use this as your map.
-2. Read the graph. Pick the element whose label / predicted-effect matches your goal.
-3. Act by ref:
-     click("E7")                 open / submit / navigate (mode:"hover"|"rightclick"|"drag")
-     type_text("E3","text")      fill an input (native setter — React/Vue/Angular-safe)
-     form action:"select"|"toggle"|"upload"  dropdowns, checkboxes, file uploads
-4. Inspect the RESULT. Every action returns before/after state + effect verdict
-   (confirmed / suspected_noop / unverifiable). Use it to decide the next step.
-5. Repeat until done. status kind:"page" confirms state (URL, modal, captcha, loading);
-   session action:"map"|"mermaid" track multi-page journeys.
+THE LOOP: explore_page → pick refs → act (click/type_text/form/scroll) → read result → repeat.
 
-TOOLS (21 — consolidated from 65, nothing lost):
-  Guide    websense_guide
-  Explore  explore_page (compact:list | intent:find | goal:goal-filter | preload:lazy)
-  Read     read (format:"text"|"content"|"markdown"|"diff"|"scrollextract"|"preload")
-  Interact click, type_text, form, scroll (direction|y|intoView), press_key
-  Intel    reveal (kind:"dropdown"|"tabs"|"accordion"), inspect (kind:"element"|"geometry"|"relation")
-  Tabs     navigate, tabs (list|switch|close|bind|frames|windows|focus|move|transfer|switchread)
-  Wait     wait (conditions ANDed | event:"dialog_open|navigation|…")
-  Control  evaluate (script|query), screenshot, dialog (accept|dismiss|keystroke)
-  Session  session (reset|map|mermaid), network_log, clipboard (copy|read)
-  AX       ax (state|read|click|type) — canvas SPAs & chrome:// pages (needs tabId)
-  Real     real_activate_tab, real_click, real_paste — GENUINE OS input (UIA + SendInput)
+DID IT LAND? Every mutating op (click, type_text, form, press_key, real_click, real_paste, main_world, evaluate, dialog) returns a SECOND block: DELTA (auto, after <op>): {mutated: true|false|null, ...}. Read that instead of spending an extra explore_page{incremental:true} call — it is the same diff, already paid for. mutated:false means NO INTERACTIVE-ELEMENT CHANGE was detected — it is NOT proof the action failed: the diff fingerprints interactive elements only, so text/content changes elsewhere, async handlers that settle after the diff, focus-only clicks, downloads, and new-tab opens all report mutated:false while genuinely landing. Confirm with a real read (status / read{diff} / main_world / the downloads or tabs store) before concluding "not landed". mutated:null means no baseline existed yet on that tab, so that action seeded one and only the NEXT action is verifiable. Pass verify:false to skip the diff on a call you don't need checked.
+
+FULL PAGE MAP vs A SLICE: page_snapshot collects a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and returns only a small INDEX (counts + the dimensions you can slice by). page_slice then fetches ONE slice (tag/role/region/vp/interactive/query) at full fidelity. Use this when you need the whole page's shape or something the SAG does not show (off-viewport elements, the rest of a long page, a full tag/region inventory). It is also scroll-stable, so its index does not churn the way a viewport-filtered scan does. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
+
+THE 31 TOOLS — what each absorbed from the old 65-tool surface:
+  websense_guide   this guide
+  explore_page     page map (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (added/changed/removed, no settle/content — you usually do NOT need this any more: mutating ops return a DELTA block automatically; first call returns full SAG)
+  read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
+  click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)
+  type_text        fill one input (React-safe native setter) — or fields:[{ref,text},...] for batch (old type_many). Batch fills are SEQUENTIAL with a persistence check per field, so a 50-field batch takes ~50s; it reports filled/failed from the verified result, not from whether the write was dispatched. Password/OTP values are never echoed back.
+  form             action:"state" (form_state) | "select" (ref,value) | "toggle" | "upload" (ref,filePath)
+  reveal           pre-extract hidden content without opening it: kind:"dropdown" (ref = the trigger → its options) | "tabs" (ref optional → tab panels) | "accordion" (ref optional → details/summary). Works with E# or CSS refs.
+  scroll           direction+amount (ticks, 1 tick ≈ 80% viewport) | y:<px> absolute (scroll_to) | intoView:"E5" (scroll_into_view)
+  tabs             action:"list" | "switch" | "close" | "bind" (no focus) | "windows" | "focus" | "move" | "transfer" (cross-tab copy/paste) | "switchread"
+  status           kind:"page" (page_state) | "bridge" (get_status) | "doctor" (diagnostics) | "downloads"
+  wait             poll until conditions met (urlContains/hasModal/hasCaptcha/notLoading/pendingDialogsGt/selector/script/timeoutMs/pollMs) — old wait_for; or event:"dialog_open|navigation|network|..." — old wait_for_event
+  evaluate         script:<js> runs in the ISOLATED world via new Function, which the extension's own MV3 CSP blocks on EVERY page (not just "strict sites") — treat script mode as unavailable and use query mode. query:{selector,extract,all,inputs,text,state} is the CSP-proof no-eval read path (old evaluate_safe). Password/OTP values are always masked (value:"" + hasValue) on every read surface.
+  ax               native accessibility tree via chrome.debugger (Chrome's EXTENSION API — ALLOWED, unlike a CDP debug port): action:"state"|"read"|"click"|"type" + tabId (+ match/role/name). For canvas SPAs & chrome:// pages
+  screenshot       captureVisibleTab → PNG/JPEG dataUrl for a vision model
+  press_key        key + modifiers ["ctrl","shift","alt","meta"], optional ref target. SYNTHETIC KeyboardEvents only — it does NOT perform default browser actions: ctrl+a does not select, letter keys do not insert text. It fires page JS key handlers and nothing else. Use type_text for text entry.
+  dialog           DOM [role=dialog] modals: close by clicking their ref; status{kind:"page}.hasModal is visibility-BLIND (hidden modals count too). JS window.alert/confirm/prompt are NOT reliably captured (the page's alert bypasses the content-script override and does not block) — do not build a flow that depends on catching them. action:"accept"|"dismiss" + index/value (old handle_dialog) — or keystroke:true + key:"enter|escape|tab|f5|ctrl+c" + value typed first (old dismiss_dialog, OS-level)
+  session          action:"reset" (clears map + tab binding — this map is GLOBAL to the hub, so reset wipes every session's history) | "map" (exploration graph) | "mermaid" (flowchart export). History stores the text you typed.
+  network_log      captured fetch/XHR since last call (clear, maxEntries) — see the fuller note below the tool list
+  clipboard        action:"copy" (text) | "read"
+  inspect          resolve a ref / one element: kind:"element" (resolve_ref — is this ref alive?) | "geometry" (bounding box, z-depth, scroll-container-aware) | "relation" (refA vs refB: above/below/overlaps)
+  navigate         navigate a tab to a URL. Pass tabId to target a specific tab; omit it to reuse your BOUND tab (no tab spam). newTab:true forces a fresh tab. An UNBOUND session gets its OWN tab automatically (it never inherits another session's tab)
+  main_world       run a COMPILED function EXPRESSION in the page MAIN world (F12-insider view) — CSP-proof, the escape hatch when evaluate is blocked. func must be an EXPRESSION (() => …, async () => …); a statement body returns null with success:true and does nothing. This is the reliable way to READ what a click/type actually did
+  page_snapshot    LOSSLESS inventory of the page, held server-side; returns only the INDEX (counts + sliceable dimensions + handle). Nothing is cut: not interactive-only, not in-viewport-only. Scroll-stable. fresh:true re-collects
+  page_slice       fetch ONE slice of the snapshot at full fidelity: by tag / role / region / vp / interactive / query (+limit). Every record carries a usable locator, so you can act on what you fetch
+  console_log      captured browser console + JS errors since last call (the page telling you WHY something failed) — a MAIN-world hook, so page logs ARE captured
+  network_log      captured PAGE fetch/XHR since last call (clear, maxEntries). A MAIN-world hook captures real page traffic; totalCaptured is the count BEFORE clearing, so a clear:true call still tells you what it just flushed. Header capture is off unless asked.
+  cookies          cookie session manager: action:"list" (metadata for a url — names/expiry, NEVER values) | "get" (returns values for a named cookie) | "clear"
+  respawn_offscreen  force-close + recreate the offscreen document so the extension reloads fresh code (MV3 trap: the offscreen does NOT reload with the extension card)
+  extension_reload   reload the WebSense extension itself
+  real_activate_tab  OS-INPUT ONLY — genuinely activates a tab (SendInput). Page ops NEVER need this; it exists solely to precede real_click/real_paste
+  real_click       GENUINE OS-level click (SendInput) at VIEWPORT coords (x,y) — for canvases/raw-input surfaces a page op cannot reach. Lands on the FRONTMOST window
+  real_paste       GENUINE paste (Ctrl+V) into a focused editor at viewport coords — the working route for attaching a real file/image to a composer
+
+TAB SCOPING MODEL (read this before running concurrent jobs): this is ONE Chrome profile with ONE extension — jobs do NOT get separate profiles, and nothing here gives you cookie/storage isolation from another job. Isolation is per-TAB. Ops that take an explicit tabId (navigate, tabs switch/close/bind/frames, form, ax, screenshot, real_*) target that tab and ignore the cursor. CURSOR-SCOPED ops (status, wait, scroll, evaluate, reveal, inspect, session, dialog, clipboard, console_log, network_log, read, explore_page, click, type_text) follow the session's BOUND tab, NOT the OS-frontmost tab. An unbound session is pinned to a tab automatically and WARNS you — it never silently inherits the shared global cursor (which is what made tabs appear "hijacked" between concurrent agents). tabs{action:"bind", tabId} sets the target WITHOUT focusing. session state (map/history) is GLOBAL across sessions on this hub: session{action:"reset"} clears everyone's history, and history contains the text you typed.
+
+REF LIFECYCLE: E# refs come from explore_page and are assigned in VIEWPORT order, so a full re-explore or a scroll RENUMBERS them (E7 may become a different element). They also rot across re-renders, and healing is op-inconsistent (click may heal a stale ref via its locator chain; type_text/inspect do not). For anything long-lived or re-render-prone, use a CSS-selector ref (#id, .class) — selectors are stable and E# is not. Re-explore after a re-render.
 
 KEY PATTERNS:
-- Forms:    form action:"state" → fill with type_text / form action:"select" → click submit ref
-- Select:   reveal kind:"dropdown"("E5") → see values → form action:"select"("E5", value)
-- Hover:    click mode:"hover"("E2") → explore_page again to catch revealed menus
-- Keys:     press_key("c",["ctrl"]) = Ctrl+C; press_key("Tab",["shift"]) = Shift+Tab
-- Canvas:   click(x,y) to click at viewport coordinates (ref optional origin)
-- Upload:   form action:"upload"("E9", "C:/path/file.pdf") — DataTransfer, no OS picker
-- APIs:     network_log() → act → network_log() again to see XHR/fetch calls
-- Multi-page: session action:"map" shows the journey; session action:"mermaid" draws it
-- Iframes:  tabs action:"frames" → match frameId by URL → explore_page({frameId})
-            / click({ref, frameId}) / type_text({ref, frameId}). Unlocks Gmail compose,
-            Notion, Figma (any site with child frames)
-- Wait:     wait({urlContains, hasModal, notLoading, pendingDialogsGt}) instead of manual
-            poll loops after async loads
-- Pseudo-text: read format:"text" and element labels include CSS ::before/::after content
-            (icon-font glyphs, counters) that innerText misses
-- TWO CLASSES OF OPERATION — do not conflate them (this is the #1 source of wasted calls):
-  * PAGE OPS: navigate, explore_page, read, click{ref}, type_text, form, scroll, inspect,
-    main_world, status, wait. These travel over tabs.sendMessage BY TABID and work on a
-    tab that is NOT active. Never activate or focus the tab for these. Measured
-    2026-09-20: bound an active:false tab with no activation and explore_page returned
-    29 live matches.
-  * OS-INPUT OPS: real_click, real_paste, real_activate_tab, computer_use, dialog{keystroke}.
-    These use SendInput, which lands on whatever window is FOREGROUND, so the target must
-    be the active tab/window first — and they steal the user's focus. Use them only when a
-    page op genuinely cannot work (a submit button that ignores synthetic events).
-  * A page op that HANGS is almost never an activation problem. Diagnose in this order:
-    (1) is Chrome MINIMISED or occluded (0x0 window)? restore it — an unrendered tab
-        stops answering the content script and every call then burns the 90s timeout;
-    (2) is a native "Leave site?" beforeunload dialog parked over Chrome? it swallows
-        clicks AND blocks paint — dismiss it;
-    (3) is another process/tab already driving the same tab?
-    Do NOT "fix" a hang by activating the tab or reaching for real_click.
-- Effect verdict: after click/type_text, if effect:"suspected_noop" do NOT retry blind —
-            read before/after and diagnose, or try an alternate path
-- REAL INPUT (synthetic events ignored): if click returns effect:"unverifiable" with
-            escalation.recommended="real_click" on a React/Lit/CustomElement submit
-            (shreddit, Lexical/Draft.js/ProseMirror editors, faceplate), climb the ladder:
-            1) real_activate_tab({match}) — needed HERE because the next two steps are
-               SendInput, which hits the frontmost window. This is the only reason to
-               activate a tab; it is not a general remedy for a hung page op (see the
-               hang diagnosis above — check a minimised window first)
-            2) inspect{kind:"geometry"} on the target → viewport center (x,y)
-            3) real_click({x, y, gate:"<expected tab title>"}) OR
-               real_paste({x, y, text, gate}) for rich-text editors that revert
-               synthetic paste — genuine OS click + clipboard + Ctrl+V
-            Always gate: the active-tab title must match or the click is refused
-            (multi-agent tab churn protection).
+- Forms: form{action:"state", formRef:"F0"} → type_text/select via form{action:"select"} → click submit ref
+- After every action: read the before/after + effect verdict (confirmed / suspected_noop / unverifiable). Verdicts are WEAK evidence, not proof: suspected_noop means the measured state was identical (re-read the real outcome first — async work, downloads, new tabs all measure as identical), and unverifiable means the effect could not be measured at all. NEVER escalate straight to OS-level input (real_click) on suspected_noop/unverifiable: re-read the page first, and only use real_click when a page op provably cannot reach the element (canvas/raw-input/native surface).
+- Iframes: status{kind:"frames"}? No — list_frames lives under tabs{action:"frames"}; pass frameId to any element tool
+- Waits: wait{urlContains:"/dashboard"} beats manual poll loops; wait{event:"dialog_open"} after clicks that pop dialogs
+- Anti-patterns: no screenshots/vision for routine work; no CDP *debug port* (bot detection) — note chrome.debugger via the ax tool is NOT that and is allowed; no evaluate for routine reads (CSP); don't guess labels — read them from explore_page
 
-NATIVE DIALOGS (the one thing DOM can't reach — handled here):
-- JS dialogs (alert/confirm/prompt): captured, NOT blocking. status kind:"page" shows
-  pendingDialogs → resolve with dialog action:"accept"|"dismiss" (index?, value?)
-- OS dialogs (HTTP basic-auth, proxy-auth, print): not interceptable by JS.
-  dialog keystroke:true key:"enter"|"escape" injects a global keystroke via Windows
-  control. Type credentials first with dialog keystroke:true value:"user:pass"
-- Always call status kind:"page" after any action that might pop a dialog
-
-CROSS-BROWSER: Chrome/Edge/Opera load extension/manifest.json (MV3, offscreen WS bridge).
-
-TIPS / ANTI-PATTERNS:
-- Do NOT use screenshots, vision, or a CDP *debug port* — unnecessary, and a debug port may
-  trigger bot detection. NOTE: `chrome.debugger`, the extension API behind the `ax` tool, is
-  NOT a debug port and IS allowed (Ali 2026-09-20) — it exposes nothing to the page.
-  WebSense IS the interface.
-- Do NOT guess button labels. Read them from the SAG (explore_page / inspect).
-- Do NOT use evaluate for routine work — it runs eval and is blocked by strict CSP
-  (LinkedIn, HN). Use the native tools.
-- After a click that navigates, read the result (urlChanged) before the next step.
-- If an action seems to do nothing, call status kind:"page" — a modal / captcha / dialog
-  may be up.
-- type_text uses a native value setter, so it works on React/Vue/Angular controlled inputs.
-- Tab discipline: navigate reuses the tab by default; never close the last open tab/window.
+TAB DISCIPLINE: reuse tabs (navigate reuses by default). NEVER close the last open tab/window of an app.
+PAGE OPS vs OS-INPUT (do not conflate — the #1 source of wasted calls):
+  page ops (navigate/explore_page/read/click{ref}/type_text/form/scroll/inspect/main_world/status/wait)
+    route over tabs.sendMessage BY TABID and work on a tab that is NOT active. Never activate
+    a tab for these. Measured 2026-09-20: explore_page on an active:false tab, no activation, 29 matches.
+  OS-input ops (real_click/real_paste/real_activate_tab/dialog{keystroke}/computer_use) use SendInput,
+    which hits the FRONTMOST window — those need the target active first, and they steal the
+    user's focus. Use them only when a page op genuinely cannot work.
+  A page op that HANGS is almost never activation. Check in order: (1) Chrome MINIMISED/occluded
+    (0x0 window — restore it: tabs{action:"windows"} then tabs{action:"focus", windowId};
+    an unrendered tab stops answering and every call then
+    burns the 90s timeout), (2) a native "Leave site?" dialog parked over Chrome (dismiss it),
+    (3) another process already driving that tab. Do NOT "fix" a hang by activating the tab.
+NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialogs need dialog{keystroke:true}.
 ```
 
 ---

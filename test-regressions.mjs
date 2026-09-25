@@ -4,7 +4,7 @@
  * Run: node test-regressions.mjs
  */
 import assert from 'assert';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { HubServer } from './src/hub.js';
 import { planAutoClimb } from './src/climb.js';
 import { summarizeRead } from './src/summarize.js';
@@ -1275,7 +1275,12 @@ test('guidance: the chrome.debugger carve-out is stated, and the debug-port ban 
   assert(/IS allowed|are allowed|is NOT that/i.test(MODEL), 'MODEL_PROMPT.md must state that chrome.debugger is allowed');
   // The old unqualified absolute is the regression: "NO screenshots, NO CDP, NO vision model".
   assert(!/NO CDP,/.test(MODEL), 'MODEL_PROMPT.md still carries the unqualified "NO CDP," absolute');
-  assert(/NO CDP debug port/.test(MODEL), 'MODEL_PROMPT.md must qualify the absolute as "NO CDP debug port"');
+  // 2026-09-25: the mirrored block is now GENERATED from the live guide, whose
+  // sentence is "No CDP debug port" (sentence case). The assertion used to demand
+  // the exact uppercase "NO CDP debug port" string, which only the hand-maintained
+  // mirror produced — i.e. the test was pinning the DRIFT, not the substance.
+  // What matters is that the absolute is narrowed, in any casing.
+  assert(/no cdp debug port/i.test(MODEL), 'MODEL_PROMPT.md must qualify the absolute as a "no CDP debug port" ban');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1406,6 +1411,24 @@ test('guide: the shipped guide must not teach the measured-false doctrines (2026
     'the guide must warn that session state is shared across sessions');
   assert(/Pass tabId to target a specific tab/.test(SRV_SRC),
     'the guide must document navigate{tabId}');
+});
+
+test('docs: MODEL_PROMPT.md is GENERATED from the live guide, not hand-maintained', () => {
+  // 2026-09-25: MODEL_PROMPT.md was a hand-maintained mirror of a 21-tool guide
+  // the server had already replaced, so it kept teaching agents claims the
+  // running server contradicted (mutated:false = "not landed", JS dialogs
+  // "captured, NOT blocking", evaluate blocked only on "strict sites", escalate
+  // to real_click on unverifiable). A mirror nobody regenerates is a second
+  // source of truth that rots. tools/export-guide.mjs now generates the block,
+  // and this test fails if the two ever disagree again.
+  let out;
+  try {
+    out = execFileSync(process.execPath, ['tools/export-guide.mjs', '--check'],
+      { encoding: 'utf8', cwd: process.cwd() });
+  } catch (e) {
+    assert.fail('MODEL_PROMPT.md is STALE — run: node tools/export-guide.mjs\n' + (e.stdout || '') + (e.stderr || ''));
+  }
+  assert(/in sync/.test(out), 'the guide export check must confirm the mirror is fresh');
 });
 
 test('delta: the guide tells the agent to read the DELTA block instead of re-exploring', () => {
