@@ -1413,6 +1413,29 @@ test('guide: the shipped guide must not teach the measured-false doctrines (2026
     'the guide must document navigate{tabId}');
 });
 
+test('docs: README does not advertise capabilities the audit proved absent', () => {
+  // 2026-09-25: the 31-tool live audit found several README claims that were
+  // false against the running code, and a visitor reads the README before the
+  // guide. Each assertion below corresponds to a claim that was live here.
+  const README = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  assert(!/overrides `window\.alert\/confirm\/prompt` and captures them/.test(README),
+    'README must not claim JS dialogs are captured (the page alert bypasses the override)');
+  assert(!/Native browser dialogs.*captured\/resolved/.test(README),
+    'README must not list JS dialogs as a solved limitation');
+  assert(/not reliably captured/.test(README),
+    'README must state JS dialogs are not a reliable surface');
+  assert(!/blocked by strict page CSP/.test(README),
+    'README must not scope the evaluate CSP block to "strict sites" only — it is every page');
+  assert(/on \*every\* page/.test(README),
+    'README must state the evaluate script-mode CSP block applies to every page');
+  assert(!/returns every frame in the active tab/.test(README),
+    'tabs frames is target-scoped (tabId), not active-tab-only');
+  assert(/Refs drift/.test(README) && /CSS-selector refs/.test(README),
+    'README must warn that E# refs renumber and that CSS refs are stable');
+  assert(/One profile, per-tab isolation/.test(README),
+    'README must state the one-profile / per-tab isolation model');
+});
+
 test('docs: MODEL_PROMPT.md is GENERATED from the live guide, not hand-maintained', () => {
   // 2026-09-25: MODEL_PROMPT.md was a hand-maintained mirror of a 21-tool guide
   // the server had already replaced, so it kept teaching agents claims the

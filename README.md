@@ -71,13 +71,20 @@ Live DOM
 
 > **Each tool absorbed 2-10 old one-verb tools.** Full absorption table in `websense_guide`. All 65 original capabilities are callable — just through the consolidated tool with a `mode`/`format`/`action`/`kind` parameter instead of a separate tool name.
 
-## Native dialog handling (the one gap vs. a human — now closed)
-- **JS dialogs** (`alert` / `confirm` / `prompt`): the content script overrides `window.alert/confirm/prompt` and captures them into a queue. `status` reports `pendingDialogs`; resolve them programmatically with `dialog action:"accept"|"dismiss"` — CSP-safe, no OS interaction.
+## Dialog handling
+- **DOM modals** (`[role=dialog]`, most in-app modals): the reliable surface. Close them by
+  ref, and note `status` reports `hasModal` / `dialogCount` from a **visibility-blind** scan
+  (a hidden modal still counts).
+- **JS dialogs** (`alert` / `confirm` / `prompt`) are **not reliably captured**: the page's own
+  `window.alert` bypasses the content-script override and does not block, so `pendingDialogs`
+  usually stays empty. Don't build a flow that depends on catching them. `dialog
+  action:"accept"|"dismiss"` still exists for anything that *does* land in the queue.
 - **OS-level dialogs** (HTTP basic-auth, proxy-auth, print): can't be intercepted by JS. `dialog keystroke:true key:"enter"|"escape"` injects a global keystroke through Windows control (PowerShell `SendKeys`). This is the windows-control bridge.
 - **File picker:** handled by `form action:"upload"` (DataTransfer API) — no OS dialog.
 
 ## Iframes / frames (the other gap vs. a human — now closed)
-- `tabs action:"frames"` returns every frame in the active tab with its `frameId` and URL.
+- `tabs action:"frames"` returns every frame in the target tab (pass `tabId`; omit it and you
+  get your bound tab) with its `frameId` and URL.
 - Pass `frameId` to any element tool (`explore_page({frameId})`, `click({ref, frameId})`, `type_text({ref, frameId})`, …) to target a specific iframe. This unlocks **Gmail compose**, **Notion**, **Figma**, and any site that renders key UI inside child frames.
 - `read` (format:"text") and element labels now include CSS `::before`/`::after` content (icon-font glyphs, counters) that `innerText` misses.
 
@@ -85,7 +92,7 @@ Live DOM
 - **Chrome / Edge / Opera:** load `extension/manifest.json` (MV3, offscreen WS bridge).
 
 ## Key Features
-- **CSP-Safe (30/31 tools):** native DOM functions in the content script's isolated world. No eval, no string-to-code. Works on LinkedIn, GitHub, Google — any strict-CSP site. (`evaluate` is the only eval-based tool; `dialog keystroke:true` is a Windows-control keystroke, and `main_world` uses Chrome's userScripts MAIN-world path which is CSP-proof by design.)
+- **CSP-Safe (30/31 tools):** native DOM functions in the content script's isolated world. No eval, no string-to-code. Works on LinkedIn, GitHub, Google — any strict-CSP site. (`evaluate` is the only eval-based tool — and its `script` mode is blocked by the extension's own MV3 CSP on *every* page, so use its `query` mode or `main_world`; `dialog keystroke:true` is a Windows-control keystroke, and `main_world` uses Chrome's userScripts MAIN-world path which is CSP-proof by design.)
 - **React-Compatible:** native prototype value setters bypass React's value tracker, then `input`/`change` events are dispatched.
 - **No Bot Detection:** real Chrome profile, cookies, fingerprint. No CDP, no `navigator.webdriver`, no headless.
 - **No Vision:** all structured JSON; no screenshots, no vision model.
@@ -94,11 +101,37 @@ Live DOM
 - **Frame-Aware:** targets iframes via `frameId`; no DOM region is unreachable.
 
 ## Known limitations
-- **Native browser dialogs** (alert/confirm, OS file picker): captured/resolved via `dialog action:"accept"|"dismiss"` (JS) and `dialog keystroke:true` (OS, Windows-control keystroke). Not a blocker.
-- **`evaluate`** uses `new Function` (eval) → blocked by strict page CSP (LinkedIn, HN). Power-user utility; not for CSP sites.
+- **JS dialogs** (`alert`/`confirm`/`prompt`) are not reliably captured — the page's own
+  `window.alert` bypasses the content-script override. Use DOM `[role=dialog]` modals, or
+  `dialog keystroke:true` for OS-level dialogs. (`dialog action:"accept"|"dismiss"` still
+  handles anything that reaches the queue.)
+- **`evaluate` script mode** uses `new Function` (eval) and is blocked by the **extension's own
+  MV3 CSP on every page** — not only strict sites. Use `evaluate{query:{…}}` (no-eval reads) or
+  `main_world{func}` for arbitrary JS.
+- **Refs drift:** `E#` refs renumber on every full `explore_page` (viewport order) and can rot
+  across re-renders; healing is op-inconsistent. Prefer CSS-selector refs (`#id`) for anything
+  long-lived, and re-explore after a re-render.
+- **One profile, per-tab isolation:** concurrent jobs share one Chrome profile (no cookie/storage
+  isolation) and a global session history. Scope work with `tabs action:"bind"` + explicit
+  `tabId`; `session action:"reset"` clears *everyone's* history.
 - **Logged-in sites (LinkedIn etc.):** must already be authenticated in that Chrome profile; `navigate` opens a fresh tab that needs an existing session cookie.
 - **Canvas/WebGL content** (Telegram web, TradingView, chrome:// pages): use `ax action:"read"` to see the native accessibility tree, then `ax action:"click"|"type"` to interact. Fallback: `screenshot` + vision.
 - **`ax` tool uses chrome.debugger** — stable Chrome compatible, shows a warning banner while attached. Requires explicit tabId.
+
+## v1.4.5 (2026-09-25) — twelve defects, three of them false promises
+- **Truth fixes:** the action `effect` verdict was `unverifiable` for every relayed action (it never
+  unwrapped the relay envelope); it no longer recommends a real OS click for a merely unmeasurable
+  action; and the DELTA block no longer claims `mutated:false` means the action failed (it only
+  means no *interactive-element* fingerprint changed).
+- **Now working (previously never did):** `network_log` captures real page traffic (MAIN-world
+  hook), `wait{selector}` succeeds, `reveal kind:"dropdown"` resolves, `status kind:"doctor"`
+  reports a live service worker, `navigate`/`tabs frames` honor `tabId`, batch `type_text` counts
+  are honest, `extension_reload` really reloads, and `respawn_offscreen` stops reporting false
+  failures.
+- **Privacy:** password/OTP values are masked on every surface that can echo them.
+- **Docs:** the in-tool guide, `MODEL_PROMPT.md` (now generated from the guide, with a test that
+  fails on drift) and this README all state the measured behavior. See `CHANGELOG.md` for the
+  full list.
 
 ## v2.1-latchproof (2026-08-15)
 - **Multi-slot concurrency** (`hub.js`): request correlator is now `Map<id,entry>` — concurrent sessions no longer clobber each other.
@@ -109,11 +142,14 @@ Live DOM
 
 ## Testing
 ```bash
-# Regression suite (hub-level, no Chrome needed)
-node test-regressions.mjs
+# Regression suite (127 tests: hub, delta, guide-truth guards — no Chrome needed)
+npm test
 
 # Full end-to-end live test (needs Chrome + extension loaded)
 node test/mcp-client-test.js
+
+# Keep MODEL_PROMPT.md in sync with the in-tool guide (runs inside npm test)
+node tools/export-guide.mjs --check
 ```
 
 ## File Structure
