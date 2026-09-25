@@ -609,6 +609,43 @@ export class HubServer {
     };
   }
 
+  // 2026-09-25 TEST SUPPORT. Send `cmd` to a SPECIFIC client instead of letting
+  // activeClient() choose. The content script has two dispatchers — the direct
+  // WebSocket (wsDispatchPage) and the offscreen relay (handleMessageAsync) — and
+  // the same op name is implemented in both. Without an explicit route, a
+  // comparison between the two copies of an op is not a test: the hub picks
+  // whichever client is available, so the result is a coin flip. This method is
+  // what makes "run this op on BOTH dispatchers" possible.
+  //
+  // It mirrors send()'s pending/timeout bookkeeping exactly; the only difference
+  // is that the client is supplied by the caller. It deliberately does NOT retry
+  // and does NOT fall back — a test that silently reroutes proves nothing.
+  async sendViaClient(client, cmd) {
+    if (!client || client.readyState !== 1) {
+      throw new Error('sendViaClient: target client is not open');
+    }
+    const id = this.nextId();
+    const payload = { ...cmd, id };
+    console.error('[websense] RAWOP ' + (cmd.type || '?') + ' -> ' + (client.cid || '?') + ' [' + (client.clientSource || 'unknown') + '] tab=' + (this.selectedTabId ?? '-'));
+    const timeout = HEAVY_OPS.has(cmd.type) ? EXPLORE_TIMEOUT : REQUEST_TIMEOUT;
+    return new Promise((resolve, reject) => {
+      this._storePending(id, {
+        client,
+        resolve, reject,
+        type: (cmd && cmd.type) || '?',
+        startedAt: Date.now(),
+        timer: setTimeout(() => {
+          this._settlePending(id, this._timeoutDiag(cmd, client, 'raw_op forced-transport test'));
+        }, timeout),
+      });
+      try {
+        client.send(JSON.stringify(payload));
+      } catch (e) {
+        this._settlePending(id, { error: 'sendViaClient: ' + (e && e.message ? e.message : String(e)) });
+      }
+    });
+  }
+
   async send(cmd) {
     let client = this.activeClient(cmd);
     if (!client) {

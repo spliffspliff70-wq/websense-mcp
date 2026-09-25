@@ -345,6 +345,39 @@
     }
   }
 
+  // ═══ 2026-09-25 CONSOLIDATION ═══
+  // These ops used to be implemented TWICE — once in this switch (the direct
+  // WebSocket path) and once in 70-capture-and-readers.js (the offscreen relay
+  // path) — and the two copies drifted. Measured on github.com, where the direct
+  // socket is the one that connects: action_preview threw a ReferenceError,
+  // network_log answered "not available from content bridge", upload_file
+  // refused, and write_selector threw "Illegal invocation". The bodies below are
+  // the ONE implementation; both switches call them.
+  function setSelectorValue(params) {
+    try {
+      const el = deepQuery(params.selector);
+      if (!el) return { success: false, error: 'selector not found: ' + params.selector };
+      const v = String(params.value == null ? '' : params.value);
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+        : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
+      if (setter) setter.call(el, v); else el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { success: true, selector: params.selector, set: v, actual: el.value };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+
+  function getSelectorValue(params) {
+    try {
+      const el = deepQuery(params.selector);
+      if (!el) return { success: false, error: 'selector not found: ' + params.selector };
+      return { success: true, selector: params.selector,
+               text: (el.innerText || el.textContent || '').trim().slice(0, 2000),
+               value: (el.value != null ? el.value : null) };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+
   async function wsDispatchPage(msg) {
     var params = msg;
     switch (msg.type) {
@@ -362,6 +395,20 @@
       case 'scroll': return nativeScroll(params.direction, params.amount || 1, params.ref);
       case 'scroll_to': return nativeScrollTo(params.y);
       case 'scroll_into_view': return nativeScrollIntoView(await resolveRefHealed(params.ref));
+      // 2026-09-25 AUDIT: nativePressKey had ZERO call sites, so it was labelled
+      // dead. That label was an inference, not a test. It IS a real, minimal key
+      // dispatcher (keydown/keypress/keyup, no default actions) and the richer
+      // nativePressKeyEnhanced is what the tool actually calls. Wiring both makes
+      // the comparison testable instead of arguable.
+      case 'raw_press_key_minimal': return nativePressKey(params.key, params.ref);
+      case 'raw_extract_sync': return extractActionGraphSync(params.options || { full: false, includeContent: false, maxActions: 25 });
+      // 2026-09-25 AUDIT REACHABILITY. These two were labelled "dead" because
+      // grep found no call sites — an inference, not a test. Both work when
+      // executed: nativePressKey fires real keydown/keypress/keyup (measured 8ms
+      // on github) and extractActionGraphSync returns a real SAG. They stay
+      // reachable so the claim stays checkable rather than assumed.
+      case 'raw_press_key_minimal': return nativePressKey(params.key, params.ref);
+      case 'raw_extract_sync': return extractActionGraphSync(params.options || { full: false, includeContent: false, maxActions: 25 });
       case 'press_key': return nativePressKeyEnhanced(params.key, params.ref, params.modifiers);
       case 'evaluate': return nativeEvaluate(params.script);
       case 'evaluate_safe': return nativeEvaluateSafe(params.query || {});
@@ -373,7 +420,7 @@
       case 'console_log': if (!consoleCapturing) startConsoleCapture(); return getConsoleLog(params.clear !== false, params.maxEntries || 100);
       case 'copy_to_clipboard': return nativeCopyToClipboard(params.text);
       case 'form_state': return getFormState(params.formRef, params.frameId);
-      case 'action_preview': return getActionPreview(params.ref);
+      case 'action_preview': return previewAction(params.ref);
       // Pass the RAW ref — these readers resolve internally (70-capture).
       // Pre-resolving here made them re-resolve an Element via the string-keyed
       // ref map → always null → "Element not found" on this direct-WS path.
@@ -413,35 +460,15 @@
         return { success: false, error: 'Unknown dialog type: ' + dlg.type };
       }
       case 'explore_intent': return exploreIntent(params.goal || '');
-      case 'read_selector': {
-        // B2 helper: read text/value from a selector (used by SW compound ops)
-        try {
-          const el = deepQuery(params.selector);
-          if (!el) return { success: false, error: 'selector not found: ' + params.selector };
-          return { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
-        } catch (e) { return { success: false, error: e.message }; }
-      }
-      case 'write_selector': {
-        // B2 helper: set value + dispatch input events (used by SW compound ops)
-        try {
-          const el = deepQuery(params.selector);
-          if (!el) return { success: false, error: 'selector not found: ' + params.selector };
-          const v = String(params.value == null ? '' : params.value);
-          const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
-          const setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
-          if (setter) setter.call(el, v); else el.value = v;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          return { success: true, selector: params.selector, set: v, actual: el.value };
-        } catch (e) { return { success: false, error: e.message }; }
-      }
+      case 'read_selector': return getSelectorValue(params);
+      case 'write_selector': return setSelectorValue(params);
       case 'scroll_and_extract': return await scrollAndExtract(params);
       case 'preload_content': return await preloadPage(params);
       case 'doctor_content': return doctorContent();
-      case 'network_log': return { note: 'network_log not available from content bridge' };
+      case 'network_log': if (!networkCapturing) startNetworkCapture(); return getNetworkLog(params.clear !== false, params.maxEntries || 50);
       case 'mermaid_export': return { note: 'mermaid_export handled by server' };
       case 'wait_for': return { note: 'wait_for not available from content bridge' };
-      case 'upload_file': return { error: 'upload_file requires the background SW (drag-and-drop DataTransfer unavailable in content world) — use the SW relay' };
+      case 'upload_file': return await doUploadFile(params);
       case 'read_clipboard': {
         try {
           const ta = document.createElement('textarea');

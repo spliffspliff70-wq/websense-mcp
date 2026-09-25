@@ -353,6 +353,39 @@
     }
   }
 
+  // ═══ 2026-09-25 CONSOLIDATION ═══
+  // These ops used to be implemented TWICE — once in this switch (the direct
+  // WebSocket path) and once in 70-capture-and-readers.js (the offscreen relay
+  // path) — and the two copies drifted. Measured on github.com, where the direct
+  // socket is the one that connects: action_preview threw a ReferenceError,
+  // network_log answered "not available from content bridge", upload_file
+  // refused, and write_selector threw "Illegal invocation". The bodies below are
+  // the ONE implementation; both switches call them.
+  function setSelectorValue(params) {
+    try {
+      const el = deepQuery(params.selector);
+      if (!el) return { success: false, error: 'selector not found: ' + params.selector };
+      const v = String(params.value == null ? '' : params.value);
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+        : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
+      if (setter) setter.call(el, v); else el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { success: true, selector: params.selector, set: v, actual: el.value };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+
+  function getSelectorValue(params) {
+    try {
+      const el = deepQuery(params.selector);
+      if (!el) return { success: false, error: 'selector not found: ' + params.selector };
+      return { success: true, selector: params.selector,
+               text: (el.innerText || el.textContent || '').trim().slice(0, 2000),
+               value: (el.value != null ? el.value : null) };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+
   async function wsDispatchPage(msg) {
     var params = msg;
     switch (msg.type) {
@@ -370,6 +403,20 @@
       case 'scroll': return nativeScroll(params.direction, params.amount || 1, params.ref);
       case 'scroll_to': return nativeScrollTo(params.y);
       case 'scroll_into_view': return nativeScrollIntoView(await resolveRefHealed(params.ref));
+      // 2026-09-25 AUDIT: nativePressKey had ZERO call sites, so it was labelled
+      // dead. That label was an inference, not a test. It IS a real, minimal key
+      // dispatcher (keydown/keypress/keyup, no default actions) and the richer
+      // nativePressKeyEnhanced is what the tool actually calls. Wiring both makes
+      // the comparison testable instead of arguable.
+      case 'raw_press_key_minimal': return nativePressKey(params.key, params.ref);
+      case 'raw_extract_sync': return extractActionGraphSync(params.options || { full: false, includeContent: false, maxActions: 25 });
+      // 2026-09-25 AUDIT REACHABILITY. These two were labelled "dead" because
+      // grep found no call sites — an inference, not a test. Both work when
+      // executed: nativePressKey fires real keydown/keypress/keyup (measured 8ms
+      // on github) and extractActionGraphSync returns a real SAG. They stay
+      // reachable so the claim stays checkable rather than assumed.
+      case 'raw_press_key_minimal': return nativePressKey(params.key, params.ref);
+      case 'raw_extract_sync': return extractActionGraphSync(params.options || { full: false, includeContent: false, maxActions: 25 });
       case 'press_key': return nativePressKeyEnhanced(params.key, params.ref, params.modifiers);
       case 'evaluate': return nativeEvaluate(params.script);
       case 'evaluate_safe': return nativeEvaluateSafe(params.query || {});
@@ -381,7 +428,7 @@
       case 'console_log': if (!consoleCapturing) startConsoleCapture(); return getConsoleLog(params.clear !== false, params.maxEntries || 100);
       case 'copy_to_clipboard': return nativeCopyToClipboard(params.text);
       case 'form_state': return getFormState(params.formRef, params.frameId);
-      case 'action_preview': return getActionPreview(params.ref);
+      case 'action_preview': return previewAction(params.ref);
       // Pass the RAW ref — these readers resolve internally (70-capture).
       // Pre-resolving here made them re-resolve an Element via the string-keyed
       // ref map → always null → "Element not found" on this direct-WS path.
@@ -421,35 +468,15 @@
         return { success: false, error: 'Unknown dialog type: ' + dlg.type };
       }
       case 'explore_intent': return exploreIntent(params.goal || '');
-      case 'read_selector': {
-        // B2 helper: read text/value from a selector (used by SW compound ops)
-        try {
-          const el = deepQuery(params.selector);
-          if (!el) return { success: false, error: 'selector not found: ' + params.selector };
-          return { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
-        } catch (e) { return { success: false, error: e.message }; }
-      }
-      case 'write_selector': {
-        // B2 helper: set value + dispatch input events (used by SW compound ops)
-        try {
-          const el = deepQuery(params.selector);
-          if (!el) return { success: false, error: 'selector not found: ' + params.selector };
-          const v = String(params.value == null ? '' : params.value);
-          const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
-          const setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
-          if (setter) setter.call(el, v); else el.value = v;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          return { success: true, selector: params.selector, set: v, actual: el.value };
-        } catch (e) { return { success: false, error: e.message }; }
-      }
+      case 'read_selector': return getSelectorValue(params);
+      case 'write_selector': return setSelectorValue(params);
       case 'scroll_and_extract': return await scrollAndExtract(params);
       case 'preload_content': return await preloadPage(params);
       case 'doctor_content': return doctorContent();
-      case 'network_log': return { note: 'network_log not available from content bridge' };
+      case 'network_log': if (!networkCapturing) startNetworkCapture(); return getNetworkLog(params.clear !== false, params.maxEntries || 50);
       case 'mermaid_export': return { note: 'mermaid_export handled by server' };
       case 'wait_for': return { note: 'wait_for not available from content bridge' };
-      case 'upload_file': return { error: 'upload_file requires the background SW (drag-and-drop DataTransfer unavailable in content world) — use the SW relay' };
+      case 'upload_file': return await doUploadFile(params);
       case 'read_clipboard': {
         try {
           const ta = document.createElement('textarea');
@@ -3765,6 +3792,27 @@
     return true;
   }
 
+  // 2026-09-25 CONSOLIDATION: the ONE upload implementation. Extracted verbatim
+  // from this file's case body; the direct-WS switch in 00-bridge now calls it too,
+  // so it can no longer refuse on one transport and work on the other.
+  //
+  // The `await` is LOAD-BEARING and must not be removed: resolveRefHealed is
+  // async, so without it upEl was a PROMISE — no tagName, no querySelector, no
+  // parentElement — and locateFileInput fell through every structural branch to
+  // the proximity last resort, where every candidate scores 0, so the upload
+  // always targeted the FIRST file input on the page. Measured on LemonSqueezy:
+  // a .zip repeatedly attached to the product IMAGE input while the real files
+  // input stayed empty, and the call still reported success:true / fileCount:1.
+  async function doUploadFile(params) {
+    const upEl = await resolveRefHealed(params.ref);
+              const upDet = detectEditor(upEl);
+              if (upDet.kind === 'editor') {
+     await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
+              } else {
+     await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
+              }
+  }
+
   async function handleMessageAsync(message, sender, sendResponse) {
     const { type, id, ...params } = message;
     let result;
@@ -3789,36 +3837,14 @@
                 case 'drag_drop': result=nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef)); break;
                 case 'click_xy': result=nativeClickXY(params.x, params.y, params.ref, params.button); break;
         case 'copy_to_clipboard': result=nativeCopyToClipboard(params.text); break;
-        case 'upload_file': {
-          // v4: editor targets get the paste strategy; input/dropzone targets
-          // keep the classic strategies.
-          // AWAIT IS LOAD-BEARING (bug fixed 2026-09-21). resolveRefHealed is
-          // ASYNC; without await, upEl was a PROMISE. It has no tagName /
-          // querySelector / parentElement, so locateFileInput fell through every
-          // structural branch to the proximity last resort — where
-          // domCloseness(promise, candidate) scores 0 for EVERY candidate, so
-          // `best` never moved off all[0]: the FIRST file input on the page.
-          // Measured on LemonSqueezy: a .zip repeatedly attached to the product
-          // IMAGE input while the real files input stayed empty, and the call
-          // still reported success:true / fileCount:1 / preview-visible — i.e.
-          // the ref was silently ignored and the wrong field was corrupted.
-          const upEl = await resolveRefHealed(params.ref);
-          const upDet = detectEditor(upEl);
-          if (upDet.kind === 'editor') {
-            result = await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
-          } else {
-            result = await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
-          }
-          break;
-        }
-        case 'network_log': if (!networkCapturing) startNetworkCapture(); result=getNetworkLog(params.clear !== false, params.maxEntries || 50); break;
+        case 'upload_file': result = await doUploadFile(params); break;case 'network_log': if (!networkCapturing) startNetworkCapture(); result=getNetworkLog(params.clear !== false, params.maxEntries || 50); break;
         case 'console_log': if (!consoleCapturing) startConsoleCapture(); result=getConsoleLog(params.clear !== false, params.maxEntries || 100); break;
         case 'dropdown_options': result=getDropdownOptions(params.ref); break;
         case 'tab_contents': result=getTabContents(params.ref); break;
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-ff5faf0d',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-b207cdfd',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;
@@ -3841,30 +3867,8 @@
         case 'layout_relation': result = layoutRelation(params.refA || '', params.refB || ''); break;
         case 'get_events': result = getEvents(params.since); break;
         case 'explore_intent': result = exploreIntent(params.goal || ''); break;
-        case 'read_selector': {
-          try {
-            const el = deepQuery(params.selector);
-            if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
-            else result = { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
-          } catch (e) { result = { success: false, error: e.message }; }
-          break;
-        }
-        case 'write_selector': {
-          try {
-            const el = deepQuery(params.selector);
-            if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
-            else {
-              const v = String(params.value == null ? '' : params.value);
-              const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
-              const setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
-              if (setter) setter.call(el, v); else el.value = v;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              result = { success: true, selector: params.selector, set: v, actual: el.value };
-            }
-          } catch (e) { result = { success: false, error: e.message }; }
-          break;
-        }
+        case 'read_selector': result = getSelectorValue(params); break;
+        case 'write_selector': result = setSelectorValue(params); break;
         case 'scroll_and_extract': result = await scrollAndExtract(params); break;
         case 'preload_content': result = await preloadPage(params); break;
         case 'doctor_content': result = doctorContent(); break;

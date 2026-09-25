@@ -1125,13 +1125,21 @@ test('upload: the upload_file case AWAITS resolveRefHealed (a Promise never reac
   // This is why the earlier PROXIMITY fix alone changed nothing in production:
   // proximity was correct, but it never received an element to measure against.
   const src = CS_SRC;
-  // IMPORTANT: the CS ships TWO 'upload_file' labels. The bridge dispatcher
-  // (00-bridge-and-transport.js) deliberately returns a "requires the SW relay"
-  // error; the REAL handler is the brace-form case in 70-capture-and-readers.js.
-  // Matching the bare label picks the stub and the assertion fails for the wrong
-  // reason — so match the brace form.
-  const i = src.indexOf("case 'upload_file': {");
-  assert(i !== -1, "the upload_file handler case (brace form) must exist");
+  // 2026-09-25 CONSOLIDATION: the upload body moved out of the case and into the
+  // shared doUploadFile(), because the direct-WS switch used to REFUSE uploads
+  // outright while the relay did them — a divergence that was measured live on
+  // github.com. The invariant this test guards is unchanged and still enforced:
+  // whatever runs the upload must AWAIT resolveRefHealed. It now follows the
+  // shared function rather than a case body, and additionally asserts that BOTH
+  // dispatchers route to that one function.
+  const i = src.indexOf("async function doUploadFile(params)");
+  assert(i !== -1, "the shared doUploadFile() must exist — it is the one upload implementation");
+  assert(src.includes("case 'upload_file': result = await doUploadFile(params)"),
+    "the relay switch must route upload_file through doUploadFile()");
+  assert(src.includes("case 'upload_file': return await doUploadFile(params)"),
+    "the direct-WS switch must route upload_file through doUploadFile() too");
+  assert(!src.includes('requires the background SW'),
+    "upload_file must not refuse on the direct-WS path — that divergence was measured on github.com");
   // Bound the branch by the NEXT case label rather than a fixed char count: the
   // explanatory comment above the fix is long, and a fixed window silently
   // truncated before the line under test (that is how this test first failed).
@@ -1574,7 +1582,18 @@ test('no shipped source carries a literal ...[truncated] marker', () => {
 // "THE 20 TOOLS", with 31 tools registered — 11 of them undocumented. This guard makes the
 // count self-enforcing so the docs cannot drift silently again.
 test('docs: the guide states the TRUE tool count and lists every registered tool', () => {
-  const regs = [...SRV_SRC.matchAll(/reg\(server, '([a-z_]+)'/g)].map((m) => m[1]);
+  // 2026-09-25: the audit harness (raw_op) is a TEST tool, not a product tool.
+  // It must not change the shipped count, so it is excluded here — and the
+  // exclusion is itself asserted below, so the harness cannot quietly become
+  // permanent surface.
+  const HARNESS = ['raw_op'];
+  const allRegs = [...SRV_SRC.matchAll(/reg\(server, '([a-z_]+)'/g)].map((m) => m[1]);
+  for (const h of HARNESS) {
+    assert(allRegs.includes(h), 'the audit harness ' + h + ' is no longer registered — remove its exclusion too');
+  }
+  assert(/WS_RAW_OP !== '1'/.test(SRV_SRC),
+    'the audit harness must stay disabled unless the server is started with WS_RAW_OP=1');
+  const regs = allRegs.filter((n) => !HARNESS.includes(n));
   assert(regs.length >= 30, 'expected the full tool surface, got ' + regs.length);
   assert(SRV_SRC.includes('Guide (' + regs.length + ' consolidated tools)'),
     'the guide header must state the real count (' + regs.length + ')');
@@ -1705,6 +1724,46 @@ test('hub: a disconnecting stale client never unregisters the tab\'s NEW client'
     'the close handler must read the current mapping for the tab');
   assert(/if \(mapped === ws\) this\.contentByTab\.delete\(Number\(ws\.tabId\)\)/.test(H),
     'the close handler must only remove the mapping when it still points at THIS socket');
+});
+
+test('consolidation: no op has TWO implementations (one per transport dispatcher)', () => {
+  // 2026-09-25. The content script has two dispatchers — wsDispatchPage
+  // (00-bridge, direct WebSocket) and handleMessageAsync (70-capture, offscreen
+  // relay) — and 48 ops were implemented in BOTH. The copies were maintained by
+  // hand, so a fix landed on only one. Measured consequences on github.com, where
+  // the direct socket is the one that connects:
+  //   action_preview -> "getActionPreview is not defined" (function exists nowhere)
+  //   network_log    -> "not available from content bridge" (a stub)
+  //   upload_file    -> "requires the background SW" (a refusal)
+  //   write_selector -> "Illegal invocation"
+  // This guard pins the ops that must have exactly ONE body: the four above plus
+  // the two selector helpers, which are now shared functions. It does not require
+  // every op to be a one-liner — 26 already delegate to a shared helper — but it
+  // does require that these no longer carry divergent inline bodies.
+  const src = CS_SRC;
+  const MUST_BE_SHARED = [
+    { op: 'action_preview', shared: 'previewAction(' },
+    { op: 'network_log', shared: 'getNetworkLog(' },
+    { op: 'upload_file', shared: 'doUploadFile(' },
+    { op: 'write_selector', shared: 'setSelectorValue(' },
+    { op: 'read_selector', shared: 'getSelectorValue(' },
+  ];
+  for (const { op, shared } of MUST_BE_SHARED) {
+    const labels = (src.match(new RegExp("case '" + op + "':", 'g')) || []).length;
+    assert(labels === 2,
+      op + ' should appear as a case label in BOTH dispatchers (found ' + labels + ') — if it is 0 or 1, one transport cannot serve it');
+    const uses = (src.match(new RegExp(shared.replace(/[()]/g, '\\$&'), 'g')) || []).length;
+    assert(uses >= 2,
+      op + ' must route to the shared ' + shared + ' on BOTH paths (found ' + uses + ' uses) — a second body is how the divergences shipped');
+  }
+  assert(!/getActionPreview/.test(src),
+    "getActionPreview does not exist; calling it was a ReferenceError on the direct-WS path");
+  // Only network_log's stub is forbidden. `wait_for` legitimately has its own
+  // "not available from content bridge" note (it is a page-wait, not a capture),
+  // and the consolidation comment quotes the old network_log wording on purpose —
+  // so this asserts on the case label, not on the phrase.
+  assert(!/case 'network_log':[^\n]*not available/.test(src),
+    'network_log must not answer "not available from content bridge" on any path');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

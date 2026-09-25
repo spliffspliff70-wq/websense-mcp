@@ -229,6 +229,27 @@
     return true;
   }
 
+  // 2026-09-25 CONSOLIDATION: the ONE upload implementation. Extracted verbatim
+  // from this file's case body; the direct-WS switch in 00-bridge now calls it too,
+  // so it can no longer refuse on one transport and work on the other.
+  //
+  // The `await` is LOAD-BEARING and must not be removed: resolveRefHealed is
+  // async, so without it upEl was a PROMISE — no tagName, no querySelector, no
+  // parentElement — and locateFileInput fell through every structural branch to
+  // the proximity last resort, where every candidate scores 0, so the upload
+  // always targeted the FIRST file input on the page. Measured on LemonSqueezy:
+  // a .zip repeatedly attached to the product IMAGE input while the real files
+  // input stayed empty, and the call still reported success:true / fileCount:1.
+  async function doUploadFile(params) {
+    const upEl = await resolveRefHealed(params.ref);
+              const upDet = detectEditor(upEl);
+              if (upDet.kind === 'editor') {
+     await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
+              } else {
+     await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
+              }
+  }
+
   async function handleMessageAsync(message, sender, sendResponse) {
     const { type, id, ...params } = message;
     let result;
@@ -253,29 +274,7 @@
                 case 'drag_drop': result=nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef)); break;
                 case 'click_xy': result=nativeClickXY(params.x, params.y, params.ref, params.button); break;
         case 'copy_to_clipboard': result=nativeCopyToClipboard(params.text); break;
-        case 'upload_file': {
-          // v4: editor targets get the paste strategy; input/dropzone targets
-          // keep the classic strategies.
-          // AWAIT IS LOAD-BEARING (bug fixed 2026-09-21). resolveRefHealed is
-          // ASYNC; without await, upEl was a PROMISE. It has no tagName /
-          // querySelector / parentElement, so locateFileInput fell through every
-          // structural branch to the proximity last resort — where
-          // domCloseness(promise, candidate) scores 0 for EVERY candidate, so
-          // `best` never moved off all[0]: the FIRST file input on the page.
-          // Measured on LemonSqueezy: a .zip repeatedly attached to the product
-          // IMAGE input while the real files input stayed empty, and the call
-          // still reported success:true / fileCount:1 / preview-visible — i.e.
-          // the ref was silently ignored and the wrong field was corrupted.
-          const upEl = await resolveRefHealed(params.ref);
-          const upDet = detectEditor(upEl);
-          if (upDet.kind === 'editor') {
-            result = await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
-          } else {
-            result = await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
-          }
-          break;
-        }
-        case 'network_log': if (!networkCapturing) startNetworkCapture(); result=getNetworkLog(params.clear !== false, params.maxEntries || 50); break;
+        case 'upload_file': result = await doUploadFile(params); break;case 'network_log': if (!networkCapturing) startNetworkCapture(); result=getNetworkLog(params.clear !== false, params.maxEntries || 50); break;
         case 'console_log': if (!consoleCapturing) startConsoleCapture(); result=getConsoleLog(params.clear !== false, params.maxEntries || 100); break;
         case 'dropdown_options': result=getDropdownOptions(params.ref); break;
         case 'tab_contents': result=getTabContents(params.ref); break;
@@ -305,30 +304,8 @@
         case 'layout_relation': result = layoutRelation(params.refA || '', params.refB || ''); break;
         case 'get_events': result = getEvents(params.since); break;
         case 'explore_intent': result = exploreIntent(params.goal || ''); break;
-        case 'read_selector': {
-          try {
-            const el = deepQuery(params.selector);
-            if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
-            else result = { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
-          } catch (e) { result = { success: false, error: e.message }; }
-          break;
-        }
-        case 'write_selector': {
-          try {
-            const el = deepQuery(params.selector);
-            if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
-            else {
-              const v = String(params.value == null ? '' : params.value);
-              const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
-              const setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
-              if (setter) setter.call(el, v); else el.value = v;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              result = { success: true, selector: params.selector, set: v, actual: el.value };
-            }
-          } catch (e) { result = { success: false, error: e.message }; }
-          break;
-        }
+        case 'read_selector': result = getSelectorValue(params); break;
+        case 'write_selector': result = setSelectorValue(params); break;
         case 'scroll_and_extract': result = await scrollAndExtract(params); break;
         case 'preload_content': result = await preloadPage(params); break;
         case 'doctor_content': result = doctorContent(); break;

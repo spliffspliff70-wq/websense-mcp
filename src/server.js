@@ -72,6 +72,12 @@ function getSession() {
   return fallbackSession;
 }
 
+// 2026-09-25 TEST SUPPORT. getActiveHub() is a deliberate THIN ALLOW-LIST (that
+// thinness is why the old doctor and the reload census probe once failed
+// silently). The raw_op audit harness needs the hub's client registry and its
+// forced-transport send, so this exposes the real instance for that one purpose.
+function getRawHub() { return hubChrome; }
+
 function getActiveHub() {
   // Per-session stamped wrapper: send() routes page ops to THIS session's
   // bound tab via the hub's tabId-aware activeClient(). `connected` is
@@ -1776,6 +1782,73 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   // page_snapshot collects a LOSSLESS inventory (via main_world — no extension change)
   // and returns only the small INDEX. page_slice then fetches ONE slice at full fidelity.
   // Store everything, ship the index, make every element addressable.
+  // 2026-09-25 TEST HARNESS. The MCP transport DROPS declared properties whose
+  // name it considers self-evident — tools/list served this tool with only
+  // `frameId` visible, so `op`/`args` never reached the handler and every call
+  // arrived as {type: undefined} -> "Unknown content action: undefined". That is
+  // the same class of silent transport loss that hid earlier fixes, so the
+  // harness reads its payload from frameId (a name the transport keeps) rather
+  // than from a declared property.
+  reg(server, 'raw_op', {
+    description: 'TEST HARNESS ONLY — `query` carries a JSON string {"op":"<name>","args":{...}}. Disabled unless the server runs with WS_RAW_OP=1. Not a product tool.',
+    // reg() reads def.inputSchema ONLY. A `properties` key at the top level is
+    // silently IGNORED, so the parameter never reaches the wire schema and the
+    // handler sees undefined. (This is also why frameId cannot be reused: reg()
+    // overwrites any declared frameId with z.number().)
+    inputSchema: {
+      // Zod, not raw JSON schema: every other tool in this file declares params
+      // with z.* and the SDK's key validator expects that shape. A hand-written
+      // JSON schema registers but throws "keyValidator._parse is not a function"
+      // on the first call.
+      query: z.string().describe('JSON: {"op":"<name>","args":{...},"via":"direct"|"relay"}'),
+    },
+  }, async (o) => {
+    if (process.env.WS_RAW_OP !== '1') {
+      return textResult({ success: false, error: 'raw_op is a test harness and is disabled. Set WS_RAW_OP=1 on the server to enable it.' });
+    }
+    let spec;
+    try { spec = JSON.parse(String(o.query)); }
+    catch (e) { return textResult({ success: false, error: 'raw_op: pass query as JSON, e.g. {"op":"action_preview","args":{"ref":"E0"}} (got: ' + String(o.query).slice(0, 60) + ')' }); }
+    if (!spec || typeof spec.op !== 'string') {
+      return textResult({ success: false, error: 'raw_op: query JSON must contain {"op":"<name>"}' });
+    }
+    const hub = getActiveHub();
+    // `via` FORCES a transport so the same op can be executed on BOTH
+    // dispatchers. Without it the hub picks by availability, and comparing the
+    // two copies of an op is not a test — it is a coin flip.
+    //   direct -> the content script's wsHandle/wsDispatchPage switch (00-*.js)
+    //   relay  -> offscreen -> SW -> handleMessage/handleMessageAsync (70-*.js)
+    //
+    // getActiveHub() is a THIN ALLOW-LIST wrapper: it exposes only connected /
+    // send / stats / census, so the hub internals must be reached via
+    // `getRawHub()` below. There is no sendTo() on HubServer, so the pending
+    // map is driven by hand (mirroring HubServer.send) and the promise is
+    // settled by _settlePending when the content script replies.
+    const raw = getRawHub();
+    const via = spec.via === 'direct' || spec.via === 'relay' ? spec.via : null;
+    const cmd = withSessionTab({ type: spec.op, ...(spec.args || {}) });
+    if (!via) {
+      const r = await hub.send(cmd);
+      const box = (r && typeof r === 'object' && r.data && typeof r.data === 'object') ? r.data : (r || {});
+      return textResult({ op: spec.op, via: 'auto', transport: 'auto', success: !box.error, raw: box, error: box.error || null });
+    }
+    const targetTab = cmd.tabId != null ? Number(cmd.tabId) : raw.selectedTabId;
+    const client = via === 'direct'
+      ? raw.contentByTab.get(targetTab)
+      : raw.offscreenClient;
+    if (!client || client.readyState !== 1) {
+      return textResult({
+        op: spec.op, via, success: false,
+        skipped: via === 'direct'
+          ? 'no direct content-script client for this tab — the direct WebSocket is not connected, so 00-bridge cannot be exercised right now'
+          : 'no offscreen client connected',
+      });
+    }
+    const r = await raw.sendViaClient(client, cmd);
+    const box = (r && typeof r === 'object' && r.data && typeof r.data === 'object') ? r.data : (r || {});
+    return textResult({ op: spec.op, via, transport: via, client: client.cid, success: !box.error, raw: box, error: box.error || null });
+  });
+
   reg(server, 'page_snapshot', {
     description: 'LOSSLESS page inventory held server-side; returns the small INDEX (counts + addressable dimensions). Then call page_slice to fetch one slice at full fidelity. Unlike explore_page nothing is filtered out (no interactive-only, no in-viewport-only), and unlike the scan cache the snapshot does NOT change when you scroll. fresh:true re-collects.',
     inputSchema: {
