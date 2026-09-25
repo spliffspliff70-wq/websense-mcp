@@ -126,9 +126,24 @@ def cmd_activate_tab(args):
             break
     if not target:
         return {"success": False, "error": f"Tab not found: {args.match}"}
-    target.click_input()
+    # click_input() silently no-ops on Chrome TabItems (UIA Invoke) and STILL
+    # exits 0 with {"success": true} — a lie the caller cannot detect. A/B tested
+    # 2026-09-25 against real Chrome: click_input left the active tab unchanged
+    # while reporting success; select() (SelectionItemPattern) actually switched
+    # it (confirmed by the Chrome window title AND websense tabs{action:"list"}
+    # active:true — note pywinauto's is_selected() can return a STALE cache, so
+    # do not use it as the verification oracle).
+    if hasattr(target, "select"):
+        target.select()
+    else:
+        target.click_input()
     time.sleep(2.0)
     title = chrome.window_text()
+    # VERIFY what we were asked to do. Before this, success only meant "found a
+    # tab whose text matched" — never "that tab is now active".
+    if args.match and args.match.lower() not in title.lower():
+        return {"success": False, "error": f"Tab not activated (window title: {title})",
+                "matched": args.match, "title": title}
     if args.gate and args.gate not in title:
         return {"success": False, "error": f"Tab activated but gate failed: {title}"}
     return {"success": True, "title": title}

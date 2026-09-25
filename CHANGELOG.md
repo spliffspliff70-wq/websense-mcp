@@ -10,6 +10,14 @@ failure root-caused in source) turned up twelve real defects — including three
 where the shipped **guide and the regression suite itself taught the wrong
 thing**. All twelve are fixed here, each one verified live before the next.
 
+> The audit's working documents (the code map, the per-tool verdict table, the
+> guide cross-check) are intentionally **not** published. They describe the
+> pre-1.4.5 code as current, which would mislead anyone reading them after this
+> release, and they carried local detail (home paths, live tab IDs, the
+> operator's own tab titles) that has no business in a public repo. The
+> CHANGELOG entry below is the durable record; the CHANGES themselves and their
+> regression tests are the proof.
+
 ### The wrong-truth class (the expensive ones)
 
 - **`effect` was `unverifiable` for every relayed action.** `classifyEffect` read
@@ -73,6 +81,18 @@ reads, the `inputs`/`state` readers, the explore action list, and the forms
 section. All are masked now (`value:""` plus `hasValue`/`*Masked` flags, so
 "is it filled?" still works). A canary sweep across 11 tool surfaces returns
 zero occurrences.
+
+### `real_input.py activate-tab` — a silent lie, now verified and self-checking
+
+`activate-tab` used `TabItem.click_input()`, which **silently no-ops on Chrome
+tab items** — and the script still exited 0 with `{"success": true}`. A caller
+had no way to detect that nothing had happened. A/B tested against real Chrome:
+`click_input()` left the active tab unchanged while reporting success;
+`select()` (SelectionItemPattern) actually switched it. It now also **verifies**
+the match appears in the post-activation window title and returns
+`success:false` (exit 1) when it does not, so the failure is detectable instead
+of silent. (This is a *second* `activate-tab` fix — the circular-`--gate` bug
+fixed earlier is already in the published file.)
 
 ### Guide and tests
 
