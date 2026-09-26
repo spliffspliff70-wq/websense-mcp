@@ -9,6 +9,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/), versioning foll
 - The "E# refs renumber" caveat was measured false and retired; the guide states the measured stability.
 - Hub: evicting a stale content-script client re-points the client roles instead of clearing them,
   which stopped `explore_page` from intermittently returning zero actions.
+- Hub: a stale content script DISCONNECTING no longer unregisters the tab's NEW client. The close
+  handler deleted the `contentByTab` entry unconditionally, so a superseded script wiping its own
+  registration sent page ops to the offscreen instead of the live content script. Measured as
+  `page_state` reporting zero dialogs and `explore_page` returning zero actions while the correct
+  client was connected and healthy. The mapping is now removed only when it still points at that socket.
+- Docs: CHANGELOG returned to Keep-a-Changelog shape; CONTRIBUTING brought up to date.
+- `.gitattributes` added and the builder made line-ending agnostic, so a Windows checkout no longer
+  produces a spurious content-script diff.
 
 
 ## [1.4.6] — 2026-09-25
