@@ -417,20 +417,6 @@
       case 'scroll': return nativeScroll(params.direction, params.amount || 1, params.ref);
       case 'scroll_to': return nativeScrollTo(params.y);
       case 'scroll_into_view': return nativeScrollIntoView(await resolveRefHealed(params.ref));
-      // 2026-09-25 AUDIT: nativePressKey had ZERO call sites, so it was labelled
-      // dead. That label was an inference, not a test. It IS a real, minimal key
-      // dispatcher (keydown/keypress/keyup, no default actions) and the richer
-      // nativePressKeyEnhanced is what the tool actually calls. Wiring both makes
-      // the comparison testable instead of arguable.
-      case 'raw_press_key_minimal': return nativePressKey(params.key, params.ref);
-      case 'raw_extract_sync': return extractActionGraphSync(params.options || { full: false, includeContent: false, maxActions: 25 });
-      // 2026-09-25 AUDIT REACHABILITY. These two were labelled "dead" because
-      // grep found no call sites — an inference, not a test. Both work when
-      // executed: nativePressKey fires real keydown/keypress/keyup (measured 8ms
-      // on github) and extractActionGraphSync returns a real SAG. They stay
-      // reachable so the claim stays checkable rather than assumed.
-      case 'raw_press_key_minimal': return nativePressKey(params.key, params.ref);
-      case 'raw_extract_sync': return extractActionGraphSync(params.options || { full: false, includeContent: false, maxActions: 25 });
       case 'press_key': return nativePressKeyEnhanced(params.key, params.ref, params.modifiers);
       case 'evaluate': return nativeEvaluate(params.script);
       case 'evaluate_safe': return nativeEvaluateSafe(params.query || {});
@@ -1978,11 +1964,6 @@
     });
   }
 
-  function extractActionGraphSync(options) {
-    // Quick synchronous path for small pages (used as fallback).
-    return _doExtract(options, null);
-  }
-
   async function extractActionGraph(options) {
     options = options || {};
     // P1 (2026-08-31): incremental path — cheap scan + diff vs last scan,
@@ -3102,7 +3083,6 @@
     else target.scrollTop = y;
     return { success: true, scrollY: target === document.documentElement ? window.scrollY : target.scrollTop };
   }
-  function nativePressKey(key, ref) { const t=ref?resolveRef(ref):document.activeElement||document.body; if(!t)throw new Error('Target not found'); t.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true})); t.dispatchEvent(new KeyboardEvent('keypress',{key,bubbles:true})); t.dispatchEvent(new KeyboardEvent('keyup',{key,bubbles:true})); return{success:true}; }
   function nativeEvaluate(script) {
     // Supports both expressions and statements. Async-aware: a script whose
     // last expression is a Promise is awaited and its resolved value returned.
@@ -3858,7 +3838,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': result = getFormState(params.formRef, params.frameId); break;
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-f341b54b',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-bfc592a4',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': result = readTextWindow(params.selector || 'body', params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000), params.offset||0); break;
       case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

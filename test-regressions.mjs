@@ -1582,18 +1582,19 @@ test('no shipped source carries a literal ...[truncated] marker', () => {
 // "THE 20 TOOLS", with 31 tools registered — 11 of them undocumented. This guard makes the
 // count self-enforcing so the docs cannot drift silently again.
 test('docs: the guide states the TRUE tool count and lists every registered tool', () => {
-  // 2026-09-25: the audit harness (raw_op) is a TEST tool, not a product tool.
-  // It must not change the shipped count, so it is excluded here — and the
-  // exclusion is itself asserted below, so the harness cannot quietly become
-  // permanent surface.
-  const HARNESS = ['raw_op'];
+  // 2026-09-25: the audit harness (raw_op) is a TEST tool. Gating only its HANDLER
+  // was not enough — it still appeared in tools/list, so a production client read
+  // a 32nd tool that could only ever refuse. It is now registered only when the
+  // server runs with WS_RAW_OP=1, so with the harness off there is no registration
+  // at all and the shipped count is exactly 31.
+  const HARNESS = 'raw_op';
   const allRegs = [...SRV_SRC.matchAll(/reg\(server, '([a-z_]+)'/g)].map((m) => m[1]);
-  for (const h of HARNESS) {
-    assert(allRegs.includes(h), 'the audit harness ' + h + ' is no longer registered — remove its exclusion too');
-  }
-  assert(/WS_RAW_OP !== '1'/.test(SRV_SRC),
-    'the audit harness must stay disabled unless the server is started with WS_RAW_OP=1');
-  const regs = allRegs.filter((n) => !HARNESS.includes(n));
+  // the harness must be INSIDE a WS_RAW_OP gate, not merely absent from the count
+  const gateIdx = SRV_SRC.indexOf("if (process.env.WS_RAW_OP === '1') {");
+  const regIdx = SRV_SRC.indexOf("reg(server, '" + HARNESS + "'");
+  assert(regIdx === -1 || (gateIdx !== -1 && regIdx > gateIdx),
+    'the audit harness must be registered only INSIDE the WS_RAW_OP gate, so tools/list omits it entirely');
+  const regs = allRegs.filter((n) => n !== HARNESS);
   assert(regs.length >= 30, 'expected the full tool surface, got ' + regs.length);
   assert(SRV_SRC.includes('Guide (' + regs.length + ' consolidated tools)'),
     'the guide header must state the real count (' + regs.length + ')');
@@ -1912,6 +1913,27 @@ test('README: it publishes the measured token ladder and the background contract
     'README must disclose the one automatic window-restore and that it reports itself');
   assert(/no background path at all/.test(r),
     'README must say which operations genuinely cannot run in the background');
+});
+
+test('guide: it teaches field-picking and the upload contract (both measured traps)', () => {
+  // 2026-09-25. A 5-tweet thread was typed into x.com's SEARCH BOX because the
+  // caller took the first form_input, and an upload failed with ENOENT because
+  // the tool takes a filePath and not inline base64. Both traps are silent-ish:
+  // type_text reported success, and the upload named a path nobody asked for.
+  const s = SRV_SRC;
+  assert(/NEVER actions\[0\]/.test(s),
+    'the guide must warn that the first action is often a search box, not your target');
+  assert(/subtype:"contenteditable"/.test(s),
+    'the guide must name the real shape of a rich-text composer field');
+  assert(/PICK THE RIGHT FIELD/.test(s),
+    'the guide must state the pick-by-label rule for every form');
+  assert(/count==0 is SILENCE, never a rejection/.test(s) || /count 0 is silence/.test(s),
+    'the guide must keep the asymmetric upload-evidence rule');
+  // the upload contract, stated precisely
+  assert(/ABSOLUTE path to a file that already exists/.test(s),
+    'the guide must state that upload takes an existing absolute filePath');
+  assert(/does NOT accept inline base64/.test(s),
+    'the guide must state that inline base64 is NOT accepted (measured ENOENT)');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

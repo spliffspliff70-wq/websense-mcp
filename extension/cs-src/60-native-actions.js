@@ -601,7 +601,6 @@
     else target.scrollTop = y;
     return { success: true, scrollY: target === document.documentElement ? window.scrollY : target.scrollTop };
   }
-  function nativePressKey(key, ref) { const t=ref?resolveRef(ref):document.activeElement||document.body; if(!t)throw new Error('Target not found'); t.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true})); t.dispatchEvent(new KeyboardEvent('keypress',{key,bubbles:true})); t.dispatchEvent(new KeyboardEvent('keyup',{key,bubbles:true})); return{success:true}; }
   function nativeEvaluate(script) {
     // Supports both expressions and statements. Async-aware: a script whose
     // last expression is a Promise is awaited and its resolved value returned.

@@ -409,20 +409,6 @@
       case 'scroll': return nativeScroll(params.direction, params.amount || 1, params.ref);
       case 'scroll_to': return nativeScrollTo(params.y);
       case 'scroll_into_view': return nativeScrollIntoView(await resolveRefHealed(params.ref));
-      // 2026-09-25 AUDIT: nativePressKey had ZERO call sites, so it was labelled
-      // dead. That label was an inference, not a test. It IS a real, minimal key
-      // dispatcher (keydown/keypress/keyup, no default actions) and the richer
-      // nativePressKeyEnhanced is what the tool actually calls. Wiring both makes
-      // the comparison testable instead of arguable.
-      case 'raw_press_key_minimal': return nativePressKey(params.key, params.ref);
-      case 'raw_extract_sync': return extractActionGraphSync(params.options || { full: false, includeContent: false, maxActions: 25 });
-      // 2026-09-25 AUDIT REACHABILITY. These two were labelled "dead" because
-      // grep found no call sites — an inference, not a test. Both work when
-      // executed: nativePressKey fires real keydown/keypress/keyup (measured 8ms
-      // on github) and extractActionGraphSync returns a real SAG. They stay
-      // reachable so the claim stays checkable rather than assumed.
-      case 'raw_press_key_minimal': return nativePressKey(params.key, params.ref);
-      case 'raw_extract_sync': return extractActionGraphSync(params.options || { full: false, includeContent: false, maxActions: 25 });
       case 'press_key': return nativePressKeyEnhanced(params.key, params.ref, params.modifiers);
       case 'evaluate': return nativeEvaluate(params.script);
       case 'evaluate_safe': return nativeEvaluateSafe(params.query || {});

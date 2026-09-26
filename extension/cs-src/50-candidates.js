@@ -207,11 +207,6 @@
     });
   }
 
-  function extractActionGraphSync(options) {
-    // Quick synchronous path for small pages (used as fallback).
-    return _doExtract(options, null);
-  }
-
   async function extractActionGraph(options) {
     options = options || {};
     // P1 (2026-08-31): incremental path — cheap scan + diff vs last scan,
