@@ -889,7 +889,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 5. TYPE ═══
   reg(server, 'type_text', {
-    description: 'Fill input(s) with the React-safe native setter + input/change events. One field: ref+text. Many at once: fields:[{ref,text,clearFirst?},...] (old type_many — one round trip). Verifies value persistence; effect verdict included.',
+    description: 'Fill input(s) with the React-safe native setter + input/change events. One field: ref+text. Many at once: fields:[{ref,text,clearFirst?},...] (old type_many — one round trip). Verifies value persistence; effect verdict included. On a contenteditable editor (Draft.js/Lexical/ProseMirror/Slate) the result carries mode:"replace"|"append" and expectedFinal, so you can tell a replace from an append without re-reading; clearFirst:false appends onto what is already there.',
     inputSchema: {
       ref: z.string().optional().describe('Element ref (single-field mode)'),
       text: z.string().optional().describe('Text to set (single-field mode)'),

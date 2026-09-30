@@ -70,7 +70,7 @@ Live DOM
 ### AX Bridge
 `ax` (state|read|click|type) — for canvas SPAs & chrome:// pages
 ### REAL Input (genuine OS-level, for synthetic-ignoring widgets)
-`real_activate_tab` (UIA tab-pill click) · `real_click` (SendInput at viewport x,y) · `real_paste` (OS click + clipboard + Ctrl+V)
+`real_activate_tab` (UIA tab-pill click; address by title OR by `index` — SPA tabs share titles) · `real_click` (SendInput at viewport x,y) · `real_paste` (OS click + clipboard + Ctrl+V)
 ### Extension maintenance
 `respawn_offscreen` (recreate the offscreen doc so current on-disk code loads) · `extension_reload` (chrome.runtime.reload + reconnect wait)
 

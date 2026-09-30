@@ -3,6 +3,28 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.8] — 2026-09-30
+
+- `type_text` on a contenteditable editor no longer appends into its own residue. A paste that
+  landed PARTIALLY (measured on x.com's Draft.js composer: the first line dropped, the remainder
+  mangled, 483 chars in the field for a 269-char post) escaped `textMatches()` in the 250 ms
+  window, and the second rung appended the full text to that remnant while reporting
+  `success:true`. The existing doubling self-heal missed it because its trigger is exact doubling
+  (`occurrence > 1`) and a partial paste yields 0. The second rung now measures the field once
+  after the clear phase and discards residue ONLY in a field this call had emptied — a caller
+  that passed `clearFirst:false` keeps its content and gets a true `append` verdict
+  (`mode:"replace"|"append"`, plus `expectedFinal`) instead of a false failure.
+- `real_activate_tab` can address a tab by POSITION (`index`, 0-based). SPA tabs do not have unique
+  titles — measured on x.com, every `/compose/post` tab reports `Home / X` through UIA, so a title
+  match was ambiguous and the URL-as-title the `tabs` view reports matched nothing, returning a
+  bare "Tab not found". A multi-match now refuses and lists the tabs instead of activating the wrong
+  one, and `--index` verifies against the selected tab rather than a title that cannot discriminate.
+  The tool description now points at `tabs{action:"bind", activate:true}`, which needs no title and
+  no OS input.
+- Harnesses added: `test/harness/thread-sim.html` (two composers, stacking slots, line-dropping
+  paste) and `test/harness/clearfirst-harness.html` (append vs replace). The fix was validated on
+  both before shipping; neither is site-specific logic.
+
 ## [1.4.7] — 2026-09-25
 
 - Session state (map/history) is per-session: `session{action:"reset"}` no longer wipes other jobs.
