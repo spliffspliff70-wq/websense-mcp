@@ -32,6 +32,44 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const CERT = path.join(ROOT_DIR, 'cert.pem');
 const KEY = path.join(ROOT_DIR, 'key.pem');
 
+// ═══ TAB-HIJACK GUARD (2026-10-01) ═══
+// Ops allowed to travel WITHOUT a tabId: tab/window MANAGEMENT and
+// transport-level health/telemetry. Every OTHER op touches a page and must be
+// stamped with the calling session's bound tab — server.js withSessionTab()
+// does that for every page op, so an unstamped page op reaching the hub is a
+// caller bug, not a routing hint.
+//
+// WHY THIS EXISTS: the hub and the offscreen BOTH used to resolve an unstamped
+// page op against a process-wide cursor (hub.selectedTabId, or the offscreen's
+// getActiveTabId() -> SW bound tab -> OS-active tab). Those cursors move with
+// the OS (the `activated` handler follows the OS-frontmost tab) and with other
+// sessions, so an unstamped op silently ran against ANOTHER agent's tab or
+// whatever tab the user had just clicked. Refusing is the only honest answer:
+// a wrong-tab write is undetectable from the caller's side.
+const NON_PAGE_OPS = new Set([
+  'navigate', 'list_tabs', 'switch_tab', 'close_tab', 'list_frames', 'download_state',
+  'bind_tab', 'transfer_text', 'switch_tab_and_read', 'list_windows', 'focus_window',
+  'move_tab_to_window', 'get_active_tab', 'get_window_tabs', 'get_tab_info',
+  'cookie_op', 'download_op', 'respawn_offscreen', 'extension_reload',
+  'clear_binding', 'doctor_sw',
+  'health_ping', 'ping', 'health', 'tab_activated', 'tab_identified', 'tab_closed', 'tab_event',
+]);
+function assertPageOpsAreTabStamped(cmd) {
+  if (!cmd || !cmd.type) return;
+  if (cmd.tabId != null) return;
+  if (NON_PAGE_OPS.has(cmd.type)) return;
+  if (HubServer.SW_REQUIRED_OPS.has(cmd.type)) return;
+  throw new Error(
+    'Refused (tab-hijack guard): page op "' + cmd.type + '" carried NO tabId, and the hub will ' +
+    'not guess one. It used to fall back to the hub-global selected tab, which follows the ' +
+    'OS-FRONTMOST tab (and whichever tab another session last bound or activated) — so the op ' +
+    'could silently run against ANOTHER agent\'s tab, or against whatever tab the user had just ' +
+    'clicked, with no error and no signal. Fix: bind this session first — call navigate (which ' +
+    'binds automatically) or tabs{action:"bind", tabId}. Every page op is then stamped with YOUR ' +
+    'tab by server.js withSessionTab().'
+  );
+}
+
 export class HubServer {
   constructor(port = DEFAULT_PORT, opts = {}) {
     this.port = port;
@@ -379,10 +417,19 @@ export class HubServer {
       if (primary && primary.readyState === 1) return primary;
     } else {
       // Page op — route to the tab this command TARGETS. The server stamps
-      // each session's bound tabId onto page ops (concurrency fix 2026-08-12)
-      // so session A's click never hits session B's tab. Fall back to the
-      // legacy global selectedTabId when no explicit tabId is present.
-      const targetTab = (cmd && cmd.tabId != null) ? Number(cmd.tabId) : this.selectedTabId;
+      // each session's bound tabId onto EVERY page op (withSessionTab,
+      // server.js:306) so session A's click never hits session B's tab.
+      //
+      // ★ TAB-HIJACK FIX (2026-10-01, first of two): this used to end
+      //   `: this.selectedTabId` — the hub-GLOBAL cursor. That cursor is moved
+      //   BY THE OS AND BY OTHER SESSIONS: the `activated` handler sets it to
+      //   the OS-FRONTMOST tab (:225) and any content script reporting
+      //   tab_activated sets it too (:258). So an unstamped page op was
+      //   silently delivered to whichever tab the USER last looked at, or to a
+      //   tab another session had just activated — the "tabs appear hijacked"
+      //   class. There is deliberately NO global fallback here now: a page op
+      //   either names its tab or send() refuses it before routing.
+      const targetTab = (cmd && cmd.tabId != null) ? Number(cmd.tabId) : null;
       if (targetTab != null) {
         const direct = this.contentByTab.get(targetTab);
         if (direct && direct !== this._lastDirectDead && direct.readyState === 1) {
@@ -610,6 +657,10 @@ export class HubServer {
   }
 
   async send(cmd) {
+    // ★ TAB-HIJACK FIX (2026-10-01, part 2 of 2): refuse an unstamped PAGE op
+    // BEFORE routing. Without this, activeClient()'s (now removed) global
+    // fallback delivered it to the OS-frontmost / another session's tab.
+    assertPageOpsAreTabStamped(cmd);
     let client = this.activeClient(cmd);
     if (!client) {
       // Extension auto-connects within 3s — wait 5s max, then error out fast

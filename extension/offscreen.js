@@ -80,14 +80,27 @@ function isContentScriptAllowed(url) {
 // ═══ Dispatch to content script via background ═══
 
 async function dispatchToContent(message) {
-  // B1: route to the SW's bound tab (single source of truth — kills the
-  // multi-window latch where tabs.query from the SW resolved to a different
-  // window's active tab). Falls back to the OS-active tab when unbound.
   // 2026-08-12 concurrency fix: when the hub relays a message that carries an
   // EXPLICIT tabId (stamped by the server per-session), honor IT — the global
   // SW binding may belong to a DIFFERENT session (worker hijack prevention).
-  var tabId = (message && (message.tabId != null ? Number(message.tabId) : null)) || await getActiveTabId();
-  if (!tabId) return { error: 'No active tab' };
+  //
+  // ★ TAB-HIJACK FIX (2026-10-01, second of two — the hub-side one is
+  //   hub.activeClient/send): this used to fall back to
+  //     || await getActiveTabId()
+  //   which resolves to the SW's GLOBALLY-BOUND tab, else the OS-ACTIVE tab
+  //   (see getActiveTabId below). Both are PROCESS-WIDE and are moved by the OS
+  //   and by other sessions, so an unstamped page op was executed against
+  //   whichever tab the user last looked at, or a tab another session had just
+  //   activated — silently, with no error. That is the second independent path
+  //   to the wrong tab. dispatchToContent is reached ONLY for page ops
+  //   (handleTabOperation already returned null), so a page op here MUST name
+  //   its tab. Refuse rather than guess.
+  var tabId = (message && message.tabId != null) ? Number(message.tabId) : null;
+  if (!tabId) return { error: 'Refused (tab-hijack guard): page op "' + ((message && message.type) || '?') +
+    '" was relayed with NO tabId. Falling back to the global SW binding or the OS-active tab would ' +
+    'silently run this op against whatever tab the user last looked at, or another session\'s tab. ' +
+    'Fix: bind this session first — navigate (binds automatically) or tabs{action:"bind",tabId} — ' +
+    'so the server stamps every page op with YOUR tab.' };
   var tabInfo = await sendTabControl('get_tab_info', { tabId: tabId });
   var url = (tabInfo && tabInfo.url) || '';
   if (!isContentScriptAllowed(url)) return { error: 'Restricted page: ' + url };

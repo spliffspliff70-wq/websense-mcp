@@ -1752,5 +1752,70 @@ test('hub: a disconnecting stale client never unregisters the tab\'s NEW client'
     'the close handler must only remove the mapping when it still points at THIS socket');
 });
 
+test('hub: an unstamped PAGE op is REFUSED — no global-cursor fallback', () => {
+  // 2026-10-01 TAB-HIJACK FIX (first of two). activeClient() ended
+  //   `: this.selectedTabId`
+  // for page ops. selectedTabId is a hub-GLOBAL cursor that the `activated`
+  // handler moves to the OS-FRONTMOST tab and that any content script's
+  // tab_activated also moves — so an unstamped page op was silently delivered to
+  // whatever tab the USER last clicked, or a tab another session had activated.
+  // A wrong-tab write is undetectable from the caller's side, so the hub must
+  // refuse rather than guess.
+  const H = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
+  assert(/function assertPageOpsAreTabStamped\(cmd\)/.test(H),
+    'the tab-hijack guard must exist');
+  assert(/assertPageOpsAreTabStamped\(cmd\);/.test(H),
+    'send() must invoke the guard before routing');
+  const pageBranch = H.match(/\/\/ Page op — route to the tab this command TARGETS[\s\S]*?const targetTab = ([^;]+);/);
+  assert(pageBranch, 'the page-op routing branch must exist');
+  assert(!/this\.selectedTabId/.test(pageBranch[1]),
+    'the page-op target must NOT fall back to the hub-global selectedTabId (tab-hijack path)');
+  assert(/cmd\.tabId != null\) \? Number\(cmd\.tabId\) : null/.test(pageBranch[1]),
+    'the page-op target must be the explicit tabId or nothing');
+  // The guard must not be so broad that it breaks tab management or health.
+  assert(/NON_PAGE_OPS\.has\(cmd\.type\)/.test(H) && /SW_REQUIRED_OPS\.has\(cmd\.type\)/.test(H),
+    'the guard must exempt tab-management and SW-required ops');
+});
+
+test('offscreen: a relayed PAGE op with no tabId is REFUSED, not resolved globally', () => {
+  // 2026-10-01 TAB-HIJACK FIX (second of two). dispatchToContent() ended
+  //   || await getActiveTabId()
+  // and getActiveTabId() resolves to the SW's GLOBALLY-BOUND tab, else the
+  // OS-ACTIVE tab. Both are process-wide and OS-driven, so the relay path was a
+  // second, independent route to the wrong tab. dispatchToContent is reached
+  // ONLY for page ops (handleTabOperation has already returned null).
+  const O = readFileSync(new URL('./extension/offscreen.js', import.meta.url), 'utf8');
+  const fn = O.match(/async function dispatchToContent\(message\) \{[\s\S]*?\n\}/);
+  assert(fn, 'dispatchToContent must exist');
+  // Assert on CODE, not prose: the explanatory comment deliberately quotes the
+  // old `|| await getActiveTabId()` line, so strip comments before checking.
+  const code = fn[0].split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert(!/getActiveTabId/.test(code),
+    'dispatchToContent must NOT call getActiveTabId() (global SW binding / OS-active tab)');
+  assert(/Refused \(tab-hijack guard\)/.test(code),
+    'dispatchToContent must refuse a page op that carries no tabId');
+  assert(/var tabId = \(message && message\.tabId != null\) \? Number\(message\.tabId\) : null;/.test(code),
+    'dispatchToContent must take the tab ONLY from an explicit message.tabId');
+});
+
+test('tab routing: neither global cursor can be reintroduced silently', () => {
+  // The two fixes are one class ("no explicit tabId -> use a process-wide
+  // cursor"). Assert the CLASS at the routing site: activeClient() decides which
+  // client serves a cmd, so it must not consult the OS-driven global cursor at
+  // all. selectedTabId legitimately survives in the cursor's own bookkeeping,
+  // in the census/stats payload and in _timeoutDiag — none of which route.
+  const H = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
+  const ac = H.match(/activeClient\(cmd\) \{[\s\S]*?\n  \}/);
+  assert(ac, 'activeClient must exist');
+  // Strip comments first: the fix's own explanatory comment quotes the removed
+  // `: this.selectedTabId` line, so a raw text match would pass on prose alone.
+  const acCode = ac[0].split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert(!/selectedTabId/.test(acCode),
+    'activeClient must not read the hub-global selectedTabId — that is the tab-hijack path');
+  const S = readFileSync(new URL('./src/server.js', import.meta.url), 'utf8');
+  assert(/withSessionTab\(cmd\)/.test(S),
+    'server.js must keep stamping every page op with the calling session tab');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

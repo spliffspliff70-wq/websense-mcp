@@ -3,6 +3,26 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [1.4.9] — 2026-10-01
+
+- **Tab hijacking closed: the router no longer guesses a tab from a process-wide cursor.**
+  A page op that arrived without an explicit `tabId` used to be resolved TWICE against global
+  state — `hub.activeClient()` fell back to `selectedTabId`, and the offscreen relay fell back
+  to `getActiveTabId()` (the SW's globally-bound tab, else the OS-active tab). Both cursors move
+  with the OS: the `activated` handler rewrites `selectedTabId` to the OS-frontmost tab and any
+  content script reporting `tab_activated` rewrites it too. So an unstamped page op could be
+  delivered to whatever tab the USER had last clicked, or to a tab another session had just
+  activated — silently, with no error and no signal, and undetectable from the caller's side.
+  Now: `assertPageOpsAreTabStamped()` refuses an unstamped page op in `hub.send()` before routing,
+  `activeClient()` no longer reads `selectedTabId` at all, and `dispatchToContent()` in the
+  offscreen takes the tab ONLY from an explicit `message.tabId`. Tab-management and health ops
+  (`navigate`, `tabs`, `ax_*`, `cookie_op`, `health_ping`, …) are exempt — they legitimately
+  travel without one. Every page op is already stamped per-session by `withSessionTab()`, so a
+  refusal means a caller bug, and the error names the fix (`navigate` or `tabs{action:"bind"}`).
+- Regression tests added for both sites, plus a class assertion that `activeClient()` is free of
+  `selectedTabId`. The tests strip comments before matching: the fixes' own explanatory comments
+  quote the removed lines, and a raw text match would pass on prose alone.
+
 ## [1.4.8] — 2026-09-30
 
 - `type_text` on a contenteditable editor no longer appends into its own residue. A paste that
