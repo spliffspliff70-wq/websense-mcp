@@ -1850,15 +1850,29 @@
   function _isVisibleRect(el, rect) {
     try {
       if (typeof el.checkVisibility === 'function') {
-        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+        // ★ VISIBILITY FIX (2026-10-01) — the gate that made x.com's thread "+"
+        // unreachable from every surface.
+        // `checkOpacity: true` walks the ANCESTOR chain, so an element that is
+        // itself fully opaque is reported invisible when any wrapper above it has
+        // opacity 0. Measured: a[data-testid="addButton"][href="/compose/post"] is
+        // 24x24, opacity 1, in-viewport, not disabled/inert/aria-hidden — and sits
+        // under such a wrapper, so every collector gate dropped it and find /
+        // explore_page / page_slice could not see the control at all.
+        // It was also self-inconsistent: this branch was strict while BOTH the
+        // fallback below and isVisible() read the element's OWN style only. Both
+        // paths now apply one rule, and opacity is deliberately NOT a visibility
+        // criterion at all — opacity:0 is a standard "present and interactive"
+        // pattern (focus rings, hit-target wrappers, this one), and a visibility
+        // gate must never hide something the page will happily click.
+        if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) return false;
       } else {
         const s = cachedStyle(el);
-        if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+        if (s.display === 'none' || s.visibility === 'hidden') return false;
       }
     } catch (_) {
       try {
         const s2 = cachedStyle(el);
-        if (s2.display === 'none' || s2.visibility === 'hidden' || s2.opacity === '0') return false;
+        if (s2.display === 'none' || s2.visibility === 'hidden') return false;
       } catch (_) {}
     }
     if (el.getAttribute('aria-hidden') === 'true') return false;
@@ -3864,7 +3878,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-9d9843b8',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-a33b48de',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

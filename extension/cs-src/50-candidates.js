@@ -120,15 +120,29 @@
   function _isVisibleRect(el, rect) {
     try {
       if (typeof el.checkVisibility === 'function') {
-        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+        // ★ VISIBILITY FIX (2026-10-01) — the gate that made x.com's thread "+"
+        // unreachable from every surface.
+        // `checkOpacity: true` walks the ANCESTOR chain, so an element that is
+        // itself fully opaque is reported invisible when any wrapper above it has
+        // opacity 0. Measured: a[data-testid="addButton"][href="/compose/post"] is
+        // 24x24, opacity 1, in-viewport, not disabled/inert/aria-hidden — and sits
+        // under such a wrapper, so every collector gate dropped it and find /
+        // explore_page / page_slice could not see the control at all.
+        // It was also self-inconsistent: this branch was strict while BOTH the
+        // fallback below and isVisible() read the element's OWN style only. Both
+        // paths now apply one rule, and opacity is deliberately NOT a visibility
+        // criterion at all — opacity:0 is a standard "present and interactive"
+        // pattern (focus rings, hit-target wrappers, this one), and a visibility
+        // gate must never hide something the page will happily click.
+        if (!el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })) return false;
       } else {
         const s = cachedStyle(el);
-        if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+        if (s.display === 'none' || s.visibility === 'hidden') return false;
       }
     } catch (_) {
       try {
         const s2 = cachedStyle(el);
-        if (s2.display === 'none' || s2.visibility === 'hidden' || s2.opacity === '0') return false;
+        if (s2.display === 'none' || s2.visibility === 'hidden') return false;
       } catch (_) {}
     }
     if (el.getAttribute('aria-hidden') === 'true') return false;

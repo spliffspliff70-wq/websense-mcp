@@ -1817,5 +1817,27 @@ test('tab routing: neither global cursor can be reintroduced silently', () => {
     'server.js must keep stamping every page op with the calling session tab');
 });
 
+test('visibility: opacity is NOT a visibility criterion (x.com "+" regression)', () => {
+  // 2026-10-01. `checkVisibility({checkOpacity:true})` walks ANCESTORS, so
+  // x.com's a[data-testid="addButton"] (opacity 1, 24x24, in-viewport, enabled)
+  // was reported invisible because a wrapper above it had opacity 0 — and every
+  // collector gate dropped it, making the thread "+" unreachable from find,
+  // explore_page and page_slice alike. It also disagreed with the function's own
+  // fallback and with isVisible(), which both read OWN style. Pin both rules.
+  const C = readFileSync(new URL('./extension/cs-src/50-candidates.js', import.meta.url), 'utf8');
+  const fn = C.match(/function _isVisibleRect\(el, rect\) \{[\s\S]*?\n  \}/);
+  assert(fn, '_isVisibleRect must exist');
+  const code = fn[0].replace(/\/\/[^\n]*/g, '');   // strip comments: the fix explains itself in prose
+  assert(!/checkOpacity:\s*true/.test(code),
+    'checkOpacity must NOT be true — it walks ancestors and drops opaque elements under an opacity:0 wrapper');
+  assert(/checkOpacity:\s*false/.test(code),
+    'checkOpacity must be explicitly false, so the rule is the element OWN style');
+  assert(!/opacity\s*===\s*'0'/.test(code),
+    "own opacity 0 must not be treated as hidden — opacity:0 is a standard present-and-interactive pattern");
+  // and the rule must reject the three real hiding mechanisms
+  assert(/display === 'none'/.test(code) && /visibility === 'hidden'/.test(code),
+    'display:none and visibility:hidden must still be rejected');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
