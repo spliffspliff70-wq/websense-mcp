@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebSense Thread Simulator — x.com failure modes (2026-09-30)</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; background:#000; color:#e7e9ea; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 20px; }
+  /* The inline composer (page level) — this is what a bare
+     [data-testid="tweetTextarea_0"] selector hits FIRST on x.com. */
+  .inlineComposer { border:1px solid #2f3336; border-radius:16px; padding:12px; margin-bottom:18px; }
+  /* The thread modal — a SEPARATE surface with its own editors. */
+  #modal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:none; }
+  #modal.open { display:block; }
+  .sheet { position:absolute; left:50%; top:4%; transform:translateX(-50%);
+           width:600px; max-height:92vh; overflow:auto;
+           background:#000; border:1px solid #2f3336; border-radius:16px; padding:16px; }
+  .slot { border:1px solid #2f3336; border-radius:12px; padding:10px; margin:8px 0; }
+  .slot.locked { opacity:.55; }              /* a stacked/greyed slot, as x.com shows */
+  [contenteditable] { min-height:44px; outline:none; white-space:pre-wrap; }
+  .toolbar { display:flex; gap:10px; align-items:center; margin-top:8px; }
+  button { font:inherit; background:#1d9bf0; color:#fff; border:0; padding:8px 16px; border-radius:999px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.add { background:transparent; border:1px solid #536471; color:#e7e9ea; width:24px; height:24px; padding:0; border-radius:6px; }
+  #log { white-space:pre-wrap; background:#111; padding:10px; margin-top:16px; font-size:12px; max-height:260px; overflow:auto; border:1px solid #2f3336; }
+  h1 { font-size:18px; } h2 { font-size:14px; color:#71767b; margin:18px 0 6px; }
+  .pill { display:inline-block; background:#1d9bf0; color:#000; border-radius:999px; padding:1px 8px; font-size:12px; font-weight:700; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Thread Simulator <span class="pill" id="verdict">not run</span></h1>
+  <h2>Reproduces three measured x.com behaviours</h2>
+  <ol style="font-size:13px;color:#71767b">
+    <li><b>Two composers.</b> A bare <code>tweetTextarea_0</code> selector matches the inline one FIRST — the exact reason root text and reply 1 landed in different surfaces.</li>
+    <li><b>Stacked slots.</b> <code>addButton</code> opens slot N+1 and greys slot N; the button only exists once a slot has text.</li>
+    <li><b>Partial paste.</b> The editor drops the FIRST LINE of a paste (the x.com Draft.js behaviour that produced a 483-char field) — so rung 2 must not append into it.</li>
+  </ol>
+
+  <h2>A. Inline composer (page level)</h2>
+  <div class="inlineComposer">
+    <div contenteditable="true" data-testid="tweetTextarea_0" id="inline0"></div>
+    <div class="toolbar">
+      <button class="add" data-testid="addButton" aria-label="Add post" id="inlineAdd" style="display:none">+</button>
+      <button data-testid="tweetButtonInline" id="inlinePost" disabled>Post</button>
+    </div>
+  </div>
+
+  <h2>B. Thread modal (separate surface)</h2>
+  <div class="toolbar"><button id="openModal">Open thread composer</button></div>
+</div>
+
+<div id="modal" role="dialog" aria-label="Thread composer">
+  <div class="sheet">
+    <h2>Thread composer</h2>
+    <div id="slots"></div>
+    <div class="toolbar">
+      <button data-testid="tweetButton" id="postAll" disabled>Post all</button>
+      <button id="closeModal">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="wrap"><h2>C. Live log</h2><div id="log"></div></div>
+
+<script>
+(function () {
+  var logEl = document.getElementById('log');
+  function log(m) {
+    var d = document.createElement('div');
+    d.textContent = m;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // ── the partial-paste emulation ────────────────────────────────────────────
+  // x.com's Draft.js composer swallowed the first line of a synthetic paste.
+  // We reproduce that ONLY for a paste that has more than one line, and only
+  // on the first paste into a given slot — so a genuine insertText is unaffected.
+  var pasteArmed = true;
+  document.addEventListener('paste', function (ev) {
+    var ed = ev.target.closest && ev.target.closest('[contenteditable="true"]');
+    if (!ed || !pasteArmed) return;
+    var txt = (ev.clipboardData && ev.clipboardData.getData('text/plain')) || '';
+    if (txt.indexOf('\n') === -1) return;      // single line: let it through intact
+    pasteArmed = false;
+    ev.preventDefault();
+    var lines = txt.split('\n');
+    lines.shift();                               // DROP THE FIRST LINE, as x.com did
+    var rest = lines.join('\n');
+    // Land the remainder asynchronously — the window in which the real
+    // type_text's paste rung decides whether it "matched".
+    setTimeout(function () {
+      ed.textContent = rest;
+      ed.dispatchEvent(new Event('input', { bubbles: true }));
+      log('paste rung: dropped line 1 of ' + (txt.split('\n').length) +
+          ', left ' + rest.length + ' chars in the field');
+    }, 30);
+  }, true);
+
+  function wireEditor(ed, onChange) {
+    ed.addEventListener('input', onChange);
+  }
+
+  // ── inline composer ────────────────────────────────────────────────────────
+  var inline0 = document.getElementById('inline0');
+  var inlineAdd = document.getElementById('inlineAdd');
+  var inlinePost = document.getElementById('inlinePost');
+  wireEditor(inline0, function () {
+    var has = inline0.innerText.trim().length > 0;
+    inlineAdd.style.display = has ? 'inline-block' : 'none';  // + appears only after text
+    inlinePost.disabled = !has;
+  });
+  inlineAdd.addEventListener('click', function () {
+    // on x.com this is an <a href="/compose/post">: it NAVIGATES and the draft is lost.
+    log('inline + clicked -> NAVIGATES (draft would be lost here). use the modal.');
+  });
+  inlinePost.addEventListener('click', function () { log('inline Post (unused in sim)'); });
+
+  // ── thread modal ───────────────────────────────────────────────────────────
+  var modal = document.getElementById('modal');
+  var slotsEl = document.getElementById('slots');
+  var postAll = document.getElementById('postAll');
+  var slotCount = 0;
+  var staged = [];          // what the driver staged
+  var published = [];       // what "Post all" actually committed
+
+  function addSlot(lockPrevious) {
+    if (lockPrevious) {
+      var prev = slotsEl.querySelector('[contenteditable="true"]:last-of-type');
+      if (prev) prev.parentElement.classList.add('locked');
+    }
+    slotCount++;
+    var idx = slotCount - 1;
+    var wrap = document.createElement('div');
+    wrap.className = 'slot';
+    var ed = document.createElement('div');
+    ed.setAttribute('contenteditable', 'true');
+    ed.setAttribute('data-testid', 'tweetTextarea_' + idx);
+    var bar = document.createElement('div');
+    bar.className = 'toolbar';
+    var add = document.createElement('button');
+    add.className = 'add';
+    add.setAttribute('data-testid', 'addButton');
+    add.setAttribute('aria-label', 'Add post');
+    add.textContent = '+';
+    add.style.display = 'none';
+    add.addEventListener('click', function () { addSlot(true); });   // STACKS
+    bar.appendChild(add);
+    wrap.appendChild(ed); wrap.appendChild(bar);
+    slotsEl.appendChild(wrap);
+    wireEditor(ed, function () {
+      var v = ed.innerText.trim();
+      add.style.display = v.length ? 'inline-block' : 'none';        // appears once text exists
+      var eds = slotsEl.querySelectorAll('[contenteditable="true"]');
+      for (var i = 0; i < eds.length; i++) if (eds[i].innerText.trim().length) staged[i] = eds[i].innerText.trim();
+      var filled = staged.filter(Boolean).length;
+      // The MEASURED x.com behaviour under test: a single "Post all" on a long
+      // thread commits only the first SIX and reports nothing. Reproduced so the
+      // harness can prove the batched path publishes everything.
+      postAll.disabled = filled === 0;
+      postAll.textContent = 'Post all (' + filled + ')';
+    });
+    return ed;
+  }
+
+  document.getElementById('openModal').addEventListener('click', function () {
+    modal.classList.add('open');
+    if (slotCount === 0) addSlot(false);
+    log('thread modal opened');
+  });
+  document.getElementById('closeModal').addEventListener('click', function () {
+    modal.classList.remove('open');
+  });
+  postAll.addEventListener('click', function () {
+    var filled = staged.filter(Boolean).length;
+    published = staged.slice(0, filled);
+    var verdict = document.getElementById('verdict');
+    verdict.textContent = 'published ' + published.length + '/' + staged.length;
+    log('Post all -> committed ' + published.length + ' of ' + staged.length +
+        ' slots; statusIds ' + published.map(function (_, i) { return 'SIM' + (i + 1); }).join(','));
+    window.__simResult = { staged: staged.filter(Boolean).length, published: published.length,
+                           statusIds: published.map(function (_, i) { return 'SIM' + (i + 1); }) };
+  });
+
+  // exposes the ground truth for the harness read
+  window.__sim = function () {
+    var eds = slotsEl.querySelectorAll('[contenteditable="true"]');
+    var vals = [];
+    for (var i = 0; i < eds.length; i++) vals.push(eds[i].innerText.trim());
+    var addBtns = document.querySelectorAll('#modal [data-testid="addButton"]');
+    var last = addBtns[addBtns.length - 1];
+    var r = last ? last.getBoundingClientRect() : null;
+    return {
+      modalOpen: modal.classList.contains('open'),
+      inlineChars: inline0.innerText.trim().length,
+      modalSlots: vals,
+      staged: vals.filter(Boolean).length,
+      lastAddBtn: r ? { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) } : null,
+      postAllLabel: postAll.textContent,
+      postAllDisabled: postAll.disabled,
+      result: window.__simResult || null
+    };
+  };
+  log('simulator ready');
+})();
+</script>
+</body>
+</html>
