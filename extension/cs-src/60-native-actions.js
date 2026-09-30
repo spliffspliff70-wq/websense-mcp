@@ -296,6 +296,13 @@
       const expected = String(text).trim();
       const textMatches = () => { const v = readBack(); return v === expected || v.replace(/\n/g, '') === expected.replace(/\n/g, ''); };
 
+      // BASELINE: what the field held when this call took over, AFTER the clear
+      // phase. This is the whole discriminator — no parameter needed. Empty here
+      // means the clear succeeded (or was not asked for) and whatever appears
+      // later is OUR residue; non-empty means the caller legitimately left content
+      // to build on (clearFirst:false), and we must not destroy it.
+      const baselineAtHandoff = readBack();
+
       // RUNG 1: synthetic ClipboardEvent paste (the strategy editors consume).
       // v4.2: accept on TEXT MATCH as primary signal — some editors consume the
       // event without preventDefault, and a second insertText would double it.
@@ -325,32 +332,38 @@
       // insertText appended it — observed across Chrome CS re-injection
       // races), wipe and retype once cleanly.
       //
-      // v4.6.2 (2026-09-30) PARTIAL-PASTE GUARD. Measured live on x.com's
-      // Draft.js composer: rung 1's paste could land PARTIALLY (first line
-      // dropped, remainder mangled) without matching `textMatches()` in the
-      // 250 ms window. Rung 2 then APPENDED the full text to that broken
-      // remnant, producing a 483-char field for a 269-char post — and the
-      // existing self-heal did NOT catch it, because its trigger is
-      // `occurrence > 1` (exact doubling) and a partial paste yields
-      // occurrence 0. Two mutation rungs writing the same editor is the
-      // defect (a ladder must abort on first-rung success), so rung 2 now
-      // refuses to append into a field that already holds anything, wipes
-      // it, and performs ONE clean insertText.
+      // v4.6.2 (2026-09-30) RESIDUE GUARD. Measured live on x.com's Draft.js
+      // composer: rung 1's paste could land PARTIALLY (first line dropped,
+      // remainder mangled) without matching `textMatches()` in the 250 ms window.
+      // Rung 2 then APPENDED the full text to that broken remnant, producing a
+      // 483-char field for a 269-char post — and the existing self-heal did NOT
+      // catch it, because its trigger is `occurrence > 1` (exact doubling) while
+      // a partial paste yields occurrence 0.
+      //
+      // The discriminator is the FIELD, not a flag. Compare what the paste rung
+      // left against the baseline this call started from:
+      //   baseline empty  + dirty now  -> WE caused it (partial paste) -> wipe.
+      //   baseline filled  + dirty now  -> the caller left it to build on
+      //                                   (clearFirst:false append) -> keep it.
+      // A guard keyed on clearFirst would have been both cruder and wrong; the
+      // page already knows which case this is.
       const preInsert = readBack();
-      const preInsertDirty = preInsert.length > 0;
+      const dirtiedByUs = preInsert.length > 0 && baselineAtHandoff.length === 0;
       let ok;
-      if (preInsertDirty) {
+      if (dirtiedByUs) {
         el.textContent = '';
         el.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise((r) => setTimeout(r, 120));
-        results.attempts.push({ rung: 'pre-insert-wipe', reason: 'field not empty after paste rung' });
+        results.attempts.push({ rung: 'pre-insert-wipe', reason: 'paste rung left residue in a field this call had emptied' });
       }
       const range = document.createRange();
       range.selectNodeContents(el);
       range.collapse(false);
       sel.removeAllRanges(); sel.addRange(range);
       ok = document.execCommand('insertText', false, text);
-      results.attempts.push({ rung: 'insertText', ok, intoEmptyField: !preInsertDirty });
+      results.attempts.push({ rung: 'insertText', ok,
+        baselineWasEmpty: baselineAtHandoff.length === 0,
+        residueDiscarded: dirtiedByUs });
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return new Promise(function(resolve) {
         setTimeout(function() {
@@ -368,7 +381,17 @@
             finalVal = readBack();
             results.attempts.push({ rung: 'self-heal-retype', detected: 'doubling' });
           }
-          const matches = finalVal === expected || finalVal.replace(/\n/g,'') === expected.replace(/\n/g,'');
+          // The post-condition is "the call's text is present, and nothing else
+          // WE added". When the caller handed us a baseline to build on
+          // (clearFirst:false), the correct end state is baseline + text, so
+          // comparing finalVal to `expected` alone would report a false failure on
+          // a perfectly good append. Judge against the baseline we measured.
+          const wantExact = baselineAtHandoff.length === 0;
+          const wantAppend = baselineAtHandoff + expected;
+          const flat = (s) => s.replace(/\n/g, '');
+          const matches = wantExact
+            ? (finalVal === expected || flat(finalVal) === flat(expected))
+            : (finalVal === wantAppend || flat(finalVal) === flat(wantAppend));
           const truth = checkStateTruth(el);
           resolve({
             success: matches,
@@ -376,6 +399,8 @@
             actualValue: finalVal.slice(0, 200),
             reverted: !matches,
             expected: expected.slice(0, 200),
+            expectedFinal: (wantExact ? expected : wantAppend).slice(0, 200),
+            mode: wantExact ? 'replace' : 'append',
             execCommandOk: ok,
             stateTruth: truth,
             ...results,

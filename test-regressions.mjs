@@ -735,42 +735,45 @@ test('manifest: still loads ONE content script file (no runtime-scope change)', 
 // 2026-09-30 — type_text rung 2 must not append into a partially-pasted editor
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('cs: rung 2 wipes a non-empty field before insertText (partial-paste guard)', () => {
+test('cs: rung 2 wipes residue ONLY when this call had emptied the field', () => {
   const src = readFileSync(new URL('./extension/cs-src/60-native-actions.js', import.meta.url), 'utf8');
-  // Isolate rung 2 — the block between its comment and the self-heal.
   const m = src.match(/RUNG 2: execCommand insertText[\s\S]*?const preInsert = readBack\(\);/);
   assert(m, 'rung 2 still declares its pre-insert read');
   const block = src.slice(src.indexOf('RUNG 2: execCommand insertText'),
                           src.indexOf("rung: 'self-heal-retype'"));
-  assert(block.includes('const preInsertDirty = preInsert.length > 0;'),
-    'rung 2 reads whether the field already holds content');
-  assert(block.includes('if (preInsertDirty)') && block.includes("el.textContent = ''"),
-    'rung 2 clears the field before writing when the paste rung left content behind');
+  // The discriminator is the FIELD's prior state, captured before the paste rung —
+  // never the clearFirst flag. That is what makes append semantics survive.
+  assert(src.includes('const baselineAtHandoff = readBack();'),
+    'the baseline is measured after the clear phase, before the paste rung');
+  assert(block.includes('const dirtiedByUs = preInsert.length > 0 && baselineAtHandoff.length === 0;'),
+    'rung 2 wipes only residue in a field THIS CALL emptied');
+  assert(block.includes('if (dirtiedByUs)') && block.includes("el.textContent = ''"),
+    'the wipe is gated on that test');
+  // Strip comments before asserting on CODE shape — the comment explains the
+  // clearFirst case in prose, which is not the same as branching on the flag.
+  const codeOnly = block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert(!/cf\s*!==\s*false|clearFirst/.test(codeOnly),
+    'the guard does NOT branch on the clearFirst parameter — the page decides');
   // The write must come AFTER the wipe, or the guard is decorative.
   assert(block.indexOf("el.textContent = ''") < block.indexOf("execCommand('insertText'"),
     'the wipe happens BEFORE the insertText write (order is the whole fix)');
-  assert(block.includes('intoEmptyField: !preInsertDirty'),
-    'the attempt row records which case fired, so a partial paste is visible in the result');
+  assert(block.includes('residueDiscarded: dirtiedByUs'),
+    'the attempt row records the decision, so a discarded residue is visible');
 });
 
-test('cs: a partial paste cannot produce the doubled/interleaved field again', () => {
-  // The historical defect: paste landed PARTIALLY (first line dropped), textMatches()
-  // was false in the 250 ms window, rung 2 appended the full text to the remnant, and
-  // the old self-heal missed it because its trigger was `occurrence > 1` (exact doubling)
-  // while a partial paste yields occurrence 0. The guard is keyed to "field non-empty",
-  // which is true for BOTH the partial and the doubled case — that is what makes it
-  // general rather than a patch for one observed symptom.
+test('cs: an append (clearFirst:false) is judged against baseline + text', () => {
+  // clearFirst:false means "build on what is there". With a non-empty baseline the
+  // correct end state is baseline+text, so a verdict comparing to `expected` alone
+  // would fail a perfectly good append — which is the regression the first
+  // iteration of this fix would have shipped.
   const src = readFileSync(new URL('./extension/cs-src/60-native-actions.js', import.meta.url), 'utf8');
-  const block = src.slice(src.indexOf('RUNG 2: execCommand insertText'),
-                          src.indexOf("rung: 'self-heal-retype'"));
-  assert(block.includes('preInsert.length > 0'),
-    'the guard keys on emptiness, so it covers partial AND doubled pastes alike');
-  // The old self-heal must still be reachable for the exact-doubling case it was
-  // written for — removing it would trade one corruption for another. It lives in
-  // the post-write settle, so search the whole file, not the pre-write slice.
-  const whole = readFileSync(new URL('./extension/cs-src/60-native-actions.js', import.meta.url), 'utf8');
-  assert(whole.includes("rung: 'self-heal-retype'") && whole.includes('occurrence > 1'),
-    'the doubling self-heal is retained alongside the new guard');
+  assert(src.includes('const wantAppend = baselineAtHandoff + expected;'),
+    'the expected end state for an append is baseline + text');
+  assert(src.includes('mode: wantExact ? \'replace\' : \'append\''),
+    'the result names which mode ran, so a caller is never guessing');
+  // The doubling self-heal stays — it is still correct for the replace case.
+  assert(src.includes("rung: 'self-heal-retype'") && src.includes('occurrence > 1'),
+    'the doubling self-heal is retained alongside the residue guard');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
