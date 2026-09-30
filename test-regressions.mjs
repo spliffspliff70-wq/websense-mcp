@@ -732,6 +732,48 @@ test('manifest: still loads ONE content script file (no runtime-scope change)', 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 2026-09-30 — type_text rung 2 must not append into a partially-pasted editor
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('cs: rung 2 wipes a non-empty field before insertText (partial-paste guard)', () => {
+  const src = readFileSync(new URL('./extension/cs-src/60-native-actions.js', import.meta.url), 'utf8');
+  // Isolate rung 2 — the block between its comment and the self-heal.
+  const m = src.match(/RUNG 2: execCommand insertText[\s\S]*?const preInsert = readBack\(\);/);
+  assert(m, 'rung 2 still declares its pre-insert read');
+  const block = src.slice(src.indexOf('RUNG 2: execCommand insertText'),
+                          src.indexOf("rung: 'self-heal-retype'"));
+  assert(block.includes('const preInsertDirty = preInsert.length > 0;'),
+    'rung 2 reads whether the field already holds content');
+  assert(block.includes('if (preInsertDirty)') && block.includes("el.textContent = ''"),
+    'rung 2 clears the field before writing when the paste rung left content behind');
+  // The write must come AFTER the wipe, or the guard is decorative.
+  assert(block.indexOf("el.textContent = ''") < block.indexOf("execCommand('insertText'"),
+    'the wipe happens BEFORE the insertText write (order is the whole fix)');
+  assert(block.includes('intoEmptyField: !preInsertDirty'),
+    'the attempt row records which case fired, so a partial paste is visible in the result');
+});
+
+test('cs: a partial paste cannot produce the doubled/interleaved field again', () => {
+  // The historical defect: paste landed PARTIALLY (first line dropped), textMatches()
+  // was false in the 250 ms window, rung 2 appended the full text to the remnant, and
+  // the old self-heal missed it because its trigger was `occurrence > 1` (exact doubling)
+  // while a partial paste yields occurrence 0. The guard is keyed to "field non-empty",
+  // which is true for BOTH the partial and the doubled case — that is what makes it
+  // general rather than a patch for one observed symptom.
+  const src = readFileSync(new URL('./extension/cs-src/60-native-actions.js', import.meta.url), 'utf8');
+  const block = src.slice(src.indexOf('RUNG 2: execCommand insertText'),
+                          src.indexOf("rung: 'self-heal-retype'"));
+  assert(block.includes('preInsert.length > 0'),
+    'the guard keys on emptiness, so it covers partial AND doubled pastes alike');
+  // The old self-heal must still be reachable for the exact-doubling case it was
+  // written for — removing it would trade one corruption for another. It lives in
+  // the post-write settle, so search the whole file, not the pre-write slice.
+  const whole = readFileSync(new URL('./extension/cs-src/60-native-actions.js', import.meta.url), 'utf8');
+  assert(whole.includes("rung: 'self-heal-retype'") && whole.includes('occurrence > 1'),
+    'the doubling self-heal is retained alongside the new guard');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 2026-09-11d — hub census, tabId hardening, and extension tab-hop guards
 // ─────────────────────────────────────────────────────────────────────────────
 

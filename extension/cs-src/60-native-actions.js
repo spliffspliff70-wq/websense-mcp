@@ -324,12 +324,33 @@
       // MORE THAN ONCE (the doubling signature: paste inserted it AND
       // insertText appended it — observed across Chrome CS re-injection
       // races), wipe and retype once cleanly.
+      //
+      // v4.6.2 (2026-09-30) PARTIAL-PASTE GUARD. Measured live on x.com's
+      // Draft.js composer: rung 1's paste could land PARTIALLY (first line
+      // dropped, remainder mangled) without matching `textMatches()` in the
+      // 250 ms window. Rung 2 then APPENDED the full text to that broken
+      // remnant, producing a 483-char field for a 269-char post — and the
+      // existing self-heal did NOT catch it, because its trigger is
+      // `occurrence > 1` (exact doubling) and a partial paste yields
+      // occurrence 0. Two mutation rungs writing the same editor is the
+      // defect (a ladder must abort on first-rung success), so rung 2 now
+      // refuses to append into a field that already holds anything, wipes
+      // it, and performs ONE clean insertText.
+      const preInsert = readBack();
+      const preInsertDirty = preInsert.length > 0;
+      let ok;
+      if (preInsertDirty) {
+        el.textContent = '';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 120));
+        results.attempts.push({ rung: 'pre-insert-wipe', reason: 'field not empty after paste rung' });
+      }
       const range = document.createRange();
       range.selectNodeContents(el);
       range.collapse(false);
       sel.removeAllRanges(); sel.addRange(range);
-      const ok = document.execCommand('insertText', false, text);
-      results.attempts.push({ rung: 'insertText', ok });
+      ok = document.execCommand('insertText', false, text);
+      results.attempts.push({ rung: 'insertText', ok, intoEmptyField: !preInsertDirty });
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return new Promise(function(resolve) {
         setTimeout(function() {

@@ -2784,12 +2784,33 @@
       // MORE THAN ONCE (the doubling signature: paste inserted it AND
       // insertText appended it — observed across Chrome CS re-injection
       // races), wipe and retype once cleanly.
+      //
+      // v4.6.2 (2026-09-30) PARTIAL-PASTE GUARD. Measured live on x.com's
+      // Draft.js composer: rung 1's paste could land PARTIALLY (first line
+      // dropped, remainder mangled) without matching `textMatches()` in the
+      // 250 ms window. Rung 2 then APPENDED the full text to that broken
+      // remnant, producing a 483-char field for a 269-char post — and the
+      // existing self-heal did NOT catch it, because its trigger is
+      // `occurrence > 1` (exact doubling) and a partial paste yields
+      // occurrence 0. Two mutation rungs writing the same editor is the
+      // defect (a ladder must abort on first-rung success), so rung 2 now
+      // refuses to append into a field that already holds anything, wipes
+      // it, and performs ONE clean insertText.
+      const preInsert = readBack();
+      const preInsertDirty = preInsert.length > 0;
+      let ok;
+      if (preInsertDirty) {
+        el.textContent = '';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 120));
+        results.attempts.push({ rung: 'pre-insert-wipe', reason: 'field not empty after paste rung' });
+      }
       const range = document.createRange();
       range.selectNodeContents(el);
       range.collapse(false);
       sel.removeAllRanges(); sel.addRange(range);
-      const ok = document.execCommand('insertText', false, text);
-      results.attempts.push({ rung: 'insertText', ok });
+      ok = document.execCommand('insertText', false, text);
+      results.attempts.push({ rung: 'insertText', ok, intoEmptyField: !preInsertDirty });
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return new Promise(function(resolve) {
         setTimeout(function() {
@@ -3818,7 +3839,7 @@
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
         case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-ff5faf0d',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-b8de23ab',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

@@ -110,6 +110,21 @@ def cmd_activate_tab(args):
     "Chrome window not found (gate: popup.html)" while the tab was sitting there
     backgrounded. Now: prefer a window that already satisfies the gate, else fall
     back to any Chrome window, then activate, then VERIFY the gate (as documented).
+
+    TITLE COLLISIONS (fixed 2026-09-30): SPA tabs do not have unique titles. Measured
+    on x.com: three open tabs all reported "Home / X" through UIA, so `--match
+    "Home / X"` could only ever activate the first one, and a `--match` naming the
+    URL ("x.com/compose/post") — which the websense `tabs{action:"list"}` view DOES
+    report as a URL-as-title placeholder — matched nothing at all and returned the
+    bare "Tab not found" with no hint that the title simply is not unique.
+
+    Two ways out, both now supported:
+      * `--index N` targets a tab by POSITION among the TabItems (0-based). This is
+        the reliable address for same-titled tabs; pair it with `tabs{action:"list"}`,
+        which enumerates tabs in the same order.
+      * when several tabs match and no --index was given, the error now NAMES the
+        collision and lists the titles with their indexes, instead of silently
+        activating the wrong one or failing opaquely.
     """
     from pywinauto import Desktop
     windows = [w for w in Desktop(backend='uia').windows()
@@ -119,13 +134,28 @@ def cmd_activate_tab(args):
     if not chrome:
         return {"success": False, "error": f"Chrome window not found (gate: {args.gate})"}
     tabs = chrome.descendants(control_type="TabItem")
-    target = None
-    for t in tabs:
-        if args.match in t.window_text():
-            target = t
-            break
-    if not target:
-        return {"success": False, "error": f"Tab not found: {args.match}"}
+    idx = getattr(args, 'index', None)
+    if idx is not None:
+        try:
+            i = int(idx)
+        except (TypeError, ValueError):
+            return {"success": False, "error": f"--index must be an integer, got {idx!r}"}
+        if i < 0 or i >= len(tabs):
+            return {"success": False,
+                    "error": f"--index {i} out of range ({len(tabs)} tabs open)",
+                    "tabs": [{"index": n, "title": t.window_text()} for n, t in enumerate(tabs)]}
+        target = tabs[i]
+    else:
+        matches = [t for t in tabs if args.match in t.window_text()]
+        if not matches:
+            return {"success": False, "error": f"Tab not found: {args.match}",
+                    "tabs": [{"index": n, "title": t.window_text()} for n, t in enumerate(tabs)]}
+        if len(matches) > 1:
+            return {"success": False,
+                    "error": (f"{len(matches)} tabs match {args.match!r} — titles are not unique. "
+                              "Re-run with --index N."),
+                    "tabs": [{"index": n, "title": t.window_text()} for n, t in enumerate(tabs)]}
+        target = matches[0]
     # click_input() silently no-ops on Chrome TabItems (UIA Invoke) and STILL
     # exits 0 with {"success": true} — a lie the caller cannot detect. A/B tested
     # 2026-09-25 against real Chrome: click_input left the active tab unchanged
@@ -141,6 +171,26 @@ def cmd_activate_tab(args):
     title = chrome.window_text()
     # VERIFY what we were asked to do. Before this, success only meant "found a
     # tab whose text matched" — never "that tab is now active".
+    #
+    # With --index the positional address IS the request, and the post-activation
+    # window title cannot confirm it (every SPA tab on x.com reads "Home / X").
+    # Re-reading the TabItem list and asking the SELECTED item is the only honest
+    # oracle — pywinauto's is_selected() can be a stale cache, but after the 2s
+    # settle a re-read of the UIA element is fresh. If that is unavailable we report
+    # the title and say the activation could not be confirmed, rather than
+    # claiming success off a title that proves nothing.
+    if idx is not None:
+        try:
+            now = chrome.descendants(control_type="TabItem")[i]
+            is_sel = bool(now.is_selected())
+        except Exception:
+            is_sel = None
+        if is_sel:
+            return {"success": True, "title": title, "index": i, "verifiedBy": "selected-tabitem"}
+        return {"success": False,
+                "error": (f"--index {i} activated but selection could not be confirmed "
+                          f"(window title: {title})"),
+                "index": i, "title": title}
     if args.match and args.match.lower() not in title.lower():
         return {"success": False, "error": f"Tab not activated (window title: {title})",
                 "matched": args.match, "title": title}
@@ -264,7 +314,9 @@ def main():
     sub = p.add_subparsers(dest='command')
     # activate-tab
     at = sub.add_parser('activate-tab')
-    at.add_argument('--match', required=True, help='Tab title substring to match')
+    at.add_argument('--match', default='', help='Tab title substring to match (omit when using --index)')
+    at.add_argument('--index', type=int, default=None,
+                    help='Activate the Nth open tab (0-based) — the reliable address when several tabs share a title')
     at.add_argument('--gate', default=None)
     at.set_defaults(func=cmd_activate_tab)
     # click-xy (viewport coords)
