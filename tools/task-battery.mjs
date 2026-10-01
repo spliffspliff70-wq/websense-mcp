@@ -128,6 +128,36 @@ const scenarios = [
       return { pass: after === target, why: 'select ' + before + ' -> ' + after + ' (target ' + target + ') | placeholder=' + JSON.stringify(ph) + ' | tool said: ' + claimTxt, on: sel.loc };
     },
   },
+  {
+    name: 'S5 cross-tab: an op aimed at tab B must not touch tab A',
+    run: async () => {
+      // Two tabs, two sites, each watched through its own page context. This is the property the
+      // factory depends on (many workers, one Chrome): an op addressed to one tab must not land on
+      // another, and the tab-binding latch is a known bug family here (PITFALL 16/26).
+      const a = await call('browse', { url: 'https://www.wikipedia.org/' });
+      const ta = a.tabId;
+      const b2 = await call('browse', { url: 'https://news.ycombinator.com/', newTab: true });
+      const tb = b2.tabId;
+      if (!ta || !tb || ta === tb) return { pass: false, why: 'expected two distinct tabs, got ' + ta + '/' + tb };
+      await sleep(2500);
+      const beforeA = await oracle(ta, '() => ({ url: location.href, sel: (document.querySelector("select")||{}).value || null, txt: document.body.innerText.length })');
+      const f = await call('find', { tabId: tb, field: true, limit: 20 });
+      const input = (f.hits || []).find((h) => h.tag === 'input');
+      if (!input) return { pass: false, why: 'no text input on tab B' };
+      await call('type_text', { tabId: tb, ref: input.loc, text: 'CROSSTAB' });
+      await sleep(700);
+      const afterA = await oracle(ta, '() => ({ url: location.href, sel: (document.querySelector("select")||{}).value || null, txt: document.body.innerText.length })');
+      const afterB = await oracle(tb, '() => { var i=document.querySelector("input[type=text]"); return i ? i.value : null; }');
+      const bGotIt = String(afterB) === 'CROSSTAB';
+      const aUntouched = afterA.url === beforeA.url && afterA.sel === beforeA.sel && afterA.txt === beforeA.txt;
+      await call('tabs', { action: 'close', tabId: tb });
+      return {
+        pass: bGotIt && aUntouched,
+        why: 'tabB input=' + JSON.stringify(afterB) + ' (want CROSSTAB) | tabA untouched=' + aUntouched
+          + ' (url ' + (afterA.url === beforeA.url) + ', select ' + (afterA.sel === beforeA.sel) + ', text ' + (afterA.txt === beforeA.txt) + ')',
+      };
+    },
+  },
 ];
 
 let pass = 0;

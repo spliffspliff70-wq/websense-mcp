@@ -2359,6 +2359,36 @@ test('cs: typing into a disabled/read-only control must SAY SO, not advise a re-
   assert(/hint:/.test(m[0]), 'and carry a usable next step instead of a re-read loop');
 });
 
+test('collector: the walk must descend into OPEN SHADOW ROOTS', () => {
+  // ★ Measured on the repo's own bench/shadow_fixture.html, 2026-10-01: one
+  // document.querySelectorAll('*') saw 22 light-DOM elements and NONE of the marked shadow
+  // controls (shadow-btn, deep-shadow-btn two roots deep, shadow-input, shadow-file) — so on any
+  // Lit/FAST/Stencil/faceplate site, browse/find reported an empty page over a real one. The
+  // fixture exists to catch exactly this and its own comment says a plain selector sees an
+  // "empty" page. After the fix the same page yields 27 elements and all five controls, typing
+  // into a shadow input was verified inside the shadow DOM, and both file inputs read files=1.
+  assert(/function walkShadow\(root, host\)/.test(COLLECTOR), 'the collector must walk shadow roots');
+  assert(/if \(le\.shadowRoot\) walkShadow\(le\.shadowRoot, le\)/.test(COLLECTOR), 'descending into each host open shadowRoot');
+  assert(/le\.parentElement \|\| host/.test(COLLECTOR), 'a shadow child logical parent is its HOST (it has no parentElement)');
+  assert(/function parentOf\(el\)/.test(COLLECTOR), 'and the branch pointer must resolve through it');
+  assert(!/try \{ all = document\.querySelectorAll/.test(COLLECTOR), 'the light-DOM-only enumeration must be gone');
+});
+
+test('browse: the reply must include the tabId (a caller sharing Chrome has nothing else to pass)', () => {
+  // ★ Found 2026-10-01 by attempting a cross-tab isolation test: browse answered with an opaque
+  // `handle` and no tabId, so the test could not name the two tabs it had opened, and a caller
+  // that wants to address the tab explicitly — which is what any session sharing a Chrome with
+  // other workers must do — had nothing to pass and could only rely on session binding.
+  const at = SRV_SRC.indexOf("reg(server, 'browse'");
+  assert(at > 0, 'the browse handler must be findable');
+  const b = SRV_SRC.slice(at);
+  assert(/cached: true, tabId,/.test(b), 'the WARM browse reply must carry tabId');
+  // anchor on the COLD reply's own opening fields — there are earlier `return textResult({` lines
+  // in this handler (the no-tab error and the collect-failed error), so searching for the first
+  // one asserts on the wrong object
+  assert(/navigated: navigated, handle:[\s\S]{0,900}?tabId,/.test(b), 'and so must the COLD one');
+});
+
 test('diff: a diff taken across a NAVIGATION must say so', () => {
   // ★ A click that navigated came back mutated:false — "nothing changed" for a whole new document
   // — because the baseline belongs to the document that was replaced. Measured with an outside

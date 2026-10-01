@@ -2104,7 +2104,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         // nothing to recompute here.
         let warmRegions = null;
         try { warmRegions = regionTree(warm.snap); } catch (e) { warmRegions = { error: String(e && e.message) }; }
-        return textResult({ success: true, cached: true, ageMs: Date.now() - warm.at, handle: 'snap:' + tabId + ':' + warm.seq, seq: warm.seq, index: warm.index, regions: warmRegions && warmRegions.outline, hint: 'regions = the containers THIS page named, nested. find{query} to locate a control with its branch, page_slice to load one branch.' });
+        return textResult({ success: true, cached: true, tabId, ageMs: Date.now() - warm.at, handle: 'snap:' + tabId + ':' + warm.seq, seq: warm.seq, index: warm.index, regions: warmRegions && warmRegions.outline, hint: 'regions = the containers THIS page named, nested. find{query} to locate a control with its branch, page_slice to load one branch. tabId = the tab this page is bound to.' });
       }
     }
 
@@ -2132,10 +2132,16 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     try { regions = regionTree(snap); } catch (e) { regions = { error: String(e && e.message) }; }
     return textResult({
       success: true, cached: false, navigated: navigated, handle: 'snap:' + tabId + ':' + seq, seq,
+      // ★ tabId IS PART OF THE ANSWER (2026-10-01). It was missing, so a caller that wanted to
+      // address this tab explicitly — which is what any session sharing a Chrome with other
+      // workers must do, and what the factory does — had nothing to pass and could only rely on
+      // session binding. Found by attempting a cross-tab isolation test: browse answered with an
+      // opaque `handle` and no tabId, so the test could not even name the two tabs it had opened.
+      tabId,
       baseline: baseline && baseline.first ? 'seeded — the NEXT op on this page is diffable' : (baseline && baseline.note) || 'seeded',
       index,
       regions: regions && regions.outline,
-      hint: 'regions = the containers THIS page named, nested. find{query} to locate a control with its branch, or page_slice{...} to load one branch. Mutating ops now return a grouped DIFF automatically.',
+      hint: 'regions = the containers THIS page named, nested. find{query} to locate a control with its branch, or page_slice{...} to load one branch. Mutating ops now return a grouped DIFF automatically. tabId = the tab this page is bound to — pass it explicitly on later ops if this Chrome is shared.',
     });
   });
 

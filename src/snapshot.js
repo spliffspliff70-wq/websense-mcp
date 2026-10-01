@@ -42,9 +42,34 @@ export const COLLECTOR = `() => {
   // correctness — and the index now carries 'dropped' (must be 0) so a future cut
   // cannot hide.
   var out = [];
-  var all;
-  try { all = document.querySelectorAll('*'); } catch (e) { all = []; }
+  // ★ SHADOW ROOTS ARE PART OF THE PAGE (2026-10-01). This was one
+  // document.querySelectorAll('*'), which CANNOT see into a shadow root — so on the repo's own
+  // shadow fixture the inventory held 22 light-DOM elements and NONE of the marked controls, and
+  // the same would be true of any Lit/FAST/Stencil/faceplate site (the fixture names those as the
+  // production pattern). Measured absent: shadow-btn, deep-shadow-btn (two roots deep),
+  // shadow-input and shadow-file. The fixture's own comment says a plain selector sees an "empty"
+  // page while the real controls are present — it was written to catch exactly this.
+  // Walk the document and every OPEN shadow root under it, in order. A shadow child has no
+  // parentElement of its own, so its logical parent is the HOST element; that is what keeps the
+  // branch pointer walking up into the light DOM above it, and what lets a shadow control report
+  // the region it lives in.
+  var all = [];
+  var domParent = new Map();   // element -> logical parent element (the host, for shadow children)
+  (function walkShadow(root, host) {
+    var list;
+    try { list = root.querySelectorAll('*'); } catch (e) { return; }
+    for (var li = 0; li < list.length; li++) {
+      var le = list[li];
+      all.push(le);
+      domParent.set(le, le.parentElement || host);
+      if (le.shadowRoot) walkShadow(le.shadowRoot, le);
+    }
+  })(document, null);
   var total = all.length;
+  function parentOf(el) {
+    var pp = domParent.get(el);
+    return pp !== undefined ? pp : (el.parentElement || null);
+  }
   var truncated = false;
   var nonRenderable = 0;   // counted, NOT dropped — see the no-filter note below
   var vw = window.innerWidth, vh = window.innerHeight;
@@ -161,7 +186,9 @@ export const COLLECTOR = `() => {
   // whatever the PAGE says: the nearest ancestor that carries a role, or an accessible
   // name (aria-label / aria-labelledby). Nothing here is a fixed vocabulary.
   function regionOf(el) {
-    var node = el.parentElement, hops = 0;
+    // a shadow child has no parentElement — start from its HOST, so a control inside a shadow root
+    // still reports the region it lives in (2026-10-01)
+    var node = parentOf(el), hops = 0;
     while (node && hops < 12) {
       var role = node.getAttribute && node.getAttribute('role');
       var label = node.getAttribute && (node.getAttribute('aria-label')
@@ -216,8 +243,8 @@ export const COLLECTOR = `() => {
     var rec = { i: i, tag: t, loc: locatorOf(el, attrCount), region: regionOf(el) };
     // Branch pointer: the nearest ancestor that is itself in this inventory. Document
     // order means that is nearly always the immediate parent, so this is O(1) amortised.
-    var pn = el.parentElement, hops = 0;
-    while (pn && hops < 200 && !idxOf.has(pn)) { pn = pn.parentElement; hops++; }
+    var pn = parentOf(el), hops = 0;
+    while (pn && hops < 200 && !idxOf.has(pn)) { pn = parentOf(pn); hops++; }
     if (pn && idxOf.has(pn)) rec.p = idxOf.get(pn);
     var nm = nameOf(el);
     if (nm) rec.name = nm;

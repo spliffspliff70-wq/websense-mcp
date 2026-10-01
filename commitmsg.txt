@@ -1,21 +1,43 @@
-diff: say when a diff was taken across a navigation, and teach the guide the new verdicts
+shadow DOM was invisible to the collector, and browse never told you its tabId
 
-Follow-on to the navigation fix. The result payload learned to say "confirmed, the page
-navigated" — but the DIFF block, which is the thing a caller reads first, still printed
-mutated:false for a replaced document. Now it appends, only when the handler actually proved a
-navigation:
+Two findings from the fixture battery (repo fixtures, deterministic, no live site involved) and
+the cross-tab test.
 
-  THE PAGE NAVIGATED (<from> -> <to>) — this baseline belongs to the document that was
-  replaced, so structure/content/visual above are NOT meaningful. The navigation itself is the
-  confirmation. In particular, mutated:false here does NOT mean nothing happened.
+★ SHADOW DOM WAS INVISIBLE — the whole class of modern sites.
+Measured on the repo's own bench/shadow_fixture.html, which exists to catch exactly this and says
+so in its own comment ("a plain selector sees an empty page while the real controls are present"):
+the inventory held 22 light-DOM elements and NONE of the five marked controls — shadow-btn,
+deep-shadow-btn (two shadow roots deep), shadow-input, shadow-file. The collector was one
+document.querySelectorAll('*'), which cannot see into a shadow root, so browse/find reported an
+empty page over a real one on any Lit/FAST/Stencil/faceplate site.
+FIXED: the walk descends into every OPEN shadow root, and a shadow child's logical parent is its
+HOST element (it has no parentElement), so the branch pointer still walks up into the light DOM
+and a shadow control reports the region it lives in. regionOf uses the same resolver.
+VERIFIED with an oracle that shares no code with the collector — main_world traverses the shadow
+roots by hand:
+  inventory reaches 1 and 2 roots deep .......... PASS (27 elements, all five controls)
+  type_text fills a shadow input ............... PASS (shadow DOM reads value=shadow@example.com)
+  click reaches a control two roots deep ....... PASS
+  upload: shadow file input .................... PASS (page reads files=1)
+  upload: light-DOM file input ................. PASS (page reads files=1)
+REGRESSION-CHECKED on the 7-page live sample: no page got worse, all still scroll to
+mutated:false with 0 minted-id leaks, and MDN (738 -> 878 elements) and x.com (3,186 -> 3,411)
+GAIN detail because their own shadow content is finally visible.
 
-Verified end to end on HN's "newest" link: effect:"confirmed", navigation recorded
-(polls:3 — the commit lands after the op returns), and the DIFF line carries the note above.
+★ browse NEVER RETURNED ITS tabId — only an opaque `handle`.
+Found by trying the cross-tab test: browse answered {success, cached, navigated, handle, seq,
+baseline, index, regions, hint} — no tabId — so the test could not even name the two tabs it had
+opened, and a caller that wants to address the tab explicitly (which any session sharing a Chrome
+with other workers must do, and the factory does) had nothing to pass and could only rely on
+session binding. Both the cold and the warm reply now carry tabId, and the hint says so.
+VERIFIED: cross-tab isolation now passes — two tabs, an op aimed at B lands on B (page reads
+CROSSTAB) and leaves A untouched (url, select value and text length all identical).
 
-THE GUIDE WAS UPDATED IN PLACE, not in a changelog: the DID IT LAND paragraph now states that a
-navigation is the strongest confirmation, that it is not in the groups, and that a synthetic
-Enter runs no default action so press_key now submits the form and reports defaultAction. The
-test suite caught that MODEL_PROMPT.md had drifted from the live guide — it is GENERATED, so
-tools/export-guide.mjs was run rather than hand-edited.
+Also landed earlier in this round: the DIFF block now says when a diff was taken across a
+navigation (a replaced document's groups are meaningless, and mutated:false there does NOT mean
+nothing happened), and MODEL_PROMPT.md is regenerated from the live guide.
 
-163 tests pass.
+BATTERIES AS ARTIFACTS (these are the point — they are what makes the claims checkable):
+  tools/task-battery.mjs    5/5 real tasks on real sites, each scored by page truth
+  tools/fixture-battery.mjs 5/5 shadow + upload checks on the repo's own fixture
+165 tests pass.
