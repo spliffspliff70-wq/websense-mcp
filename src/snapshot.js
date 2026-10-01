@@ -26,6 +26,14 @@
 // without an extension reload.
 
 // ── The collector. Runs IN the page. Must be self-contained (no outer-scope refs). ──
+
+// ★ ONE BOUND, ONE PLACE (2026-10-01). The grouped DIFF already ships content as a readable
+// preview PLUS the true length, and the record stays addressable by index. The outline's
+// name printer needs the same kind of bound when it has nothing on the page to measure a
+// data-* value against (a single carrier: no family), so it uses this one rather than
+// growing a second magic number of its own. Whatever is not printed here is still in the
+// inventory — `page_slice{indices:[i]}` returns it verbatim.
+export const CONTENT_PREVIEW = 120;
 export const COLLECTOR = `() => {
   // ★ NO CAP (2026-10-01, Ali: "Agreed no capping no filtering implement and test").
   // This used to be MAX = 20000 with an early break. Removed: the
@@ -452,6 +460,8 @@ export function regionTree(snap, opts = {}) {
 
   const carriers = new Map();                                // signature -> Set(position shape)
   const slots = new Map();                                   // kind|key|shape -> Set(value present there)
+  const hookMax = new Map();                                 // data-* attr -> longest value on the page
+  const hookN = new Map();                                   // data-* attr -> how many elements carry it
   const sigOf = (kind, k, v) => kind + '|' + k + '|' + v;
   // ★ HOW THE ADMISSIBILITY TEST IS MEASURED (2026-10-01, third iteration).
   // "Several distinct parents" was the wrong measure, and so was "look N levels up": both
@@ -496,7 +506,12 @@ export function regionTree(snap, opts = {}) {
     t.vals.add(v);
   };
   const wantClass = !!opts.className;   // decided per-page above, not fixed here
-  for (let i = 0, N = Number.isFinite(spread) ? els.length : 0; i < N; i++) {
+  // ★ THE COLLECTION LOOP IS NOT PART OF THE FILTER (2026-10-01). It used to run only when
+  // the spread filter was on (`Number.isFinite(spread) ? els.length : 0`), so switching the
+  // filter off meant carriers/slots were EMPTY — and every test built on them, including the
+  // per-instance value test, silently answered "no". Collecting what the page wrote is not a
+  // cut. Only REJECTING on it is, and that stays opt-in.
+  for (let i = 0; i < els.length; i++) {
     const e = els[i], a = e.attrs;
     if (!a) continue;
     for (const k in a) {
@@ -510,7 +525,21 @@ export function regionTree(snap, opts = {}) {
       } else if (k === 'id') {
         note(i, 'i', 'id', v);
       } else if (k.lastIndexOf('data-', 0) === 0) {
-        if (k.length > 5 && !OWN_ATTR(k)) note(i, 'h', k, v);
+        if (k.length > 5 && !OWN_ATTR(k)) {
+          note(i, 'h', k, v);
+          // ★ THE BOUND FOR A HOOK VALUE COMES FROM THE PAGE, NOT FROM A CONSTANT (2026-10-01).
+          // A data-* attribute used as a LABEL carries one of a family of comparable tokens
+          // (data-testid: primaryColumn beside sidebarColumn beside cellInnerDiv). An attribute
+          // that appears on the whole page with ONE value is either a flag or a blob, and a
+          // blob is a payload, not a name. So the cap is the longest value the SAME attribute
+          // takes on the page — and only when the attribute has no family at all (a single
+          // carrier, nothing to compare against) does it fall back to CONTENT_PREVIEW, the one
+          // bound the grouped DIFF already uses to ship content as a preview plus its exact
+          // length. Same contract, same number, one place.
+          const L = String(v).length;
+          if (!((hookMax.get(k) || 0) >= L)) hookMax.set(k, L);
+          hookN.set(k, (hookN.get(k) || 0) + 1);
+        }
       } else if (wantClass && k === 'class') {
         for (const tok of String(v).split(/\s+/)) if (tok) note(i, 'c', 'class', tok);
       }
@@ -538,13 +567,40 @@ export function regionTree(snap, opts = {}) {
   // React's #id__kaz8g4cuhrn. Author-chosen words are the opposite: x.com's primaryColumn
   // and sidebarColumn are SIBLINGS at one position with two different data-testids, and an
   // earlier version of this test deleted both of them.
-  const mechanical = (kind, k, v, shape) => {
+  // ★ TWO TESTS LIVED IN ONE FUNCTION AND THEY ARE NOT THE SAME TEST (split 2026-10-01).
+  // They shared one guard, so switching the spread filter off silently switched this off
+  // too — which is why x.com's engagement counts and 16 React-minted ids (#id__nhffana1zz)
+  // came BACK into the outline after the no-filtering change.
+  //
+  //   spreadReject  — "the page uses this word in many DIFFERENT places" ⇒ a component
+  //                   marker. DROPS the word. Opt-in only (Ali: no filtering).
+  //   perInstance   — "this slot holds a DIFFERENT value on every occurrence" ⇒ the value
+  //                   is DATA, not a name. RE-TYPES it; never drops it. Always on, because
+  //                   re-typing is not a cut — and because a structure map must not carry
+  //                   the page's content. That is the whole point of the outline.
+  const spreadReject = (kind, k, v) => {
     if (!Number.isFinite(spread)) return false;
     const s = carriers.get(sigOf(kind, k, v));
-    if (s && s.size > spread) return true;                       // spread across positions
-    if (kind !== 'i') return false;
+    return !!(s && s.size > spread);
+  };
+  const perInstance = (kind, k, v, shape) => {
     const t = slots.get(kind + '|' + k + '|' + shape);
     return !!t && t.n > 1 && t.vals.size === t.n;                // a fresh value every time
+  };
+  // ★ A VALUE IS RE-TYPED, NEVER RENAMED, AND NEVER INVENTED (2026-10-01).
+  // The first cut of this tried to DERIVE a name from the invariant part of the occurrences
+  // ("42 Replies. Reply" / "1 Reply. Reply" ⇒ "Reply. Reply"). It read well on the buttons and
+  // was WRONG everywhere else: x.com's data-testid=primaryColumn and data-testid=sidebarColumn
+  // share the suffix "Column", so the feed and the rail were reported as ONE place called
+  // "Column", and #layers' GrokDrawer/chat-drawer-root collapsed to "r". A name that the page
+  // did not write is a name I invented. So a datum is reported AS a datum: its kind, and the
+  // true size of the text it holds. The text itself stays in the inventory, one
+  // page_slice{indices:[i]} away — the same contract the DIFF already uses for content.
+  const datum = (v) => '\u27EA' + String(v).length + ' chars\u27EB';   // ⟪N chars⟫
+  const labelName = (prefix, v, kind, k, shape) => {
+    const src = kind === 'a' ? 'aria' : 'role';
+    if (spreadReject(kind, k, v)) return prefix ? { n: prefix, src } : null;
+    return { n: prefix ? prefix + ' "' + v + '"' : '"' + v + '"', src };
   };
 
   // ★ WHAT KIND OF WORD IS IT? A `role` or `aria-label` is a name the page wrote FOR A
@@ -556,18 +612,12 @@ export function regionTree(snap, opts = {}) {
     if (!a) return null;
     const sh = pathOf(i);
     if (a.role) {
-      if (a['aria-label']) {
-        if (!mechanical('r', 'role+label', a.role + '\u0000' + a['aria-label'], sh)) {
-          return { n: a.role + ' "' + a['aria-label'] + '"', src: 'role' };
-        }
-        // The label varies per instance (x.com: role="group" whose name IS the engagement
-        // count) — but the ROLE itself is still a real word, so keep that much.
-        return { n: a.role, src: 'role' };
-      }
+      if (a['aria-label']) return labelName(a.role, a['aria-label'], 'r', 'role+label', sh);
       return { n: a.role, src: 'role' };
     }
     if (a['aria-label']) {
-      if (!mechanical('a', 'aria-label', a['aria-label'], sh)) return { n: '"' + a['aria-label'] + '"', src: 'aria' };
+      const viaLabel = labelName(null, a['aria-label'], 'a', 'aria-label', sh);
+      if (viaLabel) return viaLabel;
     }
     if (e.attrNames) {
       for (const k of e.attrNames) {
@@ -576,24 +626,32 @@ export function regionTree(snap, opts = {}) {
           // Measured on x.com: data-at-shortcutkeys holds the ENTIRE keyboard-shortcut map
           // (~1.5 KB) and it landed in the outline. A short value IS the identity
           // (data-testid=primaryColumn); a long one is reported by name only.
+          //
+          // ★ THE BOUND IS NOW DERIVED, NOT A LENGTH CONSTANT (2026-10-01). A hook value is
+          // written for the page's own code, so it is meant to be a TOKEN; whitespace in it
+          // means it is prose that happens to live in an attribute. That is a property of the
+          // value, not a magic 40. (The old `v.length <= 40` was the same kind of constant as
+          // the LABEL_MAX that once demoted a carried-over post to "page content".)
           const v = a[k];
           if (v == null || v === '') continue;
-          if (mechanical('h', k, v, sh)) continue;           // component marker, not a place
-          return { n: (v.length <= 40) ? k + '=' + v : k, src: 'hook' };
+          if (spreadReject('h', k, v)) continue;             // component marker, not a place
+          const cap = (hookN.get(k) || 0) > 1 ? hookMax.get(k) : CONTENT_PREVIEW;
+          if (/\s/.test(v) || String(v).length > cap) return { n: k, src: 'hook', value: true };
+          return { n: k + '=' + v, src: 'hook' };
         }
       }
     }
-    if (a.id && !mechanical('i', 'id', a.id, sh)) return { n: '#' + a.id, src: 'id' };
+    if (a.id && !perInstance('i', 'id', a.id, sh) && !spreadReject('i', 'id', a.id)) return { n: '#' + a.id, src: 'id' };
     if (wantClass && a.class) {
       // last resort — the page named this container only with a class, which some pages
       // do for their entire layout (books.toscrape: div.page > article.product_pod).
       for (const tok of String(a.class).split(/\s+/)) {
-        if (tok && !mechanical('c', 'class', tok, sh)) return { n: '.' + tok, src: 'class' };
+        if (tok && !spreadReject('c', 'class', tok) && !perInstance('c', 'class', tok, sh)) return { n: '.' + tok, src: 'class' };
       }
     }
     return null;
   };
-  const nameOf = (e, i) => { const p = nameParts(e, i); return p ? p.n : ''; };
+  const baseName = (e, i) => { const p = nameParts(e, i); return p ? p.n : ''; };
 
   const kids = [];
   for (let i = 0; i < els.length; i++) kids.push([]);
@@ -601,6 +659,60 @@ export function regionTree(snap, opts = {}) {
     const p = els[i] ? els[i].p : null;
     if (p != null && kids[p]) kids[p].push(i);
   }
+
+  // ★ A LABEL THAT SUMMARISES ITS OWN CHILDREN IS A DATUM, NOT A NAME (2026-10-01).
+  // This is the test that actually separates the two kinds of aria-label on a live page, and
+  // it was found by MEASURING which labels I had wrongly demoted. The first attempt used "the
+  // slot holds a different value on every occurrence" — and that is FALSE for a real page:
+  // x.com's aside "Subscribe to Premium" (#2002) and aside "Who to follow" (#2530) sit at the
+  // SAME tag path (…>div>aside) under different parents, so two genuinely different places
+  // looked like one per-instance value. Same for button "Previous"/"Next" and "Grok"/"Chat".
+  // Author-chosen words must never be demoted because two of them share a position.
+  //
+  // The fact that does hold: an element whose label is a SUMMARY of what it contains is not
+  // naming itself, it is reporting its contents. The tweet's engagement group carries
+  // "2 replies, 1 repost, 25 likes, 6 bookmarks, 164617 views" and sits directly above the
+  // buttons that each say one of those things. So the label is compared against the names of
+  // the element's own children: if two or more distinct words of the label are words of the
+  // children, the label is derived from them, and it is content.
+  //
+  // Words are matched across inflection (reply/replies, view/views) because English inflects
+  // and the page writes both forms — that is a property of the words, not a length constant.
+  const stem = (x) => String(x).toLowerCase().replace(/(ies|es|s)$/, '').replace(/(ing|ed)$/, '');
+  const sameWord = (a, b) => {
+    const x = stem(a), y = stem(b);
+    if (!x || !y) return false;
+    const s = x.length <= y.length ? x : y;
+    const l = x.length <= y.length ? y : x;
+    return s.length >= 3 && l.indexOf(s) === 0;
+  };
+  const words = (s) => String(s).toLowerCase().match(/[a-z]{3,}/g) || [];
+  const restates = (i, label) => {
+    const lw = words(label);
+    if (!lw.length) return false;
+    let hits = 0;
+    const stack = kids[i].slice();
+    while (stack.length) {
+      const c = stack.pop();
+      const cn = baseName(els[c], c);
+      if (cn) {
+        if (words(cn).some((x) => lw.some((y) => sameWord(x, y))) && ++hits > 1) return true;
+        continue;                 // a named descendant is a place — its insides are its own
+      }
+      for (const g of kids[c]) stack.push(g);
+    }
+    return false;
+  };
+  const nameOf = (e, i) => {
+    const p = nameParts(e, i);
+    if (!p) return '';
+    const label = e.attrs && e.attrs['aria-label'];
+    if ((p.src === 'role' || p.src === 'aria') && label && restates(i, label)) {
+      const pre = p.src === 'role' ? e.attrs.role : '';
+      return (pre ? pre + ' ' : '') + datum(label);
+    }
+    return p.n;
+  };
 
   const named = els.map((e, i) => !!nameParts(e, i));
   // ★ A PASS-THROUGH IS NOT A PLACE (2026-10-01, measured).
@@ -661,6 +773,14 @@ export function regionTree(snap, opts = {}) {
   //     merged them on their name KIND and printed one with a count, HIDING the other entirely.
   // Where the collapsed members carry different names the line says so, rather than implying
   // they are identical.
+  // ⚠️ DO NOT KEY A RUN ON THE NAME ALONE (measured 2026-10-01, reverted the same hour).
+  // It was tried, and it folded the x.com timeline from four post templates to one — but it
+  // also merged books.toscrape's TWO genuinely different div.page_inner boxes (the header and
+  // the content) into one line with "REPEATS x2", taking that page's outline from 17 useful
+  // lines to 3, because a CLASS token is not a page-authored identity, it is just the first
+  // word of a class list. The shape stays in the key: it is what tells two same-named places
+  // apart. The cost of keeping it is honest and visible — two x.com posts that differ only by
+  // one anonymous wrapper div still end their run early — and it is reported, not hidden.
   const shapeCache = new Array(els.length);
   const shapeOf = (i) => {
     if (shapeCache[i] !== undefined) return shapeCache[i];
@@ -705,7 +825,9 @@ export function regionTree(snap, opts = {}) {
     // length, an alternating run still collapses (each phase keeps its own name), and two
     // differently-named places never merge.
     const rc = regionChild[cur];
-    const keys = rc.map((c, idx) => shapeOf(c) + '\u0000' + nameOf(els[c], c));
+    // Name AND shape, both. The name says what kind of thing it is; the shape stops two
+    // same-named but different places from merging (see the note above shapeOf).
+    const keys = rc.map((c) => shapeOf(c) + '\u0000' + nameOf(els[c], c));
     let k = 0;
     while (k < rc.length) {
       const rest = keys.slice(k);

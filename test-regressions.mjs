@@ -2528,10 +2528,129 @@ test('regions: the page\'s OWN named containers, nested, with NO counts', () => 
   ] };
   const t6 = regionTree(snapIds);
   assert(/data-testid=cell/.test(t6.outline), 'the named card is still a place');
-  assert(/id__aaa111/.test(t6.outline),
-    'DEFAULT is lossless: even a per-instance id is KEPT');
+  // ★ RE-TYPED, NOT REMOVED (2026-10-01). This assertion used to say the per-instance id was
+  // KEPT in the default outline. It was only ever kept because the test that recognises a
+  // minted identifier shared a guard with the SPREAD filter, so switching the spread filter
+  // off (Ali's no-filtering rule) switched the identifier test off with it — an accident, and
+  // the comment directly above describes the rule as the correct behaviour. The two tests are
+  // now separate: spread stays opt-in (it DROPS a word, which is a cut), while recognising a
+  // per-instance value stays ON (it RE-TYPES a word, which is not a cut). Both halves are
+  // pinned below — the map stops calling a minted key a place-name, and the DATA is untouched.
+  assert(!/id__aaa111/.test(t6.outline),
+    'a minted per-instance id is not a place-NAME (it is re-typed, not printed as identity)');
+  assert(!/id__bbb222/.test(t6.outline), 'and the same holds for its sibling instance');
+  assert(snapIds.elements.filter((e) => e.attrs && e.attrs.id === 'id__aaa111').length === 1,
+    'LOSSLESS: the id is still taken from the page and still addressable in the inventory');
   assert(!/id__aaa111|id__bbb222/.test(regionTree(snapIds, { spread: 1 }).outline),
-    'the OPT-IN instance-identifier test is what treats it as an identifier instead of a name');
+    'the OPT-IN spread test additionally drops a word the page uses in many different places');
+
+  // ★ A LABEL THAT SUMMARISES ITS OWN CONTENTS IS A DATUM; AN AUTHOR-CHOSEN LABEL IS A NAME.
+  // Both cases are from the live x.com sidebar (2026-10-01), and the first two cuts got it
+  // wrong in BOTH directions before it was measured:
+  //   - "the slot holds a different value on every occurrence" demoted aside "Subscribe to
+  //     Premium" and aside "Who to follow" — same tag path (…>div>aside), different parents —
+  //     so two genuinely different places were reported as one per-instance value;
+  //   - "the invariant part of a label is its name" renamed data-testid=primaryColumn and
+  //     data-testid=sidebarColumn into ONE place called "Column".
+  // The fact that does hold: an element whose label SUMMARISES what it contains is not naming
+  // itself, it is reporting its contents.
+  const snapLabels = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'body', null, 0),
+    mk(2, 'aside', { 'aria-label': 'Subscribe to Premium', role: 'complementary' }, 1),
+    mk(3, 'a', { 'aria-label': 'Upgrade' }, 2),
+    mk(4, 'div', { role: 'group', 'aria-label': '2 replies, 25 likes, 164617 views' }, 1),
+    mk(5, 'div', null, 4),
+    mk(6, 'div', { role: 'group', 'aria-label': '7 replies, 16 likes, 944 views' }, 1),
+    mk(7, 'div', null, 6),
+    mk(8, 'button', { 'aria-label': '2 Replies. Reply' }, 5),
+    mk(9, 'button', { 'aria-label': '25 Likes. Like' }, 5),
+    mk(10, 'button', { 'aria-label': '7 Replies. Reply' }, 7),
+    mk(11, 'button', { 'aria-label': '16 Likes. Like' }, 7),
+    mk(12, 'span', { 'aria-label': 'icon-reply' }, 8),
+    mk(13, 'span', { 'aria-label': 'icon-like' }, 9),
+    mk(14, 'span', { 'aria-label': 'icon-reply' }, 10),
+    mk(15, 'span', { 'aria-label': 'icon-like' }, 11),
+  ] };
+  const tLab = regionTree(snapLabels);
+  assert(/"Subscribe to Premium"/.test(tLab.outline),
+    'an author-chosen label is a NAME and must survive, whatever else sits at that tag path');
+  assert(tLab.outline.indexOf('\u27EA') >= 0,
+    'a label that restates its own children is re-typed as a datum');
+  assert(tLab.outline.indexOf('164617') < 0 && tLab.outline.indexOf('944') < 0,
+    'the summary values themselves must not be printed as identity');
+  assert(/2 Replies\. Reply/.test(tLab.outline),
+    'and the children keep their own labels — the datum is the parent summary, not the control');
+
+  // ★ A RUN IS KEYED ON NAME **AND** SHAPE — AND THAT TOO IS A MEASURED TRADE-OFF (2026-10-01).
+  // Keying on the name alone was tried against the live sample and REVERTED: it folded the
+  // x.com timeline from four spelled-out post templates to one, but it also merged
+  // books.toscrape's two genuinely different div.page_inner boxes — the header and the content —
+  // into a single line with "REPEATS x2", dropping that page's outline from 17 useful lines to
+  // 3. A CLASS token is not a page-authored identity; it is the first word of a class list.
+  // So the shape stays in the key, and the cost is paid in the open: two posts that differ only
+  // by one anonymous wrapper div end their run early. This test pins the trade as it actually is.
+  const snapRun = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'section', { 'aria-label': 'Timeline' }, 0),
+    mk(2, 'div', { 'data-testid': 'cell' }, 1),
+    mk(3, 'article', { 'data-testid': 'post-body' }, 2),
+    mk(4, 'span', { 'aria-label': 'a1' }, 3),
+    mk(5, 'div', { 'data-testid': 'cell' }, 1),
+    mk(6, 'div', { 'data-testid': 'wrapper' }, 5),
+    mk(7, 'article', { 'data-testid': 'post-body' }, 6),
+    mk(8, 'span', { 'aria-label': 'a2' }, 7),
+  ] };
+  const tRun = regionTree(snapRun);
+  assert((tRun.outline.match(/data-testid=cell/g) || []).length === 2,
+    'same-named regions of DIFFERENT shape stay separate — a hook word alone is not identity');
+  assert(/REPEATS/.test(regionTree({ elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'section', { 'aria-label': 'Timeline' }, 0),
+    mk(2, 'div', { 'data-testid': 'cell' }, 1),
+    mk(3, 'article', null, 2),
+    mk(4, 'span', { 'aria-label': 'a1' }, 3),
+    mk(5, 'div', { 'data-testid': 'cell' }, 1),
+    mk(6, 'article', null, 5),
+    mk(7, 'span', { 'aria-label': 'a2' }, 6),
+  ] }).outline), 'but same-named regions of the SAME shape still collapse');
+  //
+  // ⚠️ OPEN, MEASURED, NOT SOLVED — the run test compares region children that are not
+  // necessarily each other's SIBLINGS. regionChild() takes the nearest region descendant of any
+  // depth, so two boxes from different branches of the page can be compared as if they were
+  // consecutive list items. Measured on the sample: books.toscrape has exactly ONE such region
+  // (body, holding the header .page_inner and the content .page_inner) and x.com has 27 of its
+  // 42 multi-child regions. Keying the run on the name alone folded x.com's feed to one
+  // template but merged books' two .page_inner boxes into one line — 17 lines down to 3 — so it
+  // was REVERTED (see the note above shapeOf in src/snapshot.js). Requiring the same DOM parent
+  // is not the fix either: 7 of the x.com tweets sit behind an extra anonymous wrapper, so
+  // their immediate parents differ while they are still consecutive posts. The honest fix is an
+  // "effective parent" that looks through pass-through wrappers — not built, and not claimed.
+
+  // ...and an ALTERNATING run still collapses, with BOTH phases shown. This is the pattern the
+  // old adjacent-identical test missed entirely (bbc.com's nav alternates div>div>a / div>button),
+  // and it is still the most common real shape: a row and its control, repeated.
+  const snapAnon = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'nav', { 'aria-label': 'Nav' }, 0),
+    mk(2, 'div', { 'data-testid': 'row' }, 1),
+    mk(3, 'a', { 'aria-label': 'L' }, 2),
+    mk(4, 'span', { 'aria-label': 'ic' }, 3),
+    mk(5, 'div', { 'data-testid': 'btn' }, 1),
+    mk(6, 'button', { 'aria-label': 'B' }, 5),
+    mk(7, 'span', { 'aria-label': 'ib' }, 6),
+    mk(8, 'div', { 'data-testid': 'row' }, 1),
+    mk(9, 'a', { 'aria-label': 'L' }, 8),
+    mk(10, 'span', { 'aria-label': 'ic' }, 9),
+    mk(11, 'div', { 'data-testid': 'btn' }, 1),
+    mk(12, 'button', { 'aria-label': 'B' }, 11),
+    mk(13, 'span', { 'aria-label': 'ib' }, 12),
+  ] };
+  const tAnon = regionTree(snapAnon);
+  assert(/REPEATS x4/.test(tAnon.outline),
+    'an alternating run (A,B,A,B) must collapse as ONE period — not as adjacent pairs');
+  assert(/data-testid=row/.test(tAnon.outline) && /data-testid=btn/.test(tAnon.outline),
+    'and BOTH phases must be shown — an alternating run is not one thing');
 
   // ★ ...BUT TWO SIBLING PLACES WITH DIFFERENT HOOKS MUST BOTH SURVIVE (same live session).
   // x.com's primaryColumn and sidebarColumn sit side by side at ONE position carrying two
