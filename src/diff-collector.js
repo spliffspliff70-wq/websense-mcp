@@ -43,14 +43,29 @@ export const DIFF_COLLECTOR = `() => {
     return (r.tag || '') + '|' + parts.join('&');
   }
   function geom(r) { return (r.x == null ? '' : r.x) + ',' + (r.y == null ? '' : r.y) + ',' + (r.vp ? 1 : 0); }
-  function brief(r) {
-    var o = { i: r.i, tag: r.tag, loc: r.loc, region: r.region };
-    if (r.name) o.name = r.name;
-    if (r.attrs && r.attrs.role) o.role = r.attrs.role;
-    if (r.value != null) o.value = r.value;
-    if (r.x != null) { o.x = r.x; o.y = r.y; }
-    if (r.vp) o.vp = 1;
+  // ★ THE DIFF IS AN INDEX OF THE CHANGE, NOT A COPY OF THE PAGE (measured 2026-10-01).
+  // The first version shipped each changed element's FULL attrs and its name. On a page
+  // that hydrated 138 -> 2,401 elements that produced a 1,285,618-character DIFF — worse
+  // than the 160 KB SAG it exists to replace. The cause is duplication, not size: every
+  // byte of those attrs is ALREADY in the stored inventory, and name on a style/script
+  // tag is that tag's entire source text.
+  // So the diff names WHAT changed and where, and the caller slices the inventory for
+  // detail — the same principle as the index/slice split, applied to time.
+  function ident(r) {
+    var o = { i: r.i, tag: r.tag, loc: r.loc };
+    var role = (r.attrs && r.attrs.role) || '';
+    if (role) o.role = role;
     return o;
+  }
+  function fieldsDiffer(a, b) {
+    var out = [], k;
+    var aa = a.attrs || {}, bb = b.attrs || {};
+    for (k in aa) if (Object.prototype.hasOwnProperty.call(aa, k) && aa[k] !== bb[k]) out.push(k);
+    for (k in bb) if (Object.prototype.hasOwnProperty.call(bb, k) && aa[k] !== bb[k]) {
+      if (out.indexOf(k) === -1) out.push(k);
+    }
+    if ((a.name || '') !== (b.name || '')) out.push('name');
+    return out;
   }
 
   var out = { url: now.url, title: now.title, docElements: now.count,
@@ -78,13 +93,19 @@ export const DIFF_COLLECTOR = `() => {
   var newBy = Object.create(null);
   for (var b = 0; b < now.elements.length; b++) newBy[now.elements[b].loc] = now.elements[b];
 
-  var structure = { added: [], removed: [], changed: [] };
+  var addedIdx = [];   // indices only — see ident() above
+  var structure = { removed: [], changed: [] };
   var content = { changed: [] };
   var viewport = { moved: [] };
 
   for (var c = 0; c < now.elements.length; c++) {
     var nr = now.elements[c], or = oldBy[nr.loc];
-    if (!or) { structure.added.push(brief(nr)); continue; }
+    if (!or) {
+      // Indices only for adds: on a hydrate this is thousands of elements and their attrs
+      // are already stored. The caller slices the inventory for any index it wants.
+      addedIdx.push(nr.i);
+      continue;
+    }
     var fsame = fingerprint(nr) === fingerprint(or);
     var gsame = geom(nr) === geom(or);
     var nameSame = (nr.name || '') === (or.name || '');
@@ -94,8 +115,9 @@ export const DIFF_COLLECTOR = `() => {
       continue;
     }
     if (!fsame) {
-      var o2 = brief(nr);
-      o2.was = { tag: or.tag, region: or.region, role: (or.attrs && or.attrs.role) || undefined };
+      // WHICH fields changed, not their values — the values are in the inventory.
+      var o2 = ident(nr);
+      o2.changed = fieldsDiffer(nr, or);
       structure.changed.push(o2);
       continue;
     }
@@ -105,15 +127,15 @@ export const DIFF_COLLECTOR = `() => {
   }
   for (var d = 0; d < prev.els.length; d++) {
     var pr = prev.els[d];
-    if (!newBy[pr.loc]) structure.removed.push(brief(pr));
+    if (!newBy[pr.loc]) structure.removed.push(ident(pr));
   }
 
   window[KEY] = { url: now.url, at: now.count, seq: (prev.seq + 1), els: now.elements, byLoc: null };
 
-  var structN = structure.added.length + structure.removed.length + structure.changed.length;
+  var structN = addedIdx.length + structure.removed.length + structure.changed.length;
   var contentN = content.changed.length;
   var viewportN = viewport.moved.length;
-  out.structure = { added: structure.added, removed: structure.removed, changed: structure.changed, count: structN };
+  out.structure = { added: addedIdx, removed: structure.removed, changed: structure.changed, count: structN };
   out.content = { changed: content.changed, count: contentN };
   out.viewport = { moved: viewport.moved, count: viewportN };
   out.mutated = structN > 0 || contentN > 0;

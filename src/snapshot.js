@@ -323,6 +323,10 @@ export function branchChain(snap, rec, depth = 5) {
 export function sliceSnapshot(snap, filter = {}) {
   const els = (snap && snap.elements) || [];
   const q = filter.query ? String(filter.query).toLowerCase() : null;
+  // indices:[i,...] — fetch exact records by their inventory index. This is the companion
+  // to the DIFF, which names what changed by index precisely so the caller can pull the
+  // detail on demand instead of the diff shipping a copy of it.
+  const wantIdx = Array.isArray(filter.indices) ? new Set(filter.indices.map(Number)) : null;
   // ★ NO CAP (2026-10-01): this was `Math.min(Number(filter.limit) || 200, 2000)` — a
   // DEFAULT of 200 with a hard ceiling of 2000, so asking for everything silently got
   // you 2000. A slice now returns ALL matches unless the caller explicitly passes
@@ -333,6 +337,7 @@ export function sliceSnapshot(snap, filter = {}) {
   const out = [];
   let matched = 0;
   for (const e of els) {
+    if (wantIdx && !wantIdx.has(Number(e.i))) continue;
     if (filter.tag && e.tag !== filter.tag) continue;
     // role now lives with every other attribute (rec.attrs), because the page decides
     // the field names — so accept either a bare rec.role for callers that pass it or

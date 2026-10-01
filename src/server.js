@@ -1967,6 +1967,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       interactive: z.boolean().optional().describe('true = only controls (derived: focusable || field || role present)'),
       vp: z.boolean().optional().describe('true = in viewport only'),
       branchDepth: z.number().optional().describe('How many ancestors to include in the branch chain (default 5)'),
+      indices: z.array(z.number()).optional().describe('Fetch exact records by inventory index — this is how you pull the detail for indices a DIFF block named.'),
       tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       limit: z.number().optional().describe('OPT-IN cap on hits. Omit for ALL matches.'),
     },
@@ -1975,7 +1976,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     const e = getSnapshot(tabId);
     if (!e) return textResult({ success: false, error: 'no live snapshot for tab ' + tabId + ' — call browse (or page_snapshot) first' });
     const filter = {};
-    for (const k of ['query', 'role', 'attr', 'tag', 'region', 'interactive', 'vp', 'limit']) {
+    for (const k of ['query', 'role', 'attr', 'tag', 'region', 'interactive', 'vp', 'limit', 'indices']) {
       if (o[k] !== undefined) filter[k] = o[k];
     }
     const s = sliceSnapshot(e.snap, filter);

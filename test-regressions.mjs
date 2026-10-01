@@ -2031,8 +2031,17 @@ test('diff: the auto-DIFF groups structure / content / viewport', () => {
   const fp = code.match(/function fingerprint\(r\) \{[\s\S]*?\n  \}/);
   assert(fp, 'fingerprint must exist');
   assert(!/r\.region/.test(fp[0]), 'the fingerprint must NOT include region (context, not identity)');
-  assert(/r\.tag/.test(fp[0]) && /r\.attrs/.test(fp[0]),
-    'identity is the tag plus the element OWN attributes');
+  // ★ THE DIFF MUST BE AN INDEX OF THE CHANGE, NOT A COPY OF THE PAGE. Measured live:
+  // shipping full attrs + name per changed element produced a 1,285,618-char DIFF when a
+  // page hydrated 138 -> 2,401 elements — worse than the SAG it exists to replace.
+  const ident = code.match(/function ident\(r\) \{[\s\S]*?\n  \}/);
+  assert(ident, 'ident must exist');
+  assert(!/attrs\s*:/.test(ident[0]) && !/\.name/.test(ident[0]),
+    'ident must carry identity only — never attrs or name (both are already in the inventory)');
+  assert(/addedIdx\.push\(nr\.i\)/.test(code),
+    'adds must be recorded as INDICES so a large change stays an index');
+  assert(/o2\.changed = fieldsDiffer\(nr, or\)/.test(code),
+    'changes must name WHICH fields moved, not their values');
 });
 
 test('snapshot: elements carry a parent pointer, and branchChain walks it', () => {
