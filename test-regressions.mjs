@@ -2026,6 +2026,14 @@ test('diff: the auto-DIFF groups structure / content / viewport', () => {
   assert(/window\[KEY\]/.test(code), 'the baseline must live on the page');
   // A URL change must re-seed rather than diff across documents.
   assert(/prev\.url !== now\.url/.test(code), 'a navigation must re-seed the baseline');
+  // ★ THE FINGERPRINT MUST BE IDENTITY, NOT CONTEXT. Including `region` produced ~1,049
+  // phantom changes on a 1,049-element page (region is derived from ancestors, so it
+  // flips on re-render) and a 103 KB diff for a no-op. Measured live, then fixed.
+  const fp = code.match(/function fingerprint\(r\) \{[\s\S]*?\n  \}/);
+  assert(fp, 'fingerprint must exist');
+  assert(!/r\.region/.test(fp[0]), 'the fingerprint must NOT include region (context, not identity)');
+  assert(/r\.tag/.test(fp[0]) && /r\.attrs/.test(fp[0]),
+    'identity is the tag plus the element OWN attributes');
 });
 
 test('snapshot: elements carry a parent pointer, and branchChain walks it', () => {

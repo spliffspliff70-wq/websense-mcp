@@ -27,12 +27,20 @@ export const DIFF_COLLECTOR = `() => {
   var now = collect();
   var prev = window[KEY];
 
+  // ★ FINGERPRINT MUST BE IDENTITY, NOT CONTEXT (found by measuring the diff live,
+  // 2026-10-01). The first version included `region`, and region is CONTEXTUAL — it is
+  // derived from whichever ancestor the page has labelled, so it flips as the page
+  // re-renders (observed: "role:button:Grok" -> "role:button:Chat" on the same node).
+  // That reported ~1,049 phantom changes on a 1,049-element page and produced a 103 KB
+  // diff for a NO-OP. Identity is the tag plus the element's OWN attributes. Region,
+  // position and viewport state are reported as CONTEXT on a change, never as the
+  // reason for one.
   function fingerprint(r) {
     var a = r.attrs || {};
     var parts = [];
     for (var k in a) if (Object.prototype.hasOwnProperty.call(a, k)) parts.push(k + '=' + a[k]);
     parts.sort();
-    return (r.tag || '') + '|' + (r.region || '') + '|' + parts.join('&');
+    return (r.tag || '') + '|' + parts.join('&');
   }
   function geom(r) { return (r.x == null ? '' : r.x) + ',' + (r.y == null ? '' : r.y) + ',' + (r.vp ? 1 : 0); }
   function brief(r) {
