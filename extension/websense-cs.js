@@ -107,6 +107,78 @@
     });
   }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ MAIN-WORLD DIALOG READERS — DEFINED HERE, AT THE TOP OF THE CONCATENATION (2026-10-01)
+//
+// WHY THEY MOVED. These lived in 70-capture-and-readers.js. They are declared with
+// `function`, so within one IIFE they should hoist and be callable from anywhere — and 70's
+// own code called them fine. But 00's `handle_dialog` and `get_status` could NOT see them,
+// and the failure was nearly invisible:
+//   - handle_dialog surfaced it as {"success":false,"error":"readMainWorldDialogs is not defined"}
+//   - get_status called it inside `try { ... } catch (_) {}` and therefore SILENTLY reported
+//     pendingDialogs: [] — a wrong answer that looks exactly like "no dialogs", which is the
+//     silent-wrong-outcome shape this project keeps having to kill.
+//
+// These three only read/write DOM attributes, so position is irrelevant to them; being FIRST
+// in the concatenation is what makes them unambiguously visible to every dispatcher. One
+// definition, earliest scope, no duplication.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The isolated-world WS_DIALOGS queue only ever saw dialogs raised by other isolated-world
+// code, never the PAGE's own alert/confirm/prompt. The MAIN world hook
+// (extension/dialog-hook.js) publishes them to a DOM attribute; read it here so status/dialog
+// see what the page actually raised.
+function readMainWorldDialogs() {
+  var out = [];
+  try {
+    var raw = document.documentElement.getAttribute('data-ws-dialogs');
+    if (!raw) return out;
+    var arr = JSON.parse(raw);
+    if (Array.isArray(arr)) out = arr;
+  } catch (_) { /* never let a parse break page state */ }
+  return out;
+}
+// Dialogs that already fired and were auto-answered. alert() is synchronous, so the page
+// continues the moment it is raised — the dialog can never still be "pending" when an agent
+// looks. Without this history the agent had no way to know a confirmation prompt had appeared
+// and been waved through, which is a silent-wrong-outcome, not just a missing feature.
+function readRecentMainWorldDialogs() {
+  var out = [];
+  try {
+    var raw = document.documentElement.getAttribute('data-ws-dialogs-recent');
+    if (!raw) return out;
+    var arr = JSON.parse(raw);
+    if (Array.isArray(arr)) out = arr;
+  } catch (_) { /* never let a parse break page state */ }
+  return out;
+}
+// Ask the MAIN-world hook to resolve one of its dialogs. It exposes __wsResolveDialog on
+// window, but from the isolated world that is a DIFFERENT global — so go through a
+// CustomEvent the hook listens for.
+function resolveMainWorldDialog(id, action, value) {
+  return new Promise(function (resolve) {
+    try {
+      var h = '__wsMainWorldDialogReply';
+      document.documentElement.setAttribute(h, '');
+      var ev = new CustomEvent('__wsResolveDialog', {
+        detail: { id: id, action: action, value: value, replyAttr: h },
+      });
+      document.dispatchEvent(ev);
+      // The hook writes the outcome back to the attribute; a microtask + short poll is
+      // enough because its work is synchronous.
+      var tries = 0;
+      var iv = setInterval(function () {
+        tries++;
+        var v = document.documentElement.getAttribute(h);
+        if (v) { clearInterval(iv); try { resolve(JSON.parse(v)); } catch (_) { resolve({ success: true }); } }
+        else if (tries > 20) { clearInterval(iv); resolve({ success: false, error: 'dialog hook did not answer' }); }
+      }, 25);
+    } catch (e) {
+      resolve({ success: false, error: String((e && e.message) || e) });
+    }
+  });
+}
+
   // ═══ Ad-frame detection — skip the WS bridge entirely in ad iframes ═══
   // Content scripts with all_frames:true run inside Google SafeFrame / ad
   // iframes too. Those must NOT connect to the hub — they'd hijack page ops.
@@ -3894,7 +3966,7 @@
       // v4.6.1. The build stamp is substituted here at build time and encodes BOTH the
       // version and the source hash, so reporting it is the only freshness claim that
       // cannot rot. Reported from one place so both dispatchers agree.
-      csBuild:'v4.6.1-504f7aef',
+      csBuild:'v4.6.1-76c9364e',
     };
   }
 
@@ -4109,62 +4181,24 @@
           else if (dlg.type === 'prompt') { var pv = (act === 'dismiss') ? null : (params.value !== undefined && params.value !== null ? params.value : dlg.defaultValue); if (dlg._res) dlg._res(pv); WS_DIALOGS.splice(idx, 1); result = { success: true, handled: 'prompt', value: pv }; }
           break;
         }
-  // ═══ MAIN-WORLD DIALOGS (2026-09-25) ═══
-  // The isolated-world WS_DIALOGS queue only ever saw dialogs raised by other
-  // isolated-world code, never the PAGE's own alert/confirm/prompt. The MAIN
-  // world hook (extension/dialog-hook.js) publishes them to a DOM attribute;
-  // read it here so status/dialog see what the page actually raised.
-  function readMainWorldDialogs() {
-    var out = [];
-    try {
-      var raw = document.documentElement.getAttribute('data-ws-dialogs');
-      if (!raw) return out;
-      var arr = JSON.parse(raw);
-      if (Array.isArray(arr)) out = arr;
-    } catch (_) { /* never let a parse break page state */ }
-    return out;
-  }
+  // ═══ MAIN-WORLD DIALOGS — readMainWorldDialogs / readRecentMainWorldDialogs /
+  // resolveMainWorldDialog are DEFINED ONCE, at the top of 00-bridge-and-transport.js.
+  // They used to live here, and 00's handle_dialog/get_status could not see them:
+  // handle_dialog failed with "readMainWorldDialogs is not defined" while get_status
+  // swallowed the same ReferenceError inside a try/catch and reported pendingDialogs: []
+  // — a wrong answer indistinguishable from "no dialogs". Hoisting them to the first
+  // position in the concatenation makes them visible to every dispatcher.
+  // ═══
   // Dialogs that already fired and were auto-answered. alert() is synchronous,
   // so the page continues the moment it is raised — the dialog can never still
   // be "pending" when an agent looks. Without this history the agent had no way
   // to know a confirmation prompt had appeared and been waved through, which is
   // a silent-wrong-outcome, not just a missing feature.
-  function readRecentMainWorldDialogs() {
-    var out = [];
-    try {
-      var raw = document.documentElement.getAttribute('data-ws-dialogs-recent');
-      if (!raw) return out;
-      var arr = JSON.parse(raw);
-      if (Array.isArray(arr)) out = arr;
-    } catch (_) { /* never let a parse break page state */ }
-    return out;
-  }
+  // (readRecentMainWorldDialogs / resolveMainWorldDialog also live in 00 now.)
   // Ask the MAIN-world hook to resolve one of its dialogs. It exposes
   // __wsResolveDialog on window, but from the isolated world that is a
   // DIFFERENT global — so go through a CustomEvent the hook listens for.
-  function resolveMainWorldDialog(id, action, value) {
-    return new Promise(function (resolve) {
-      try {
-        var h = '__wsMainWorldDialogReply';
-        document.documentElement.setAttribute(h, '');
-        var ev = new CustomEvent('__wsResolveDialog', {
-          detail: { id: id, action: action, value: value, replyAttr: h },
-        });
-        document.dispatchEvent(ev);
-        // The hook writes the outcome back to the attribute; a microtask +
-        // short poll is enough because its work is synchronous.
-        var tries = 0;
-        var iv = setInterval(function () {
-          tries++;
-          var v = document.documentElement.getAttribute(h);
-          if (v) { clearInterval(iv); try { resolve(JSON.parse(v)); } catch (_) { resolve({ success: true }); } }
-          else if (tries > 20) { clearInterval(iv); resolve({ success: false, error: 'dialog hook did not answer' }); }
-        }, 25);
-      } catch (e) {
-        resolve({ success: false, error: String((e && e.message) || e) });
-      }
-    });
-  }
+  // (resolveMainWorldDialog lives in 00 now — see the note above.)
   function handleReadClipboard() {
   // navigator.clipboard.readText() needs the document focused AND the
   // clipboardRead permission; in a backgrounded tab it silently returns

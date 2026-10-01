@@ -1671,7 +1671,11 @@ test('dialogs: a MAIN-world hook captures the PAGE\'s own alert/confirm/prompt',
   // successful when the user would have been asked about it).
   const BG = readFileSync(new URL('./extension/background.js', import.meta.url), 'utf8');
   const HOOK = readFileSync(new URL('./extension/dialog-hook.js', import.meta.url), 'utf8');
-  const READERS = readFileSync(new URL('./extension/cs-src/70-capture-and-readers.js', import.meta.url), 'utf8');
+  // ★ 2026-10-01: the readers now live at the TOP of 00 (first in the concatenation) because
+  // 00's own handle_dialog/get_status could not resolve them when they sat in 70. So read
+  // BOTH: 00 holds the definitions, 70 holds the consumers (page_state, handle_dialog).
+  const READERS = readFileSync(new URL('./extension/cs-src/00-bridge-and-transport.js', import.meta.url), 'utf8')
+    + '\n' + readFileSync(new URL('./extension/cs-src/70-capture-and-readers.js', import.meta.url), 'utf8');
   const ART = readFileSync(new URL('./extension/websense-cs.js', import.meta.url), 'utf8');
 
   assert(/async function registerDialogHook\(\)/.test(BG), 'background must register the dialog hook');
@@ -2321,6 +2325,33 @@ test('page ops: every tool that can act on a tab must DECLARE tabId in its schem
   // And the failure must stay documented where the next reader will look.
   assert(/zod stripped it before the handler ran|silently stripped/.test(src) ||
          /tabId/.test(src), 'tabId must be declared');
+});
+
+test('cs: the main-world dialog helpers are defined EXACTLY ONCE, in a scope both dispatchers see', () => {
+  // ★ 2026-10-01. They lived in 70 and 00 could not see them: handle_dialog failed with
+  // "readMainWorldDialogs is not defined", and get_status called it inside try/catch so it
+  // SILENTLY reported pendingDialogs: [] — a wrong answer indistinguishable from "no
+  // dialogs". Hoisted to the top of 00, which is first in the concatenation.
+  const files = readdirSync(new URL('./extension/cs-src/', import.meta.url))
+    .filter((f) => f.endsWith('.js')).sort();
+  const FNS = ['readMainWorldDialogs', 'readRecentMainWorldDialogs', 'resolveMainWorldDialog'];
+  const where = {};
+  for (const f of files) {
+    const s = readFileSync(new URL('./extension/cs-src/' + f, import.meta.url), 'utf8')
+      .replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const fn of FNS) {
+      if (new RegExp('function\\s+' + fn + '\\s*\\(').test(s)) (where[fn] = where[fn] || []).push(f);
+    }
+  }
+  for (const fn of FNS) {
+    const files_ = where[fn] || [];
+    assert.strictEqual(files_.length, 1,
+      fn + ' must be defined exactly once (found in: ' + (files_.join(', ') || 'NOWHERE') + ')');
+    // 00 is FIRST in the concatenation, so its declarations are visible to every section.
+    assert.strictEqual(files_[0], '00-bridge-and-transport.js',
+      fn + ' must live in 00-bridge-and-transport.js (the first file), so every dispatcher '
+      + 'can see it — it was in ' + files_[0] + ' and 00 could not resolve it');
+  }
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
