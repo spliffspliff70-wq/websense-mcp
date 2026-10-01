@@ -23,7 +23,7 @@ import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { COLLECTOR, putSnapshot, getSnapshot, sliceSnapshot, snapshotStats, branchChain, markSnapshotDirty } from './snapshot.js';
+import { COLLECTOR, putSnapshot, getSnapshot, sliceSnapshot, snapshotStats, branchChain, markSnapshotDirty, regionTree } from './snapshot.js';
 import { DIFF_COLLECTOR } from './diff-collector.js';
 import { HubServer } from './hub.js';
 import { SessionManager } from './session.js';
@@ -1988,11 +1988,20 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     }
     const { seq, index } = putSnapshot(tabId, snap);
     getSession().recordAction({ action: 'browse', tabId }, { elements: index.elements });
+    // ★ THE PAGE AS THE PAGE NAMES IT (2026-10-01): the containers THIS page labelled, nested,
+    // with no counts. Ali: "center feed is 1 element for me ... if there is 1 central feed why
+    // does it need to show 1617?" — it should not. The counts were bookkeeping for picking
+    // which named things are regions; display is the names and the nesting only.
+    // Computed entirely server-side from the inventory we already hold (parent pointers +
+    // verbatim attributes), so it costs no extra page collection and no extra round trip.
+    let regions = null;
+    try { regions = regionTree(snap); } catch (e) { regions = { error: String(e && e.message) }; }
     return textResult({
       success: true, cached: false, navigated: navigated, handle: 'snap:' + tabId + ':' + seq, seq,
       baseline: baseline && baseline.first ? 'seeded — the NEXT op on this page is diffable' : (baseline && baseline.note) || 'seeded',
       index,
-      hint: 'find{query} to locate a control with its branch, or page_slice{...} to load one branch. Mutating ops now return a grouped DIFF automatically.',
+      regions: regions && regions.outline,
+      hint: 'regions = the containers THIS page named, nested. find{query} to locate a control with its branch, or page_slice{...} to load one branch. Mutating ops now return a grouped DIFF automatically.',
     });
   });
 

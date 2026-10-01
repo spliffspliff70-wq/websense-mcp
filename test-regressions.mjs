@@ -11,7 +11,7 @@ import { summarizeRead } from './src/summarize.js';
 import { uploadVerdict } from './src/upload.js';
 import { SessionManager } from './src/session.js';
 import { diffScan, identityKey, disambiguate, fieldChanges } from './src/incr.js';
-import { buildIndex, sliceSnapshot, branchChain, COLLECTOR } from './src/snapshot.js';
+import { buildIndex, sliceSnapshot, branchChain, COLLECTOR, regionTree } from './src/snapshot.js';
 import { DIFF_COLLECTOR } from './src/diff-collector.js';
 
 let passed = 0, failed = 0;
@@ -2352,6 +2352,84 @@ test('cs: the main-world dialog helpers are defined EXACTLY ONCE, in a scope bot
       fn + ' must live in 00-bridge-and-transport.js (the first file), so every dispatcher '
       + 'can see it — it was in ' + files_[0] + ' and 00 could not resolve it');
   }
+});
+
+test('regions: the page\'s OWN named containers, nested, with NO counts', () => {
+  // ★ 2026-10-01, Ali: "center feed is 1 element for me ... If there is 1 central feed why does
+  // it need to show 1617?" He was right. The outline names the containers and nests them; it
+  // never prints a subtree count.
+  // A REGION = a named element that CONTAINS another named element — that one tree fact
+  // separates a region (primaryColumn, holding "Home timeline") from a control (a named link,
+  // holding nothing named), with no vocabulary and no size threshold of ours.
+  const mk = (i, tag, attrs, p) => {
+    const r = { i, tag };
+    if (attrs) {
+      r.attrs = attrs;
+      r.attrNames = Object.keys(attrs);
+    }
+    if (p != null) r.p = p;
+    return r;
+  };
+  //                                    i  tag      attrs                              parent
+  const snap = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'body', null, 0),
+    mk(2, 'header', { role: 'banner' }, 1),
+    mk(3, 'nav', { 'aria-label': 'Primary' }, 2),
+    mk(4, 'a', { 'aria-label': 'Home' }, 3),            // named LEAF -> a control, not a region
+    mk(5, 'main', { role: 'main' }, 1),
+    mk(6, 'div', { 'data-testid': 'primaryColumn' }, 5),
+    mk(7, 'div', { 'aria-label': 'Home timeline' }, 6),
+    mk(8, 'article', { 'data-testid': 'cell' }, 7),
+    mk(9, 'span', { 'aria-label': 'inner' }, 8),        // makes article a region
+    mk(10, 'article', { 'data-testid': 'cell' }, 7),
+    mk(11, 'span', { 'aria-label': 'inner' }, 10),
+    mk(12, 'article', { 'data-testid': 'cell' }, 7),
+    mk(13, 'span', { 'aria-label': 'inner' }, 12),
+    mk(14, 'div', { 'data-testid': 'sidebarColumn' }, 5),
+    mk(15, 'div', { 'aria-label': 'Trending' }, 14),
+    mk(16, 'span', { 'aria-label': 'topic' }, 15),
+  ] };
+
+  const t = regionTree(snap);
+  assert(typeof t.outline === 'string' && t.outline.length > 0, 'must produce an outline');
+
+  assert(/banner/.test(t.outline), 'a named region (header role=banner) must appear');
+  assert(/Primary/.test(t.outline), 'a named region (nav aria-label) must appear');
+  assert(/primaryColumn/.test(t.outline), 'the page\'s own hook name must appear');
+  assert(/Home timeline/.test(t.outline), 'a nested named region must appear');
+  assert(/sidebarColumn/.test(t.outline) && /Trending/.test(t.outline), 'the rail must appear');
+
+  // ★ THE POINT OF THE QUESTION: a named leaf control is NOT a region, so it is not listed —
+  // this is what stops the outline from becoming a dump of every named node.
+  assert(!/aria-label="Home"|:: "Home"|:: Home/.test(t.outline),
+    'a named LEAF (a link holding nothing named) must NOT be listed as a region');
+
+  // repetition of identical regions collapses to one + a count of the REPEAT
+  assert(/REPEATS x3/.test(t.outline), 'three identical article regions must collapse');
+
+  // ★ NO BARE SUBTREE COUNTS ANYWHERE — the exact thing Ali objected to.
+  assert(!/\{\d+\}/.test(t.outline), 'the outline must never print a {count} — that was the bug');
+
+  // nesting is real: Trending is deeper than main
+  const lines = t.outline.split('\n');
+  const trend = lines.find((l) => /Trending/.test(l));
+  assert(trend && trend.startsWith('  '), 'a nested region must be indented');
+
+  // ★ AN ATTRIBUTE NAME IS IDENTITY; ITS VALUE IS SOMETIMES A PAYLOAD. Measured live on x.com:
+  // data-at-shortcutkeys holds the whole keyboard-shortcut map (~1.5 KB) and it landed IN THE
+  // OUTLINE because the name printer concatenated the value. A short value IS the identity
+  // (data-testid=primaryColumn); a long one must be reported by NAME ONLY.
+  const longVal = 'x'.repeat(400);
+  const snap2 = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'div', { 'data-shortcuts': longVal }, 0),
+    mk(2, 'span', { 'aria-label': 'inner' }, 1),
+  ] };
+  const t2 = regionTree(snap2);
+  assert(t2.outline.indexOf(longVal) === -1, 'a long data-* VALUE must never be printed');
+  assert(/data-shortcuts/.test(t2.outline), 'the attribute NAME must still be printed');
+  assert(t2.outline.length < 200, 'the outline must not carry the payload (got ' + t2.outline.length + ' chars)');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

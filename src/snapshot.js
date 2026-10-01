@@ -382,6 +382,137 @@ export function branchChain(snap, rec, depth = 5) {
 }
 
 // ── SLICE: full-fidelity records for one dimension. ──
+// ★ THE PAGE AS A MODEL SHOULD SEE IT: the containers the PAGE ITSELF named, nested, with NO
+// counts (2026-10-01, Ali: "center feed is 1 element for me ... If there is 1 central feed why
+// does it need to show 1617?").
+//
+// WHY THIS AND NOT A DOM TREE. A DOM tree of x.com is 2,535 nodes. The page's OWN names for
+// its regions are ~10-20 things — which is the model a human holds, and it is already in the
+// inventory. The names are the page's words (role / aria-label / a data-* hook / id); we
+// invent nothing. The subtree COUNT is bookkeeping for SELECTION (deciding which named things
+// are regions) and must never be printed — a human does not count the feed's elements.
+//
+// A REGION = a named element that CONTAINS another named element. That one fact separates a
+// region (primaryColumn, which holds "Home timeline") from a control (a named link, which
+// holds nothing named) — no vocabulary of ours, and no size threshold.
+//
+// The two collapses are the same two facts proven on Hacker News, and they are properties of
+// the tree, not thresholds: a single-child chain carries no information, and identical
+// siblings are repetition.
+export function regionTree(snap, opts = {}) {
+  const els = (snap && snap.elements) || [];
+  const maxDepth = opts.depth || 14;
+
+  const nameOf = (e) => {
+    const a = e.attrs;
+    if (!a) return '';
+    if (a.role) return a.role + (a['aria-label'] ? ' "' + a['aria-label'] + '"' : '');
+    if (a['aria-label']) return '"' + a['aria-label'] + '"';
+    if (e.attrNames) {
+      for (const k of e.attrNames) {
+        if (k.length > 5 && k.lastIndexOf('data-', 0) === 0) {
+          // ★ AN ATTRIBUTE NAME IS IDENTITY; ITS VALUE IS SOMETIMES A PAYLOAD (2026-10-01).
+          // Measured on x.com: data-at-shortcutkeys holds the ENTIRE keyboard-shortcut map
+          // (~1.5 KB) and it landed in the outline. A short value IS the identity
+          // (data-testid=primaryColumn); a long one is reported by name only.
+          const v = a[k];
+          return (v && v.length <= 40) ? k + '=' + v : k;
+        }
+      }
+    }
+    if (a.id) return '#' + a.id;
+    return '';
+  };
+
+  const kids = [];
+  for (let i = 0; i < els.length; i++) kids.push([]);
+  for (let i = 0; i < els.length; i++) {
+    const p = els[i] ? els[i].p : null;
+    if (p != null && kids[p]) kids[p].push(i);
+  }
+
+  const named = els.map((e) => !!nameOf(e));
+  // hasNamedDesc[i] — does i contain a named element anywhere below it?
+  const hasNamedDesc = new Array(els.length).fill(false);
+  for (let i = els.length - 1; i >= 0; i--) {
+    for (const c of kids[i]) {
+      if (named[c] || hasNamedDesc[c]) { hasNamedDesc[i] = true; break; }
+    }
+  }
+  const isRegion = els.map((e, i) => named[i] && hasNamedDesc[i]);
+  const regionChild = [];   // region children of each region
+  for (let i = 0; i < els.length; i++) regionChild.push([]);
+  for (let i = 0; i < els.length; i++) {
+    if (!isRegion[i]) continue;
+    let p = els[i].p, hops = 0;
+    while (p != null && hops < 400) { if (isRegion[p]) { regionChild[p].push(i); break; } p = els[p].p; hops++; }
+  }
+
+  // shape of a region for the repetition test: tag + its OWN name KIND (not the value, because
+  // per-instance values differ) + the tag sequence of its region children.
+  const shapeOf = (i) => {
+    const a = els[i].attrs || {};
+    const kinds = [];
+    if (a.role) kinds.push('role');
+    else if (a['aria-label']) kinds.push('aria');
+    else if (a.id) kinds.push('id');
+    else kinds.push('data');
+    return els[i].tag + '|' + kinds.join(',') + '|' + regionChild[i].map((c) => els[c].tag).join(',');
+  };
+
+  const lines = [];
+  const seenRep = [];
+  const emit = (i, d) => {
+    if (d > maxDepth) return;
+    const ind = '  '.repeat(d);
+    // single-child chain — walk it into the child, one line, no information lost
+    // Collapse a run of named regions that nest one-to-one, but KEEP EVERY NAME: the page's
+    // hook (primaryColumn) and its label ("Home timeline") are different facts about the same
+    // place, and dropping either loses information. This is a collapse of the LINE, not of the
+    // names.
+    let cur = i, chain = els[i].tag, names = [nameOf(els[i])];
+    while (regionChild[cur].length === 1) {
+      const only = regionChild[cur][0];
+      if (regionChild[only].length === 0) break;   // keep a leaf-ish region visible
+      chain += ' > ' + els[only].tag;
+      names.push(nameOf(els[only]));
+      cur = only;
+    }
+    lines.push(ind + chain + ' :: ' + names.filter(Boolean).join('  /  '));
+    const rc = regionChild[cur];
+    // repetition: consecutive region children with the same shape
+    let k = 0;
+    while (k < rc.length) {
+      let j = k + 1;
+      while (j < rc.length && shapeOf(rc[j]) === shapeOf(rc[k])) j++;
+      if (j - k >= 3) {
+        emit(rc[k], d + 1);
+        lines.push('  '.repeat(d + 1) + '^ the block above REPEATS x' + (j - k));
+        seenRep.push(j - k);
+      } else {
+        for (let m = k; m < j; m++) emit(rc[m], d + 1);
+      }
+      k = j;
+    }
+  };
+
+  // roots = regions with no region ancestor
+  const roots = [];
+  for (let i = 0; i < els.length; i++) {
+    if (!isRegion[i]) continue;
+    let p = els[i].p, hops = 0, hasParentRegion = false;
+    while (p != null && hops < 400) { if (isRegion[p]) { hasParentRegion = true; break; } p = els[p].p; hops++; }
+    if (!hasParentRegion) roots.push(i);
+  }
+  for (const r of roots) emit(r, 0);
+
+  return {
+    regions: lines.filter((l) => l.indexOf('REPEATS') < 0).length,
+    named: named.filter(Boolean).length,
+    outline: lines.join('\n'),
+  };
+}
+
 export function sliceSnapshot(snap, filter = {}) {
   const els = (snap && snap.elements) || [];
   const q = filter.query ? String(filter.query).toLowerCase() : null;
