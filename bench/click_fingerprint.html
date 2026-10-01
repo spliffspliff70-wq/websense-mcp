@@ -84,6 +84,46 @@ window.__reset = () => { window.__rec = []; window.__count = 0;
   document.getElementById('inp').blur(); document.getElementById('btn').blur();
   location.hash = ''; };
 window.__dump = () => window.__rec;
+
+// ── THE BLOAT CONTROLS (added 2026-10-01) ────────────────────────────────────────────────
+// Two things the auto-DIFF was measured getting wrong on a live page, made deterministic here so
+// they can be checked without a stale baseline or a live site's state:
+//
+// 1. A LOCATOR MUST NOT BE A PAINT INSTRUCTION. An SVG path carries its geometry in `d`, which can
+//    be 1,200+ characters, and a locator builder that accepts it as an element's identity produces
+//    enormous, meaningless locators — measured: 199 KB of a 340 KB diff. This path deliberately has
+//    a long UNIQUE d and NO id/data-testid, so the old rule would pick it and the new one must not.
+// 2. A LAYOUT SHIFT IS A FEW FACTS. Toggling the block below moves every element after it by the
+//    same delta with the scroll position unchanged. The old rule listed one entry per element
+//    (measured: 2,023 entries / 333 KB); the new rule reports each DISTINCT movement once with the
+//    count and the indices of everything that moved by it.
+const bench = document.createElement('div');
+bench.id = 'fp-bench';
+bench.innerHTML =
+  '<div class="row">' +
+    '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">' +
+      '<path d="M11.11 2.001c.55 0 1.09.02 1.62.06l.28.02 4.9 9.51-4.9 9.42-.28.03c-.53.04-1.07.06-1.62.06-.55 0-1.09-.02-1.62-.06l-.28-.02-4.9-9.43 4.9-9.51.28-.02c.53-.04 1.07-.06 1.62-.06zm8.02 4.8 1.19 2.31 1.19-2.31-1.19-2.31-1.19 2.31zm0 10.4 1.19 2.31 1.19-2.31-1.19-2.31-1.19 2.31z"/>' +
+    '</svg>' +
+    '<button id="fp-grow" data-testid="fp-grow">Toggle a 200px block</button>' +
+    ' <span id="fp-grow-state" data-testid="fp-grow-state">off</span>' +
+  '</div>' +
+  '<div id="fp-bigblock" style="display:none;height:200px;background:#f2f6fa"></div>' +
+  '<div id="fp-shifters"></div>';
+document.body.appendChild(bench);
+
+const shifters = document.getElementById('fp-shifters');
+for (let i = 0; i < 60; i++) {
+  const d = document.createElement('div');
+  d.setAttribute('data-testid', 'fp-shifter-' + i);
+  d.textContent = 'shifter ' + i;
+  shifters.appendChild(d);
+}
+document.getElementById('fp-grow').addEventListener('click', () => {
+  const b = document.getElementById('fp-bigblock');
+  const on = b.style.display === 'none';
+  b.style.display = on ? 'block' : 'none';
+  document.getElementById('fp-grow-state').textContent = on ? 'on' : 'off';
+});
 </script>
 </body>
 </html>

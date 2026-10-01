@@ -34,7 +34,29 @@
 // growing a second magic number of its own. Whatever is not printed here is still in the
 // inventory — `page_slice{indices:[i]}` returns it verbatim.
 export const CONTENT_PREVIEW = 120;
+
+// ★ RENDERING-ONLY ATTRIBUTES, DEFINED ONCE (2026-10-01).
+// Two places need the same vocabulary, and they had it twice:
+//   - the COLLECTOR's locator builder, because a locator must identify an element, and an SVG
+//     drawing attribute is not an identity — it is a paint instruction. Measured on x.com: the
+//     auto-DIFF after a type_text was 340 KB, of which 199 KB (59%) was LOCATOR STRINGS, because
+//     icons carried locators like path[d="M14.1 2.5c1.103 0 1.991-.001 ..."] at ~1,200 chars each.
+//   - the DIFF's presentation filter, where a change to one of these is a repaint, not a
+//     structural change (that fix is what stopped a scroll from reporting 89 "structure" changes).
+// Kept in ONE array and interpolated into both templates: divergence between two copies of the
+// same idea is the defect this codebase has hit most often.
+export const PRESENTATION_ATTRS = [
+  'class', 'style', 'dir', 'lang',
+  'd', 'points', 'transform', 'viewBox',
+  'fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
+  'stroke-dasharray', 'stroke-dashoffset', 'fill-opacity', 'stroke-opacity', 'opacity',
+  'cx', 'cy', 'r', 'rx', 'ry', 'x1', 'y1', 'x2', 'y2',
+  'offset', 'stop-color', 'stop-opacity', 'gradientUnits', 'preserveAspectRatio',
+];
+const PRESENTATION_ATTRS_JSON = JSON.stringify(PRESENTATION_ATTRS);
+
 export const COLLECTOR = `() => {
+  var RENDER_ATTRS = ${PRESENTATION_ATTRS_JSON};
   // ★ NO CAP (2026-10-01, Ali: "Agreed no capping no filtering implement and test").
   // This used to be MAX = 20000 with an early break. Removed: the
   // inventory is meant to be LOSSLESS, and a cap on it is exactly the silent cut the
@@ -111,7 +133,11 @@ export const COLLECTOR = `() => {
     if (at && attrCount) {
       for (var i = 0; i < at.length; i++) {
         var an = at[i].name;
-        if (an === 'style' || an === 'class' || an === 'data-websense-ref') continue;
+        // ★ A RENDERING ATTRIBUTE IS NOT AN IDENTITY (2026-10-01). Measured: 199 KB of a 340 KB
+        // diff was locator strings, because SVG icons carry path[d="M14.1 2.5c1.103 0 ..."] at
+        // ~1,200 characters each. It is not stable, not something anyone acts on, and it pushed
+        // out everything that matters.
+        if (an === 'data-websense-ref' || RENDER_ATTRS.indexOf(an) >= 0) continue;
         if (attrCount[an + '=' + at[i].value] === 1) {
           // ★ QUOTE-ESCAPE AN ATTRIBUTE VALUE, DO NOT CSS.escape IT (2026-10-01). Measured on
           // bbc.com/news: CSS.escape is for IDENTIFIERS, and inside a quoted attribute value it

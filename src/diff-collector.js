@@ -1,4 +1,7 @@
-import { COLLECTOR } from './snapshot.js';
+import { COLLECTOR, PRESENTATION_ATTRS } from './snapshot.js';
+// Interpolated into the template below so the page-side filter and the locator builder share ONE
+// list — see the constant's comment in snapshot.js.
+const PRESENTATION_ATTRS_JSON = JSON.stringify(PRESENTATION_ATTRS);
 
 // ── THE AUTO-DIFF (2026-10-01) ───────────────────────────────────────────────
 // Run AFTER EVERY MUTATING OP, page-side, against a baseline the PAGE holds. It returns
@@ -23,7 +26,17 @@ import { COLLECTOR } from './snapshot.js';
 // caller the size before it decides to read further.
 export const DIFF_COLLECTOR = `() => {
   var collect = ${COLLECTOR};
-  var KEY = '__wsBaseline_v1';
+  var RENDER_ATTRS = ${PRESENTATION_ATTRS_JSON};
+  // ★ BUMP THIS WHEN THE IDENTITY SCHEME CHANGES (measured 2026-10-01, the hard way).
+  // The baseline is matched by locator + ordinal, so if a new build computes DIFFERENT locators for
+  // the same elements, an old baseline is not a reference point — it is a different vocabulary.
+  // Measured: the first diff after the locator scheme stopped using SVG path data reported
+  // structure count 519 for a click that changed nothing structural, because every existing
+  // locator "differed". The next diff was clean (92), so it self-heals — but it lies once, and
+  // once is enough to send a caller chasing a change that never happened.
+  // The version in the key makes an old baseline UNUSABLE instead of MISREAD: the page simply
+  // finds no baseline and seeds a fresh one, which is the honest outcome.
+  var KEY = '__wsBaseline_v2';
   var now = collect();
   var prev = window[KEY];
 
@@ -46,24 +59,12 @@ export const DIFF_COLLECTOR = `() => {
   // checked, value, aria-*, href, placeholder — is identity, state or semantics, and a
   // change to any of those IS structural.
   function isPresentationAttr(n) {
-    if (n === 'class' || n === 'style' || n === 'dir' || n === 'lang') return true;
+    // ★ ONE LIST, SHARED WITH THE LOCATOR BUILDER (2026-10-01). The SVG drawing attributes used to
+    // be spelled out here AND were implicitly used by the locator builder; the locator builder now
+    // consumes this same array, because keeping two copies of one idea is the defect this codebase
+    // hits most often. See PRESENTATION_ATTRS in snapshot.js.
+    if (RENDER_ATTRS.indexOf(n) >= 0) return true;
     if (n.length > 5 && n.lastIndexOf('data-', 0) === 0) return true;
-    // ★ SVG GEOMETRY IS RENDERING TOO (found live 2026-10-01). A scroll on x.com reported
-    // mutated:true with 89 "structure" changes, and the bulk of them were icons redrawing
-    // their path data (the SVG d attribute) plus points/transform on other shapes. Nothing
-    // about the page's STRUCTURE had changed; a spinner span did what it was told. These are
-    // the SVG spec's drawing attributes, not a site vocabulary, and a change to one is a
-    // repaint in exactly the way a style change is.
-    // (NOTE: no backticks anywhere in this file — it is a template literal. Wrap names in
-    // double quotes, never backticks, or the module will not parse at all.)
-    if (n === 'd' || n === 'points' || n === 'transform' || n === 'viewBox'
-      || n === 'fill' || n === 'stroke' || n === 'stroke-width' || n === 'stroke-linecap'
-      || n === 'stroke-linejoin' || n === 'stroke-dasharray' || n === 'stroke-dashoffset'
-      || n === 'fill-opacity' || n === 'stroke-opacity' || n === 'opacity'
-      || n === 'cx' || n === 'cy' || n === 'r' || n === 'rx' || n === 'ry'
-      || n === 'x1' || n === 'y1' || n === 'x2' || n === 'y2'
-      || n === 'offset' || n === 'stop-color' || n === 'stop-opacity'
-      || n === 'gradientUnits' || n === 'preserveAspectRatio') return true;
     return false;
   }
 
@@ -259,8 +260,38 @@ export const DIFF_COLLECTOR = `() => {
       note: 'the page SCROLLED. Per-element positions are in the inventory (find{indices:[...]}); enumerating them would repeat one fact ' + viewportN + ' times. Not a mutation.',
     };
   } else if (viewportN) {
-    out.viewport = { moved: moved, count: viewportN,
-      note: 'elements moved while the scroll position did NOT change — this is a LAYOUT change, so each movement is its own fact and is listed.' };
+    // ★ A LAYOUT SHIFT IS A FEW FACTS, NOT N PER-ELEMENT FACTS (2026-10-01).
+    // This case used to enumerate {loc, was, now} for every element that moved. Measured on the
+    // event that prompted this: opening the composer pushed x.com's timeline down 73px, and the
+    // report was 2,023 entries / 333.5 KB — 98% of a 379 KB tool result — to say one thing. 199 KB
+    // of that was LOCATOR text, because icons carry ~1,200-char SVG path locators.
+    // The information is the SET OF DISTINCT MOVEMENTS, so each distinct (dx, dy, vp-transition)
+    // is reported ONCE, with the count and the INVENTORY INDICES of every element that moved by
+    // it. Nothing is dropped and nothing is hidden — the index IS the identity, its locator and
+    // full record are one find{indices:[i]} / page_slice{indices:[i]} away, and that locator is
+    // identical to the one already in the inventory, so repeating it here was pure redundancy.
+    // The vp transition is part of the key on purpose: an element that moved AND left the
+    // viewport is a different fact from one that merely shifted, and it stays visible as its own
+    // shift rather than being folded into the dominant one.
+    var byDelta = {}, order = [];
+    for (var mi = 0; mi < moved.length; mi++) {
+      var mv = moved[mi];
+      var dx = mv.now.x - mv.was.x, dy = mv.now.y - mv.was.y;
+      var vw = mv.was.vp ? 1 : 0, vn = mv.now.vp ? 1 : 0;
+      var dk = dx + ',' + dy + ',' + vw + '>' + vn;
+      if (!byDelta[dk]) {
+        byDelta[dk] = { dx: dx, dy: dy, count: 0, i: [] };
+        if (vw !== vn) byDelta[dk].vp = { was: vw === 1, now: vn === 1 };
+        order.push(dk);
+      }
+      byDelta[dk].count++;
+      byDelta[dk].i.push(mv.i);
+    }
+    var shifts = [];
+    for (var oi = 0; oi < order.length; oi++) shifts.push(byDelta[order[oi]]);
+    shifts.sort(function (a, b) { return b.count - a.count; });
+    out.viewport = { moved: viewportN, shifts: shifts,
+      note: 'elements moved while the scroll position did NOT change — a LAYOUT change. Each DISTINCT movement is one fact here, with the count and the inventory indices of every element that moved by it (i is the index: find{indices:[i]} names them, page_slice{indices:[i]} gives their records). Not a mutation.' };
   } else {
     out.viewport = { moved: [], count: 0 };
   }

@@ -11,7 +11,7 @@ import { summarizeRead } from './src/summarize.js';
 import { uploadVerdict } from './src/upload.js';
 import { SessionManager } from './src/session.js';
 import { diffScan, identityKey, disambiguate, fieldChanges } from './src/incr.js';
-import { buildIndex, sliceSnapshot, branchChain, COLLECTOR, regionTree } from './src/snapshot.js';
+import { buildIndex, sliceSnapshot, branchChain, COLLECTOR, regionTree, PRESENTATION_ATTRS } from './src/snapshot.js';
 import { DIFF_COLLECTOR } from './src/diff-collector.js';
 
 let passed = 0, failed = 0;
@@ -2066,8 +2066,19 @@ test('diff: the auto-DIFF groups structure / content / viewport', () => {
   assert(/out\.viewport = \{[\s\S]{0,80}scrolled: \{ dx:/.test(code),
     'a scroll must report its delta, not enumerate every element');
   assert(/enumerated: false/.test(code), 'and must say it did not enumerate');
-  assert(/out\.viewport = \{ moved: moved, count: viewportN/.test(code),
-    'a movement with the scroll position UNCHANGED is a real relayout and must still enumerate');
+  // ★ AND A RELAYOUT IS A FEW FACTS, NOT N (2026-10-01 — the second measurement on this code).
+  // The relayout branch used to enumerate {loc, was, now} for every element that moved. Opening
+  // x.com's composer moved 2,023 elements and produced 333.5 KB: 98% of a 379 KB tool result, to
+  // say "the timeline shifted down 73px". It now reports each DISTINCT movement ONCE with the
+  // count and the inventory indices of every element that moved by it. No element is dropped, no
+  // fact is hidden — the index IS the identity and its repeated locator was the expensive part
+  // (199 KB of those bytes, because icons carry 1,200-char path locators).
+  assert(/out\.viewport = \{ moved: viewportN, shifts: shifts/.test(code),
+    'a relayout must report DISTINCT shifts, one fact each — not one entry per element');
+  assert(/byDelta\[dk\]\.i\.push\(mv\.i\)/.test(code),
+    'every moved element must keep its index, or the summary would be hiding them');
+  assert(/var dk = dx \+ ',' \+ dy \+ ',' \+ vw \+ '>' \+ vn;/.test(code),
+    'the viewport transition must be part of the shift key, so entering/leaving stays visible');
   // ★ PRESENTATION IS NOT IDENTITY — and it is not just class/style. Measured: 609
   // structure.changed entries at 98,441 chars whose differences were class/style,
   // class/data-testid/style, class/dir/style. data-* is metadata BY DEFINITION in HTML.
@@ -2980,16 +2991,30 @@ test('diff: SVG drawing attributes are rendering, not structure', () => {
   // honest in both directions: nothing structural may be swept in with the rendering attrs.
   const m = /function isPresentationAttr\(n\)\s*\{([\s\S]*?)\n  \}/.exec(DIFF_COLLECTOR);
   assert(m, 'isPresentationAttr must be findable inside the collector');
-  const fn = new Function('n', m[1]);
+  // The predicate now reads a SHARED list (PRESENTATION_ATTRS) rather than spelling the names out,
+  // so the evaluated function is handed the real array — that makes this test verify the list the
+  // page actually uses, not a copy of it. The locator builder consumes the same constant, so one
+  // array now governs both "is this readable as identity" and "is a change to it structural".
+  const fn = new Function('n', 'RENDER_ATTRS', m[1]);
+  const calls = (n) => fn(n, PRESENTATION_ATTRS);
+  assert(Array.isArray(PRESENTATION_ATTRS) && PRESENTATION_ATTRS.indexOf('d') >= 0,
+    'the shared list must carry the SVG drawing attributes');
 
   const rendering = ['class', 'style', 'dir', 'lang', 'data-anything', 'd', 'points',
     'transform', 'fill', 'stroke-width', 'stroke-dasharray', 'cx', 'cy', 'r', 'offset',
     'stop-color', 'preserveAspectRatio'];
-  for (const n of rendering) assert(fn(n) === true, n + ' is rendering, not structure');
+  for (const n of rendering) assert(calls(n) === true, n + ' is rendering, not structure');
 
   const structural = ['role', 'id', 'value', 'disabled', 'checked', 'href', 'placeholder',
     'aria-selected', 'tabindex', 'type', 'name', 'title'];
-  for (const n of structural) assert(fn(n) === false, n + ' is identity or state, NOT rendering');
+  for (const n of structural) assert(calls(n) === false, n + ' is identity or state, NOT rendering');
+
+  // ★ AND THE OTHER CONSUMER MUST USE THE SAME LIST (2026-10-01). The locator builder skips these
+  // names, because a locator identifies an element and a paint instruction does not identify
+  // anything. Measured: 199 KB of a 340 KB diff was locator text, mostly 1,200-char path[d=...].
+  assert(/RENDER_ATTRS\.indexOf\(an\) >= 0/.test(COLLECTOR),
+    'the locator builder must skip the same rendering attrs (else a 1,200-char path[d] becomes a locator)');
+  assert(/var RENDER_ATTRS = \[/.test(COLLECTOR), 'and the list is interpolated into the collector');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
