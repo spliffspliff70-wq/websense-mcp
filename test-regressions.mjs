@@ -2450,6 +2450,16 @@ test('trusted_key: wired like the click, and it must SHARE the preparation', () 
     'the server side must give an Enter a LONGER navigation window (a real page load outlasts a short probe: measured — Wikipedia navigated and the verdict still said unverifiable) and a single probe to everything else, so typing a character costs nothing');
 });
 
+test('collector: a SAME-ORIGIN IFRAME is part of the page', () => {
+  // Measured on the fixture, before and after: find{query:'frame-btn'} went from matched 0 to
+  // matched 2 with its branch chain walking up through the iframe. Perception only — the rect is
+  // in the FRAME's coordinate space, so acting on it still needs the frame offset.
+  assert(/le\.contentDocument && le\.contentDocument !== root/.test(COLLECTOR),
+    'the walk must descend into a same-origin iframe document');
+  assert(/catch \(e\) \{\}/.test(COLLECTOR), 'cross-origin frames must be skipped, not break the collect');
+  assert(/shadowRoot\) walkShadow/.test(COLLECTOR), 'and the shadow walk must stay');
+});
+
 test('drag: the full sequence INCLUDING drop, and a frame must not be blamed on the element', () => {
   // ★ I CLAIMED DRAG WAS A SILENT NO-OP. I WAS WRONG. Measured (2026-10-01): the page recorded
   // dragstart > drag > dragenter > dragover > DROP > dragend with a DataTransfer, dropCount 1. My

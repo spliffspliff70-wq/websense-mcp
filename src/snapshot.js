@@ -85,6 +85,9 @@ export const COLLECTOR = `() => {
       all.push(le);
       domParent.set(le, le.parentElement || host);
       if (le.shadowRoot) walkShadow(le.shadowRoot, le);
+      try {
+        if (le.contentDocument && le.contentDocument !== root) walkShadow(le.contentDocument, le);
+      } catch (e) {}
     }
   })(document, null);
   var total = all.length;
