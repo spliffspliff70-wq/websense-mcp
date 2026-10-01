@@ -805,13 +805,13 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     },
   }, async (o) => {
     // A zero-hit semantic search must not look like an empty page (see annotateIntentResult).
-    if (o.intent) return textResult(annotateIntentResult(await getActiveHub().send({ type: 'find_intent', intent: o.intent, frameId: o.frameId }), 'intent', o.intent));
-    if (o.goal) return textResult(annotateIntentResult(await getActiveHub().send({ type: 'explore_intent', goal: o.goal, frameId: o.frameId }), 'goal', o.goal));
-    if (o.compact) return textResult(await getActiveHub().send({ type: 'discover_actions', maxActions: o.maxActions === undefined ? 200 : o.maxActions, frameId: o.frameId }));
+    if (o.intent) return textResult(annotateIntentResult(await getActiveHub().send({ type: 'find_intent', intent: o.intent, frameId: o.frameId, tabId: o.tabId }), 'intent', o.intent));
+    if (o.goal) return textResult(annotateIntentResult(await getActiveHub().send({ type: 'explore_intent', goal: o.goal, frameId: o.frameId, tabId: o.tabId }), 'goal', o.goal));
+    if (o.compact) return textResult(await getActiveHub().send({ type: 'discover_actions', maxActions: o.maxActions === undefined ? 200 : o.maxActions, frameId: o.frameId, tabId: o.tabId }));
     if (o.preload) {
-      await getActiveHub().send({ type: 'preload_content', maxSteps: 8, settleMs: 250, restore: true });
+      await getActiveHub().send({ type: 'preload_content', maxSteps: 8, settleMs: 250, restore: true, tabId: o.tabId });
     }
-    const sag = await getActiveHub().send({ type: 'explore_page', full: o.full || false, includeContent: o.includeContent !== false, includeHidden: o.includeHidden || false, incremental: o.incremental || false, maxActions: o.maxActions, contentMaxLen: o.contentMaxLen, fresh: o.fresh || false, settle: o.settle, frameId: o.frameId });
+    const sag = await getActiveHub().send({ type: 'explore_page', full: o.full || false, includeContent: o.includeContent !== false, includeHidden: o.includeHidden || false, incremental: o.incremental || false, maxActions: o.maxActions, contentMaxLen: o.contentMaxLen, fresh: o.fresh || false, settle: o.settle, frameId: o.frameId, tabId: o.tabId });
     if (!sag || sag.success === false) return textResult(sag || { success: false, error: 'No response from content script' });
     if (sag.meta && sag.meta.url) getSession().recordPage(sag.meta.url, sag);
     // Incremental results are partial deltas — only full SAGs (including the
@@ -841,12 +841,12 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     },
   }, async (o) => {
     const fmt = o.format || 'text';
-    if (fmt === 'diff') return textResult(await getActiveHub().send({ type: 'page_diff', frameId: o.frameId }));
-    if (fmt === 'preload') return textResult(await getActiveHub().send({ type: 'preload_content', maxSteps: o.maxSteps || 25, settleMs: o.settleMs || 250, restore: o.restore !== false, frameId: o.frameId }));
-    if (fmt === 'scrollextract') return textResult(await getActiveHub().send({ type: 'scroll_and_extract', scrolls: o.scrolls || 5, scrollDelay: o.scrollDelay || 1500, maxLen: o.maxLen || 20000, direction: o.direction || 'down', selector: o.selector || null, frameId: o.frameId }));
-    if (fmt === 'markdown') return textResult(await getActiveHub().send({ type: 'dump_markdown', selector: o.selector || null, maxLen: o.maxLen || 20000, frameId: o.frameId }));
-    if (fmt === 'content') return textResult(await getActiveHub().send({ type: 'read_content', selector: o.selector || null, maxLen: o.maxLen || 12000, frameId: o.frameId }));
-    const raw = await getActiveHub().send({ type: 'extract_text', selector: o.selector || 'body', maxLen: o.maxLen || 4000, offset: o.offset || 0, frameId: o.frameId });
+    if (fmt === 'diff') return textResult(await getActiveHub().send({ type: 'page_diff', frameId: o.frameId, tabId: o.tabId }));
+    if (fmt === 'preload') return textResult(await getActiveHub().send({ type: 'preload_content', maxSteps: o.maxSteps || 25, settleMs: o.settleMs || 250, restore: o.restore !== false, frameId: o.frameId, tabId: o.tabId }));
+    if (fmt === 'scrollextract') return textResult(await getActiveHub().send({ type: 'scroll_and_extract', scrolls: o.scrolls || 5, scrollDelay: o.scrollDelay || 1500, maxLen: o.maxLen || 20000, direction: o.direction || 'down', selector: o.selector || null, frameId: o.frameId, tabId: o.tabId }));
+    if (fmt === 'markdown') return textResult(await getActiveHub().send({ type: 'dump_markdown', selector: o.selector || null, maxLen: o.maxLen || 20000, frameId: o.frameId, tabId: o.tabId }));
+    if (fmt === 'content') return textResult(await getActiveHub().send({ type: 'read_content', selector: o.selector || null, maxLen: o.maxLen || 12000, frameId: o.frameId, tabId: o.tabId }));
+    const raw = await getActiveHub().send({ type: 'extract_text', selector: o.selector || 'body', maxLen: o.maxLen || 4000, offset: o.offset || 0, frameId: o.frameId, tabId: o.tabId });
     // P1#2 (2026-08-31): goal-aware budget — when the extracted text is huge,
     // summarize to the goal-relevant segments instead of flooding the context.
     // Only auto-summarize on the TEXT path (the format agents use for long
@@ -877,15 +877,15 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     let result;
     const mode = o.mode || 'click';
     if (o.x != null && o.y != null) {
-      result = await getActiveHub().send({ type: 'click_xy', x: o.x, y: o.y, ref: o.ref, button: o.button || 'left', frameId: o.frameId });
+      result = await getActiveHub().send({ type: 'click_xy', x: o.x, y: o.y, ref: o.ref, button: o.button || 'left', frameId: o.frameId, tabId: o.tabId });
     } else if (mode === 'drag') {
-      result = await getActiveHub().send({ type: 'drag_drop', fromRef: o.fromRef, toRef: o.toRef, frameId: o.frameId });
+      result = await getActiveHub().send({ type: 'drag_drop', fromRef: o.fromRef, toRef: o.toRef, frameId: o.frameId, tabId: o.tabId });
     } else if (mode === 'hover') {
-      result = await getActiveHub().send({ type: 'hover', ref: o.ref, frameId: o.frameId });
+      result = await getActiveHub().send({ type: 'hover', ref: o.ref, frameId: o.frameId, tabId: o.tabId });
     } else if (mode === 'rightclick') {
-      result = await getActiveHub().send({ type: 'right_click', ref: o.ref, frameId: o.frameId });
+      result = await getActiveHub().send({ type: 'right_click', ref: o.ref, frameId: o.frameId, tabId: o.tabId });
     } else {
-      result = await getActiveHub().send({ type: 'click', ref: o.ref, frameId: o.frameId });
+      result = await getActiveHub().send({ type: 'click', ref: o.ref, frameId: o.frameId, tabId: o.tabId });
       result.effect = classifyEffect(result);
       // 2026-09-25: recommend OS input ONLY for a REAL no-op (states compared,
       // identical). 'unverifiable' means the effect could not be measured — that
@@ -918,12 +918,12 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
             const activeId = activeRes && activeRes.tab && activeRes.tab.id != null ? Number(activeRes.tab.id) : null;
             if (activeId != null && Number(activeId) === Number(bound)) {
               // 2. Element's physical screen center
-              const geo = await getActiveHub().send({ type: 'screen_center', ref: o.ref, frameId: o.frameId });
+              const geo = await getActiveHub().send({ type: 'screen_center', ref: o.ref, frameId: o.frameId, tabId: o.tabId });
               if (geo && geo.success && geo.screen && geo.screen.x != null && geo.screen.y != null && geo.visible !== false) {
                 // 3. Genuine OS click + re-diff
                 realClickAt(geo.screen.x, geo.screen.y);
                 await new Promise((r) => setTimeout(r, 250));
-                const after = await getActiveHub().send({ type: 'page_state' });
+                const after = await getActiveHub().send({ type: 'page_state', tabId: o.tabId });
                 const changed = !!(after && after.url && result.afterState && after.url !== result.afterState.url);
                 result.effect = changed ? 'confirmed' : 'suspected_noop';
                 result.autoClimb = { attempted: true, screen: geo.screen, activeTab: true, changed };
@@ -964,11 +964,11 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   }, async (o) => {
     let result;
     if (o.fields && o.fields.length) {
-      result = await getActiveHub().send({ type: 'type_many', fields: o.fields });
+      result = await getActiveHub().send({ type: 'type_many', fields: o.fields, tabId: o.tabId });
       getSession().recordAction({ action: 'type_many', refs: o.fields.map(f => f.ref) }, result);
       return textResult(result);
     }
-    result = await getActiveHub().send({ type: 'type_text', ref: o.ref, text: o.text, clearFirst: o.clearFirst !== false, frameId: o.frameId });
+    result = await getActiveHub().send({ type: 'type_text', ref: o.ref, text: o.text, clearFirst: o.clearFirst !== false, frameId: o.frameId, tabId: o.tabId });
     const persisted = result && (result.valueSet === true || result.verified === true || result.success === true);
     result.effect = (result && result.success === false) ? 'failed' : persisted ? 'confirmed' : 'unverifiable';
     if (result.effect !== 'confirmed') {
@@ -991,21 +991,21 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       filePath: z.string().optional().describe('upload: absolute file path'),
     },
   }, async (o) => {
-    if (o.action === 'state') return textResult(await getActiveHub().send({ type: 'form_state', formRef: o.formRef, frameId: o.frameId }));
+    if (o.action === 'state') return textResult(await getActiveHub().send({ type: 'form_state', formRef: o.formRef, frameId: o.frameId, tabId: o.tabId }));
     if (o.action === 'select') {
       requireArgs('form:select', o, { ref: 'element ref of the select', value: 'option value to select' });
-      const result = await getActiveHub().send({ type: 'select_option', ref: o.ref, value: o.value, clearAll: o.clearAll, frameId: o.frameId });
+      const result = await getActiveHub().send({ type: 'select_option', ref: o.ref, value: o.value, clearAll: o.clearAll, frameId: o.frameId, tabId: o.tabId });
       getSession().recordAction({ action: 'select_option', ref: o.ref, value: o.value }, result);
       return textResult(result);
     }
     if (o.action === 'special') {
       requireArgs('form:special', o, { ref: 'element ref', value: 'target value (date / colour / range / number)' });
-      const result = await getActiveHub().send({ type: 'form_special', ref: o.ref, value: o.value, frameId: o.frameId });
+      const result = await getActiveHub().send({ type: 'form_special', ref: o.ref, value: o.value, frameId: o.frameId, tabId: o.tabId });
       getSession().recordAction({ action: 'form_special', ref: o.ref, value: o.value }, result);
       return textResult(result);
     }
     if (o.action === 'toggle') {
-      const result = await getActiveHub().send({ type: 'toggle', ref: o.ref, frameId: o.frameId });
+      const result = await getActiveHub().send({ type: 'toggle', ref: o.ref, frameId: o.frameId, tabId: o.tabId });
       getSession().recordAction({ action: 'toggle', ref: o.ref }, result);
       return textResult(result);
     }
@@ -1054,7 +1054,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar',
         '7z': 'application/x-7z-compressed', rar: 'application/vnd.rar',
       };
-      const result = await getActiveHub().send({ type: 'upload_file', ref: o.ref, fileContent: base64, fileName, mimeType: mimeTypes[ext] || 'application/octet-stream', frameId: o.frameId });
+      const result = await getActiveHub().send({ type: 'upload_file', ref: o.ref, fileContent: base64, fileName, mimeType: mimeTypes[ext] || 'application/octet-stream', frameId: o.frameId, tabId: o.tabId });
       return textResult(result);
     } catch (err) {
       return textResult({ success: false, error: 'Failed to read file: ' + err.message });
@@ -1086,9 +1086,9 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       intoView: z.string().optional().describe('Ref to scroll into center of viewport'),
     },
   }, async (o) => {
-    if (o.intoView) return textResult(await getActiveHub().send({ type: 'scroll_into_view', ref: o.intoView, frameId: o.frameId }));
-    if (o.y != null) return textResult(await getActiveHub().send({ type: 'scroll_to', y: o.y, frameId: o.frameId }));
-    return textResult(await getActiveHub().send({ type: 'scroll', direction: o.direction || 'down', amount: o.amount === undefined ? 1 : o.amount, ref: o.ref, frameId: o.frameId }));
+    if (o.intoView) return textResult(await getActiveHub().send({ type: 'scroll_into_view', ref: o.intoView, frameId: o.frameId, tabId: o.tabId }));
+    if (o.y != null) return textResult(await getActiveHub().send({ type: 'scroll_to', y: o.y, frameId: o.frameId, tabId: o.tabId }));
+    return textResult(await getActiveHub().send({ type: 'scroll', direction: o.direction || 'down', amount: o.amount === undefined ? 1 : o.amount, ref: o.ref, frameId: o.frameId, tabId: o.tabId }));
   });
 
   // ═══ 9. NAVIGATE ═══
@@ -1172,7 +1172,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       if (getActiveHub().connected) {
         try {
           const ps = await Promise.race([
-            getActiveHub().send({ type: 'get_status' }),
+            getActiveHub().send({ type: 'get_status', tabId: o.tabId }),
             new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
           ]);
           pageUrl = ps?.url || null;
@@ -1205,20 +1205,20 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       const report = { timestamp: Date.now(), hub: hubStats, session: { steps: getSession().stepCounter, pagesExplored: getSession().pages.size } };
       try {
         report.content = await Promise.race([
-          hub.send({ type: 'doctor_content' }),
+          hub.send({ type: 'doctor_content', tabId: o.tabId }),
           new Promise((_, rej) => setTimeout(() => rej(new Error('content timeout (8s) — content script not responding')), 8000)),
         ]);
       } catch (e) { report.content = { error: String((e && e.message) || e) }; }
       try {
         report.serviceWorker = await Promise.race([
-          hub.send({ type: 'doctor_sw' }),
+          hub.send({ type: 'doctor_sw', tabId: o.tabId }),
           new Promise((_, rej) => setTimeout(() => rej(new Error('sw timeout (8s)')), 8000)),
         ]);
       } catch (e) { report.serviceWorker = { error: String((e && e.message) || e) }; }
       return textResult(report);
     }
     if (kind === 'downloads') return textResult(await getActiveHub().send({ type: 'download_state' }));
-    return textResult(await getActiveHub().send({ type: 'page_state', frameId: o.frameId }));
+    return textResult(await getActiveHub().send({ type: 'page_state', frameId: o.frameId, tabId: o.tabId }));
   });
 
   // ═══ 11. WAIT ═══
@@ -1261,7 +1261,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       if (ringHit) return textResult({ success: true, event: ringHit, source: 'ring', timedOut: false });
       while (Date.now() < deadline) {
         try {
-          const r = await getActiveHub().send({ type: 'get_events', since: Date.now() - 30000 });
+          const r = await getActiveHub().send({ type: 'get_events', since: Date.now() - 30000, tabId: o.tabId });
           const inner = (r && typeof r === 'object' && r.data && typeof r.data === 'object' && 'events' in r.data) ? r.data : (r || {});
           const evts = inner.events || [];
           if (evts.length) {
@@ -1302,14 +1302,14 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
             const selJson = JSON.stringify(o.selector);
             let inner = null;
             try {
-              inner = innerOf(await getActiveHub().send({ type: 'evaluate', script: 'querySelector(' + selJson + ')' }));
+              inner = innerOf(await getActiveHub().send({ type: 'evaluate', script: 'querySelector(' + selJson + ')', tabId: o.tabId }));
             } catch (_) { inner = null; }
             if (inner) {
               ok = !!(inner.success !== false && (inner.found === true || (inner.result && inner.result.found === true)));
             } else {
               // Last resort: the eval form, in case a page wires safeDomRead out.
               try {
-                const r = await getActiveHub().send({ type: 'evaluate', script: '!!document.querySelector(' + selJson + ')' });
+                const r = await getActiveHub().send({ type: 'evaluate', script: '!!document.querySelector(' + selJson + ')', tabId: o.tabId });
                 const i2 = innerOf(r);
                 ok = !!(i2 && !isCspBlocked(i2) && i2.success !== false && (i2.result === true || i2.result === 'true'));
               } catch (_) { ok = false; }
@@ -1321,7 +1321,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
             const script = o.script.trim();
             const qsa = script.match(/^querySelectorAll\(\s*(['"])(.*?)\1\s*\)\.length\s*(>=|>|===|==)\s*(\d+)\s*$/);
             if (qsa) {
-              const r3 = await getActiveHub().send({ type: 'evaluate', script: 'querySelectorAll(' + JSON.stringify(qsa[2]) + ')' });
+              const r3 = await getActiveHub().send({ type: 'evaluate', script: 'querySelectorAll(' + JSON.stringify(qsa[2]) + ')', tabId: o.tabId });
               const inner3 = innerOf(r3);
               const cnt = (inner3 && inner3.count != null) ? inner3.count : (inner3 && inner3.results ? inner3.results.length : -1);
               const want = parseInt(qsa[4], 10);
@@ -1329,12 +1329,12 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
             } else {
               const selM = script.match(/^(?:!!)?querySelector\(\s*(['"])(.*?)\1\s*\)$/);
               if (selM) {
-                const r3 = await getActiveHub().send({ type: 'evaluate', script: 'querySelector(' + JSON.stringify(selM[2]) + ')' });
+                const r3 = await getActiveHub().send({ type: 'evaluate', script: 'querySelector(' + JSON.stringify(selM[2]) + ')', tabId: o.tabId });
                 const inner3 = innerOf(r3);
                 ok = !!(inner3 && inner3.success !== false && inner3.found === true);
               } else {
                 try {
-                  const r = await getActiveHub().send({ type: 'evaluate', script: o.script });
+                  const r = await getActiveHub().send({ type: 'evaluate', script: o.script, tabId: o.tabId });
                   const inner = innerOf(r);
                   ok = !!(!isCspBlocked(inner) && inner.success !== false && (inner.result === true || inner.result === 'true'));
                 } catch (_) { ok = false; }
@@ -1347,7 +1347,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       const hasStateCond = o.urlContains != null || o.hasModal != null || o.hasCaptcha != null || o.notLoading != null || o.pendingDialogsGt != null;
       let stateOk = true;
       if (hasStateCond) {
-        try { last = await getActiveHub().send({ type: 'page_state' }); } catch (_) { last = null; }
+        try { last = await getActiveHub().send({ type: 'page_state', tabId: o.tabId }); } catch (_) { last = null; }
         if (last && last.success !== false) {
           const okUrl = o.urlContains == null || (last.url || '').includes(o.urlContains);
           const okModal = o.hasModal == null || (o.hasModal ? !!last.hasModal : !last.hasModal);
@@ -1384,8 +1384,8 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       }).optional().describe('No-eval read mode (old evaluate_safe)'),
     },
   }, async (o) => {
-    if (o.query) return textResult(await getActiveHub().send({ type: 'evaluate_safe', query: o.query }));
-    const r = await getActiveHub().send({ type: 'evaluate', script: o.script });
+    if (o.query) return textResult(await getActiveHub().send({ type: 'evaluate_safe', query: o.query, tabId: o.tabId }));
+    const r = await getActiveHub().send({ type: 'evaluate', script: o.script, tabId: o.tabId });
     // 2026-09-25: script mode's isolated-world path uses new Function, which the
     // extension's OWN MV3 CSP blocks (script-src 'self' 'wasm-unsafe-eval') — so
     // it was dead on EVERY page, not just "strict sites". That was never an
@@ -1536,7 +1536,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       quality: z.number().optional().describe('JPEG quality 0-100 (default 80)'),
     },
   }, async (o) => {
-    let r = await getActiveHub().send({ type: 'browser_screenshot', format: o.format || 'png', quality: o.quality || 80 });
+    let r = await getActiveHub().send({ type: 'browser_screenshot', format: o.format || 'png', quality: o.quality || 80, tabId: o.tabId });
     // Normalize: a relay path can hand back a JSON STRING rather than the object
     // (textResult passes strings through verbatim, so the client would have to
     // parse twice). Always emit one object shape.
@@ -1560,7 +1560,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       ref: z.string().optional().describe('Element ref to target'),
       modifiers: z.array(z.enum(['ctrl', 'shift', 'alt', 'meta'])).optional(),
     },
-  }, async (o) => textResult(await getActiveHub().send({ type: 'press_key', key: o.key, ref: o.ref, modifiers: o.modifiers || [], frameId: o.frameId })));
+  }, async (o) => textResult(await getActiveHub().send({ type: 'press_key', key: o.key, ref: o.ref, modifiers: o.modifiers || [], frameId: o.frameId, tabId: o.tabId })));
 
   // ═══ 16. DIALOG ═══
   reg(server, 'dialog', {
@@ -1587,7 +1587,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         return textResult({ success: true, sent: o.key || null, typed: o.value ? true : false });
       } catch (e) { return textResult({ success: false, error: String((e && e.message) || e) }); }
     }
-    return textResult(await getActiveHub().send({ type: 'handle_dialog', action: o.action || 'accept', index: (o.index === undefined ? null : o.index), value: (o.value === undefined ? null : o.value) }));
+    return textResult(await getActiveHub().send({ type: 'handle_dialog', action: o.action || 'accept', index: (o.index === undefined ? null : o.index), value: (o.value === undefined ? null : o.value), tabId: o.tabId }));
   });
 
   // ═══ 17. SESSION ═══
@@ -1634,7 +1634,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       clear: z.boolean().optional().describe('Clear log after returning (default true)'),
       maxEntries: z.number().optional().describe('Default 50'),
     },
-  }, async (o) => textResult(await getActiveHub().send({ type: 'network_log', clear: o.clear !== false, maxEntries: o.maxEntries || 50 })));
+  }, async (o) => textResult(await getActiveHub().send({ type: 'network_log', clear: o.clear !== false, maxEntries: o.maxEntries || 50, tabId: o.tabId })));
 
   // ═══ 19. CONSOLE (parity with Hermes browser_console — 2026-08-30) ═══
   reg(server, 'console_log', {
@@ -1644,7 +1644,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       clear: z.boolean().optional().describe('Clear the buffer after returning (default true)'),
       maxEntries: z.number().optional().describe('Max entries to return (default 100)'),
     },
-  }, async (o) => textResult(await getActiveHub().send({ type: 'console_log', clear: o.clear !== false, maxEntries: o.maxEntries || 100 })));
+  }, async (o) => textResult(await getActiveHub().send({ type: 'console_log', clear: o.clear !== false, maxEntries: o.maxEntries || 100, tabId: o.tabId })));
 
   // ═══ 19b. COOKIES (P2 — 2026-08-31) ═══
   // Session inspection / transplant / cleanup. Values ARE returned for
@@ -1733,7 +1733,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         continue;
       }
       try {   // census unavailable (older hub) — message probe
-        const st = await hub.send({ type: 'get_status' }, { timeoutMs: 4000 });
+        const st = await hub.send({ type: 'get_status', tabId: o.tabId }, { timeoutMs: 4000 });
         if (st && (st.hubConnected || st.connected || st.ok)) { back = true; break; }
       } catch (e) { lastErr = String(e); }
     }
@@ -1762,8 +1762,8 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       text: z.string().optional().describe('copy: text to copy'),
     },
   }, async (o) => {
-    if (o.action === 'read') return textResult(await getActiveHub().send({ type: 'read_clipboard' }));
-    return textResult(await getActiveHub().send({ type: 'copy_to_clipboard', text: o.text, frameId: o.frameId }));
+    if (o.action === 'read') return textResult(await getActiveHub().send({ type: 'read_clipboard', tabId: o.tabId }));
+    return textResult(await getActiveHub().send({ type: 'copy_to_clipboard', text: o.text, frameId: o.frameId, tabId: o.tabId }));
   });
 
   // ═══ 20. INSPECT ═══
@@ -1778,9 +1778,9 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       refB: z.string().optional().describe('relation: second element'),
     },
   }, async (o) => {
-    if (o.kind === 'geometry') return textResult(await getActiveHub().send({ type: 'geometry', ref: o.ref, selector: o.selector }));
-    if (o.kind === 'relation') return textResult(await getActiveHub().send({ type: 'layout_relation', refA: o.refA, refB: o.refB }));
-    return textResult(await getActiveHub().send({ type: 'resolve_ref', ref: o.ref }));
+    if (o.kind === 'geometry') return textResult(await getActiveHub().send({ type: 'geometry', ref: o.ref, selector: o.selector, tabId: o.tabId }));
+    if (o.kind === 'relation') return textResult(await getActiveHub().send({ type: 'layout_relation', refA: o.refA, refB: o.refB, tabId: o.tabId }));
+    return textResult(await getActiveHub().send({ type: 'resolve_ref', ref: o.ref, tabId: o.tabId }));
   });
 
   // ═══ 21. REAL-INPUT RUNG (v4.4 — 2026-09-01) ═══
@@ -1807,7 +1807,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   // LIMIT (stated, not hidden): page_state covers url/title/readyState/scroll, so a
   // modal or DOM-only change reads as suspected_noop. That is NOT proof of failure.
   async function withEffect(fn) {
-    const quick = async () => { try { return await getActiveHub().send({ type: 'page_state' }); } catch (_) { return null; } };
+    const quick = async () => { try { return await getActiveHub().send({ type: 'page_state', tabId: o.tabId }); } catch (_) { return null; } };
     const before = await quick();
     const res = await fn();
     if (!res || typeof res !== 'object' || res.success === false) return res;
@@ -1953,7 +1953,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     let tabId = o.tabId || null;
     let navigated = null;
     if (o.url) {
-      const r = await getActiveHub().send({ type: 'navigate', url: o.url, newTab: !!o.newTab || !sessionTabOf() });
+      const r = await getActiveHub().send({ type: 'navigate', url: o.url, newTab: !!o.newTab || !sessionTabOf(), tabId: o.tabId });
       tabId = (r && r.tabId) || tabId;
       navigated = o.url;
       if (tabId) {
