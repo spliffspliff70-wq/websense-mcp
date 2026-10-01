@@ -673,7 +673,14 @@
     else target.scrollTop = y;
     return { success: true, scrollY: target === document.documentElement ? window.scrollY : target.scrollTop };
   }
-  function nativePressKey(key, ref) { const t=ref?resolveRef(ref):document.activeElement||document.body; if(!t)throw new Error('Target not found'); t.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true})); t.dispatchEvent(new KeyboardEvent('keypress',{key,bubbles:true})); t.dispatchEvent(new KeyboardEvent('keyup',{key,bubbles:true})); return{success:true}; }
+  // ★ nativePressKey WAS DELETED HERE (2026-10-01) — IT HAD ZERO CALLERS.
+  // Both dispatchers call nativePressKeyEnhanced(key, ref, modifiers):
+  //   00-bridge-and-transport.js  case 'press_key': nativePressKeyEnhanced(...)
+  //   70-capture-and-readers.js   case 'press_key': nativePressKeyEnhanced(...)
+  // I found this the hard way: a fix for the Enter default action, AND a test pinning it, both
+  // landed on this dead copy and the suite went green while the tool behaved exactly as before.
+  // A test that asserts on a symbol nobody calls is worth nothing. The test now resolves the
+  // symbol the dispatchers actually call, and there is one implementation per op.
   function nativeEvaluate(script) {
     // Supports both expressions and statements. Async-aware: a script whose
     // last expression is a Promise is awaited and its resolved value returned.
@@ -849,6 +856,18 @@
     return { success: true };
   }
 
+  // ★ A REAL Enter SUBMITS THE FORM; A SYNTHETIC ONE CANNOT (2026-10-01).
+  // Measured on en.wikipedia.org: press_key Enter reached the element with the RIGHT target
+  // ({key:'Enter', trusted:false, target:'searchInput'}) and the page did not move, because an
+  // untrusted event runs NO default action. So "type a query, press Enter" — one of the two or
+  // three commonest task shapes there is — silently did nothing, and nothing said why.
+  // This function is the one BOTH dispatchers call, so this is where the emulation belongs.
+  // It runs the default action the browser would have run, but only when unambiguous:
+  //   · the page did not claim the key (defaultPrevented === false),
+  //   · no modifier is held (Ctrl+Enter is not a submit),
+  //   · the target IS a text-like input (NOT a textarea — Enter there is a newline),
+  //   · the input is in a form that can submit.
+  // The result says what it did, so it is never invisible: defaultAction + defaultPrevented.
   function nativePressKeyEnhanced(key, ref, modifiers) {
     modifiers = modifiers || [];
     const target = ref ? resolveRef(ref) : document.activeElement || document.body;
@@ -858,10 +877,22 @@
     if (modifiers.includes('shift')) opts.shiftKey = true;
     if (modifiers.includes('alt')) opts.altKey = true;
     if (modifiers.includes('meta')) opts.metaKey = true;
-    target.dispatchEvent(new KeyboardEvent('keydown', opts));
+    const kd = new KeyboardEvent('keydown', opts);
+    target.dispatchEvent(kd);
     target.dispatchEvent(new KeyboardEvent('keypress', opts));
     target.dispatchEvent(new KeyboardEvent('keyup', opts));
-    return { success: true, key, modifiers };
+    const out = { success: true, key, modifiers, defaultPrevented: !!kd.defaultPrevented, defaultAction: null };
+    try {
+      const tag = (target.tagName || '').toLowerCase();
+      const ty = (target.type || '').toLowerCase();
+      const textLike = tag === 'input' && ['text', 'search', 'url', 'email', 'tel', 'number', 'password', ''].indexOf(ty) >= 0;
+      if (!kd.defaultPrevented && key === 'Enter' && modifiers.length === 0 && textLike
+          && target.form && typeof target.form.requestSubmit === 'function') {
+        target.form.requestSubmit();
+        out.defaultAction = 'form.requestSubmit() — a real Enter would have submitted this form';
+      }
+    } catch (e) { out.defaultActionError = String((e && e.message) || e); }
+    return out;
   }
 
   function nativeDragDrop(fromEl, toEl) {

@@ -1,71 +1,74 @@
-four bugs found by simulating real tasks on 7 live pages
+real tasks with an outside oracle: 4/4, and four more bugs they exposed
 
-Ali: "restart and properly test, simulate a few tasks on a sample of 5-7
-different pages as you did before and fix issues". The sweep: browse -> find ->
-page_slice -> type -> scroll -> read the auto-DIFF, on bbc.com/news,
-books.toscrape, developer.mozilla.org, old.reddit.com, stripe.com/pricing,
-news.ycombinator.com and x.com/home. Every fix below was found by USING the
-tools, not reading them, and each is pinned by a test. 159 tests pass.
+Ali: "Ok go for it continue until you are confident."
 
-★ 1. page_slice{indices:[i]} RETURNED THE WHOLE PAGE.
-`indices` was never declared in page_slice's schema, so it was stripped before
-the handler saw it — while the handler forwards its args straight to
-sliceSnapshot(), which has supported `indices` since the DIFF was built, and the
-DIFF block tells the model that this exact call is how you pull the detail for
-an index it named. Measured: page_slice{indices:[31]} returned 543 of 543
-records on books.toscrape. The documented follow-up silently undid the
-index/diff split. Fixed, and the guard is now GENERAL instead of one-tool: the
-new test takes the key set from sliceSnapshot itself and checks every tool that
-forwards to it (find was already covered; page_slice was not).
+★ THE INSTRUMENT. The earlier sweep typed "sweep" into a text box, which proves machinery,
+not that a TASK completes — and the auto-DIFF, which I had been using as the oracle for
+"did it land", is itself tool output and was PROVEN to lie earlier today (phantom
+mutations on a static page; effect:'confirmed' for a refused type). So
+tools/task-battery.mjs runs real multi-step tasks and scores every one against PAGE TRUTH
+read through main_world (the page's own JS: location, title, DOM values), printing the
+tool's claim beside the oracle's reading. Disagreement is the finding.
+  S1 wikipedia: type a query, press Enter, land on the article
+  S2 hacker news: click a nav link whose destination was read off the page first
+  S3 books.toscrape: two steps — catalogue page 1, then next
+  S4 wikipedia portal: change a real <select> (exercises form{action:"select"})
+RESULT: 4/4, each confirmed by the page itself.
 
-★ 2. "Element not found" FOR AN ELEMENT THAT WAS RIGHT THERE — three causes.
-Found on bbc.com/news's search field and x.com's file input:
-  (a) locatorOf returned '#' + id. React's useId mints ids like ":R35tbdm:", and
-      a colon starts a pseudo-class, so the locator was invalid CSS.
-  (b) CSS.escape was then applied to attribute VALUES, which OVER-escapes inside
-      a quoted value, and the emitted backslashes do not survive this pipeline:
-      probed in-page, querySelector received '#:R35tbdm:' — escape eaten —
-      and threw "not a valid selector" while getElementById(':R35tbdm:') worked.
-  (c) resolveSelectorRef rejected any ref containing a character outside a
-      hand-rolled whitelist that OMITS '/' — so every href/src locator, and
-      x.com's input[accept="image/jpeg,image/png,..."], returned null before
-      querySelector ever ran.
-Now: a clean id is used exactly as before; an id needing escaping only wins when
-nothing better exists; attribute values are quote-escaped (only " and \), built
-with fromCharCode(92) because the collector is a template literal; and the
-whitelist is gone — the CSS parser is the judge, invalid selectors throw and are
-caught, which is what the whitelist was hand-rolling minus the false negatives.
-Verified live: input[id=":R35tbdm:"] resolves where every backslash-bearing form
-does not, and x.com's file input now resolves.
+★ v1 OF THE BATTERY SCORED 1/4 AND THREE OF THE FOUR FAULTS WERE THE INSTRUMENT: it reported
+only the last step's claim (so a failure gave no idea which step broke), it clicked into a
+category that has a single page (so "no next link" was TRUE), and it printed a missing diff
+as zero changes (conflating NO-DIFF with "nothing changed"). The instrument is now itself a
+thing to be debugged, and its findings only count after that.
 
-★ 3. A STATIC PAGE REPORTED mutated:true FOREVER.
-The diff baseline was keyed by locator alone. On news.ycombinator.com all 30
-story rows carry the same locator (locatorOf walks at most 5 ancestors), so
-later entries overwrote earlier ones and 29 rows were compared against ONE
-arbitrary baseline record. Measured: every diff reported the same 29
-"content changed" entries (wasNameLen 6 vs nameLen 12-25) so a pure scroll came
-back mutated:true, and a second identical scroll reported the identical 29 —
-permanent, not a settle artefact. Cause confirmed by dumping the group.
-Now keyed by locator PLUS THE ORDINAL WITHIN IT (the k-th element carrying a
-locator matches the k-th baseline element carrying it): one-to-one, still stable
-when elements appear under a different locator. All 7 sample pages now report
-mutated:false, structure 0, content 0 on a pure scroll, with the scroll in the
-viewport group where it belongs. Previously 5 of 7 reported mutated:true.
+★ BUG 7 — A NAVIGATION WAS REPORTED AS A NO-OP, i.e. the caller retried a click that worked.
+Clicking HN's "newest" and books' "next" BOTH navigated while the tool answered
+effect:'suspected_noop' + mutated:false — and suspected_noop's escalation tells the caller to
+re-read and then consider OS-level input. The before/afterState pair cannot see it: it is
+captured around a click that RETURNS IMMEDIATELY, so both snapshots are the pre-navigation
+document and are identical by construction.
+FIXED with confirmNavigation(): compare the tab URL after the op against the click-time URL.
+It took three attempts, each caught by measurement rather than reasoning:
+  (a) read result.beforeState off the ENVELOPE, where it never exists ({type,id,success,data,…})
+      — the probe silently never ran;
+  (b) read the payload correctly but probed ONCE, immediately — the navigation commits after
+      the op returns, so the first read still showed the old URL (measured: it appears on the
+      THIRD read, ~440ms in), so it now polls;
+  (c) press_key has no beforeState at all, so for Enter/Space the "before" URL is read first.
+Same check now also covers press_key, because Enter SUBMITS FORMS.
 
-★ 4. A FALSE SUCCESS: a refused action reported as confirmed.
-Hub replies are {type,id,success,data:{…}} and the top-level success means "a
-reply was delivered", NEVER "the action worked". type_text judged from the
-envelope, so on bbc.com/news a type into a disabled input came back
-effect:'confirmed' while its own payload said {success:false, reason:'the target
-is disabled'} and the auto-DIFF for the same call said mutated:false — "treat
-this action as NOT LANDED". Two signals disagreed and the optimistic one was
-wrong. classifyEffect has known this since 2026-09-25; the fix is the same
-unwrap, now a single shared unwrapRelay() so the next handler cannot miss it.
+★ BUG 8 — AN UNTRUSTED Enter RUNS NO DEFAULT ACTION, so "type a query, press Enter" did
+nothing at all. Probed in-page: the key WAS delivered to the right element
+({key:'Enter', trusted:false, target:'searchInput'}) and the page still did not move, because
+synthetic events never trigger form submission. The tool now runs the default action a real
+Enter would run (form.requestSubmit()), only when it is unambiguous — the page did not claim
+the key, no modifier is held, the target is a text-like INPUT (not a textarea), and the input
+is in a form — and it REPORTS it (defaultAction + defaultPrevented) instead of doing it
+invisibly.
+★ AND MY FIRST FIX OF THIS LANDED ON A FUNCTION NOTHING CALLS. nativePressKey had ZERO
+callers; both dispatchers call nativePressKeyEnhanced. The fix changed nothing, and the TEST
+I wrote to pin it passed anyway because it asserted on that same dead symbol. The dead copy is
+deleted, the fix is on the called one, and the test now RESOLVES the symbol the dispatchers
+call. A negative check (delete the call, expect the suite to fail) is what exposed the second
+hollow test: it had been matching the human-readable message 'form.requestSubmit() — …' rather
+than the call.
 
-★ 5. GUIDANCE THAT LOOPS. A target that cannot accept text now names why and
-what to do instead of advising "re-read the field and re-type" — measured:
-bbc's search input is disabled until its menu opens, and x.com's is a file
-input. Both now answer enable_then_type / form{action:"upload"} respectively.
+★ BUG 9 — THE SAME ENVELOPE MISTAKE, FIVE TIMES IN ONE FILE. Hub replies are
+{type,id,success,data:{…}}. Reading a field off the top level returns undefined forever:
+  type_text's verdict        -> called a REFUSED type 'confirmed' (fixed earlier today)
+  the click navigation probe -> never fired (bug 7a)
+  auto-climb's changed test  -> `changed` came from an undefined URL, so it ALWAYS said false
+  withEffect                 -> set before/afterState on the envelope, then classifyEffect
+                                unwrapped past them and answered 'unverifiable' every time
+  wait{urlContains}          -> read last.url off the envelope, so the condition could never match
+FIXED by giving page state exactly one reader, readPageState(), and a test that keeps the
+count of direct page_state sends at two (the accessor, and the status diagnostic that forwards
+the reply verbatim and reads nothing off it).
 
-Also carried from this round, unchanged: the regions grouping (name + shape,
-grouped by identity) and the reverted name-only variant stay as they were.
+★ STILL OPEN, stated rather than implied: the auto-DIFF block itself still prints
+mutated:false after a navigation, because its baseline belongs to the document that was
+replaced — the RESULT now says confirmed and names the navigation, so the caller has the
+signal, but the diff line is still wrong on that case. And nothing here has tested upload,
+shadow DOM, iframes, drag-drop or cross-tab orchestration; the sample still has none of those.
+
+162 tests pass.

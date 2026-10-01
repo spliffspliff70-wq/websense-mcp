@@ -2359,6 +2359,75 @@ test('cs: typing into a disabled/read-only control must SAY SO, not advise a re-
   assert(/hint:/.test(m[0]), 'and carry a usable next step instead of a re-read loop');
 });
 
+test('page state: ONE unwrapping reader — the envelope hid the URL three times', () => {
+  // type_text's verdict, the click navigation probe, and auto-climb's "did the OS click change
+  // anything" check each read a URL straight off a hub reply and got `undefined` every time
+  // ({type,id,success,data:{…}}). type_text then called a refused type 'confirmed'; the click
+  // probe never ran at all; auto-climb always reported changed:false. One mistake, three places —
+  // so page state has exactly one reader now, and this test keeps it that way.
+  assert(/async function readPageState\(tabId\)/.test(SRV_SRC), 'readPageState must exist');
+  assert(/return unwrapRelay\(res\)/.test(SRV_SRC), 'and it must unwrap the relay envelope');
+  // Two sends are legitimate and both are deliberate: the accessor itself, and the `status`
+  // diagnostic, which FORWARDS the reply verbatim and reads no field off it. Every other reader
+  // goes through the accessor — the four that did not were all broken (type_text's verdict, the
+  // click navigation probe, auto-climb's changed test, withEffect, and wait{urlContains}).
+  const direct = (SRV_SRC.match(/getActiveHub\(\)\.send\(\{ type: 'page_state'/g) || []).length;
+  assert(direct === 2, 'only the accessor and the status pass-through may send page_state; found ' + direct);
+});
+
+test('click: a navigation must be CONFIRMED, and read from the payload', () => {
+  // ★ Measured 2026-10-01 with an outside oracle (the page's own location.href): clicking HN's
+  // "newest" nav link and books.toscrape's "next" BOTH navigated while the tool answered
+  // effect:'suspected_noop' + mutated:false. suspected_noop's escalation tells the caller to
+  // re-read and then consider OS-level input, i.e. it retries an action that already worked.
+  // The state pair cannot see it: before/afterState are captured around a click that RETURNS
+  // IMMEDIATELY, so when the click navigates both snapshots are the PRE-navigation document.
+  // ★ AND THE FIRST FIX OF THIS READ result.beforeState AT THE TOP LEVEL, where it does not exist
+  // ({type,id,success,data,…}) — so the probe silently never ran and the tool was unchanged. Only
+  // a negative check (delete the line, expect the suite to fail) caught that. This test asserts on
+  // the unwrapped read so the envelope cannot hide it again.
+  const t = SRV_SRC.slice(SRV_SRC.indexOf("reg(server, 'click'"));
+  assert(/confirmNavigation\(result, o\.tabId \|\| sessionTabOf\(\)\)/.test(t),
+    'the click handler must use the shared confirmNavigation probe');
+  assert(/async function confirmNavigation\(result, tabId, tries = 3/.test(SRV_SRC),
+    'confirmNavigation must exist and be shared — two copies of one idea is what broke this file');
+  assert(/toUrl !== fromUrl/.test(SRV_SRC), 'it must compare the tab URL after the op against the click-time URL');
+  assert(/result\.navigation = \{/.test(SRV_SRC), 'and record the navigation it proved, so the verdict is explainable');
+  assert(/await new Promise\(\(r\) => setTimeout\(r, 220\)\)/.test(SRV_SRC),
+    'it must POLL: the navigation commits after the op returns (measured: found on the 3rd read)');
+  // press_key can submit a form, so it must get the same check or a submit reads as no-change
+  const pk = SRV_SRC.slice(SRV_SRC.indexOf("reg(server, 'press_key'"));
+  assert(/confirmNavigation\(result/.test(pk), 'press_key must get the navigation check too (Enter submits forms)');
+  assert(/o\.key === 'Enter'/.test(pk), 'gated on Enter so ordinary keys pay nothing');
+});
+
+test('cs: an Enter must run the default action a real one would (submit the form)', () => {
+  // ★ Measured on en.wikipedia.org, 2026-10-01: press_key Enter reached the element with the
+  // right target ({key:'Enter', trusted:false, target:'searchInput'}) and the page did not move —
+  // an untrusted event runs NO default action. So "type a query, press Enter" silently did
+  // nothing, and nothing in the result said why.
+  // ★ AND THE FIRST VERSION OF THIS TEST WAS WORTHLESS, which is the real lesson here: it
+  // asserted on nativePressKey — a function with ZERO callers — so it went green while the tool
+  // behaved exactly as before. Both dispatchers call nativePressKeyEnhanced. A test that asserts
+  // on a symbol nobody calls proves nothing, so this resolves the symbol the dispatchers CALL.
+  const calls = [...CS_SRC.matchAll(/case 'press_key':[\s\S]{0,90}?([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1]);
+  assert(calls.length >= 1, 'the dispatchers must route press_key to some function');
+  for (const fn of new Set(calls)) {
+    const body = CS_SRC.match(new RegExp('function ' + fn + '\\([\\s\\S]*?\\n  \\}'));
+    assert(body, fn + ' must be defined — press_key routes to it');
+    // ★ ASSERT ON CODE, NOT ON PROSE, AND PROVE IT WITH A NEGATIVE CHECK. The second version of
+    // this test matched /requestSubmit\(\)/ — which the human-readable message
+    // 'form.requestSubmit() — a real Enter would have…' satisfies on its own, so deleting the
+    // CALL still left the suite green. These three patterns only match executable statements:
+    // the call (';' after it, which the message does not have), the guard, and the assignment.
+    assert(/\.requestSubmit\(\)\s*;/.test(body[0]), fn + ' must CALL form.requestSubmit() on Enter');
+    assert(/[!]\s*[A-Za-z_$][\w$]*\.defaultPrevented/.test(body[0]), fn + ' must NOT submit when the page claimed the key');
+    assert(/\.defaultAction\s*=/.test(body[0]), fn + ' must record what it did, not just do it');
+  }
+  assert(!/[^A-Za-z]nativePressKey\s*\(/.test(CS_SRC),
+    'the dead nativePressKey (zero callers) must stay deleted — a fix landed on it and changed nothing');
+});
+
 test('cs: a locator must not be rejected by a hand-rolled character whitelist', () => {
   // ★ Found 2026-10-01, on x.com's file input. resolveSelectorRef had a character whitelist that
   // omitted '/' — so input[accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime"]

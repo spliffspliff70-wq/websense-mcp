@@ -118,6 +118,50 @@ function unwrapRelay(result) {
     ? result.data : result;
 }
 
+// ★ ONE ACCESSOR FOR PAGE STATE, AND IT UNWRAPS (2026-10-01).
+// Three separate places in this file read a URL straight off a hub reply and got `undefined`
+// EVERY time, because hub replies are {type,id,success,data:{…}}:
+//   · the type_text verdict (fixed earlier — it reported a refused type as 'confirmed'),
+//   · the click navigation probe (fixed here — it never fired, so a click that navigated still
+//     came back suspected_noop),
+//   · auto-climb's "did the OS click change anything" test (fixed here — `changed` was computed
+//     from an undefined URL, so it ALWAYS said false and always escalated).
+// Same mistake, three times, in one file: so page state now has exactly one reader.
+async function readPageState(tabId) {
+  try {
+    const res = await getActiveHub().send({ type: 'page_state', tabId });
+    return unwrapRelay(res) || null;
+  } catch (_) { return null; }
+}
+
+// ★ A NAVIGATION IS THE STRONGEST EVIDENCE AN INTERACTION LANDED, AND NO STATE PAIR CAN SEE IT.
+// (2026-10-01.) before/afterState are captured around an op that returns before the browser has
+// committed a navigation, so both snapshots are the PRE-navigation document and are identical by
+// construction — measured: clicking HN's "newest" and books' "next" both navigated while the tool
+// said suspected_noop, mutated:false, with escalation advice that sends the caller to retry an
+// action that already worked.
+// It POLLS, because the commit lands after the op returns (measured: the navigation showed up on
+// the THIRD read, ~440ms in). It only ever upgrades a verdict, never downgrades one.
+// Extracted so click and press_key share ONE implementation — two copies of one idea is what
+// produced most of the bugs in this file today.
+async function confirmNavigation(result, tabId, tries = 3, fromUrlHint = null) {
+  const d = unwrapRelay(result);
+  const fromUrl = fromUrlHint || (d && d.beforeState && d.beforeState.url);
+  if (!fromUrl) return null;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const post = await readPageState(tabId);
+    const toUrl = post && post.url;
+    if (toUrl && toUrl !== fromUrl) {
+      result.effect = 'confirmed';
+      result.navigation = { from: fromUrl, to: toUrl, via: 'tab URL read after the op', polls: attempt + 1 };
+      delete result.escalation;
+      return result.navigation;
+    }
+    await new Promise((r) => setTimeout(r, 220));
+  }
+  return null;
+}
+
 function classifyEffect(result) {
   if (!result || result.success === false) return 'failed';
   const box = unwrapRelay(result);
@@ -905,6 +949,22 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       } else if (result.effect === 'unverifiable') {
         result.escalation = { recommended: 're_read', reason: 'effect could not be measured (no before/after state pair) — this is NOT a failure signal. Re-read the actual page (status/explore/main_world/DELTA) before retrying or escalating to OS input.' };
       }
+      // ★ A NAVIGATION IS A CONFIRMED CLICK, AND THE STATE PAIR CANNOT SEE IT (2026-10-01).
+      // Measured with an independent oracle (the page's own location.href): clicking HN's
+      // "newest" nav link and books.toscrape's "next" BOTH navigated, while the tool answered
+      // effect:'suspected_noop', mutated:false. That is the worst direction to be wrong in —
+      // suspected_noop carries escalation advice ("re-read, then consider an OS-level click"),
+      // so the caller retries an action that already worked, and the recorded navigation never
+      // happens.
+      // WHY THE PAIR MISSES IT: beforeState/afterState are captured around a click that RETURNS
+      // IMMEDIATELY, so when the click triggers a navigation both snapshots are the PRE-navigation
+      // document and are identical BY CONSTRUCTION.
+      // WHY THIS PROBE IS SAFE: it only compares a URL captured at click time (beforeState) with
+      // the tab's URL read after the op, so a stale session URL cannot manufacture a confirmation.
+      // It also only ever UPGRADES a verdict, never downgrades one.
+      if (result.effect !== 'confirmed') {
+        await confirmNavigation(result, o.tabId || sessionTabOf());
+      }
       // P0#3 AUTO-CLIMB (2026-08-31): if the synthetic click no-op'd AND this
       // session's bound tab is the OS-active tab, resolve the element's
       // physical screen center and deliver a GENUINE OS click (PowerShell
@@ -930,7 +990,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
                 // 3. Genuine OS click + re-diff
                 realClickAt(geo.screen.x, geo.screen.y);
                 await new Promise((r) => setTimeout(r, 250));
-                const after = await getActiveHub().send({ type: 'page_state', tabId: o.tabId });
+                const after = await readPageState(o.tabId || sessionTabOf());
                 const changed = !!(after && after.url && result.afterState && after.url !== result.afterState.url);
                 result.effect = changed ? 'confirmed' : 'suspected_noop';
                 result.autoClimb = { attempted: true, screen: geo.screen, activeTab: true, changed };
@@ -951,9 +1011,13 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       }
     }
     getSession().recordAction({ action: 'click', ref: o.ref, mode }, result);
-    if (result.afterState && result.beforeState && result.afterState.url !== result.beforeState.url) {
-      getSession().recordNavigation(beforeUrl, result.afterState.url, o.ref, '', mode);
-      getSession().recordPage(result.afterState.url, null);
+    // the navigation may have been proven by the post-op URL probe rather than by the state pair
+    const dRec = unwrapRelay(result);
+    const navTo = (result.navigation && result.navigation.to)
+      || (dRec && dRec.afterState && dRec.beforeState && dRec.afterState.url !== dRec.beforeState.url ? dRec.afterState.url : null);
+    if (navTo) {
+      getSession().recordNavigation(beforeUrl, navTo, o.ref, '', mode);
+      getSession().recordPage(navTo, null);
     }
     return textResult(result);
   });
@@ -1365,7 +1429,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       const hasStateCond = o.urlContains != null || o.hasModal != null || o.hasCaptcha != null || o.notLoading != null || o.pendingDialogsGt != null;
       let stateOk = true;
       if (hasStateCond) {
-        try { last = await getActiveHub().send({ type: 'page_state', tabId: o.tabId }); } catch (_) { last = null; }
+        try { last = await readPageState(o.tabId); } catch (_) { last = null; }
         if (last && last.success !== false) {
           const okUrl = o.urlContains == null || (last.url || '').includes(o.urlContains);
           const okModal = o.hasModal == null || (o.hasModal ? !!last.hasModal : !last.hasModal);
@@ -1578,7 +1642,19 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       ref: z.string().optional().describe('Element ref to target'),
       modifiers: z.array(z.enum(['ctrl', 'shift', 'alt', 'meta'])).optional(),
     },
-  }, async (o) => textResult(await getActiveHub().send({ type: 'press_key', key: o.key, ref: o.ref, modifiers: o.modifiers || [], frameId: o.frameId, tabId: o.tabId })));
+  }, async (o) => {
+    // ★ A KEY CAN SUBMIT A FORM OR ACTIVATE A LINK, SO IT GETS THE SAME NAVIGATION CHECK
+    // (2026-10-01). Measured on en.wikipedia.org: type into the search box, press Enter, and the
+    // page navigated to the article — while this result carried NO verdict at all and its auto-DIFF
+    // said mutated:false, because that diff is read before the navigation commits.
+    // Unlike click, a key result has no beforeState, so the "before" URL is read here. Gated on
+    // Enter/Space and a 2-read budget, so arrow keys and ordinary typing pay nothing.
+    const watching = (o.key === 'Enter' || o.key === ' ');
+    const pre = watching ? await readPageState(o.tabId || sessionTabOf()) : null;
+    const result = await getActiveHub().send({ type: 'press_key', key: o.key, ref: o.ref, modifiers: o.modifiers || [], frameId: o.frameId, tabId: o.tabId });
+    if (watching) await confirmNavigation(result, o.tabId || sessionTabOf(), 2, pre && pre.url);
+    return textResult(result);
+  });
 
   // ═══ 16. DIALOG ═══
   reg(server, 'dialog', {
@@ -1825,12 +1901,19 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   // LIMIT (stated, not hidden): page_state covers url/title/readyState/scroll, so a
   // modal or DOM-only change reads as suspected_noop. That is NOT proof of failure.
   async function withEffect(fn) {
-    const quick = async () => { try { return await getActiveHub().send({ type: 'page_state', tabId: o.tabId }); } catch (_) { return null; } };
+    const quick = async () => await readPageState(o.tabId);
     const before = await quick();
     const res = await fn();
     if (!res || typeof res !== 'object' || res.success === false) return res;
     await new Promise((r) => setTimeout(r, 450));   // let the handler run
     const after = await quick();
+    // ★ THE STATES MUST LAND WHERE classifyEffect READS THEM (2026-10-01). quick() used to return
+    // the raw hub envelope and these lines set beforeState/afterState on the ENVELOPE — then
+    // classifyEffect unwrapped to `.data`, found nothing, and answered 'unverifiable' every time.
+    // Set them on the payload it actually reads, and keep the documented top-level shape for
+    // callers as well. (Same envelope mistake as type_text / the click probe / auto-climb.)
+    const box = unwrapRelay(res);
+    if (box && typeof box === 'object') { box.beforeState = before; box.afterState = after; }
     res.beforeState = before;
     res.afterState = after;
     res.effect = classifyEffect(res);
