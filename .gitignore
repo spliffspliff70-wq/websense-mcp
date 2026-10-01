@@ -13,3 +13,5 @@ __pycache__/
 
 # generated benchmark fixtures (regenerate with bench/gen_*.py)
 bench/pages/*.html
+__pycache__/
+*.pyc
