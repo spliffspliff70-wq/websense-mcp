@@ -2578,5 +2578,30 @@ test('browse: the WARM path and the COLD path must return the same shape', () =>
   assert(/regions: regions && regions\.outline/.test(cold), 'the cold branch must return regions');
 });
 
+test('diff: SVG drawing attributes are rendering, not structure', () => {
+  // ★ Found live 2026-10-01 by scrolling x.com and reading the auto-DIFF back: a SCROLL reported
+  // mutated:true with 89 "structure" changes, and the bulk of them were icons redrawing their
+  // path data plus points/transform on other shapes. The page's structure had not moved — a
+  // spinner span did exactly what it was told. Scroll churn arriving as a MUTATION is the very
+  // thing the viewport group exists to prevent, so drawing attributes are classified as
+  // rendering alongside class and style.
+  //
+  // The predicate lives INSIDE the collector template literal, so it is extracted and executed
+  // here. That asserts its BEHAVIOUR instead of grepping its source, and it keeps the exclusion
+  // honest in both directions: nothing structural may be swept in with the rendering attrs.
+  const m = /function isPresentationAttr\(n\)\s*\{([\s\S]*?)\n  \}/.exec(DIFF_COLLECTOR);
+  assert(m, 'isPresentationAttr must be findable inside the collector');
+  const fn = new Function('n', m[1]);
+
+  const rendering = ['class', 'style', 'dir', 'lang', 'data-anything', 'd', 'points',
+    'transform', 'fill', 'stroke-width', 'stroke-dasharray', 'cx', 'cy', 'r', 'offset',
+    'stop-color', 'preserveAspectRatio'];
+  for (const n of rendering) assert(fn(n) === true, n + ' is rendering, not structure');
+
+  const structural = ['role', 'id', 'value', 'disabled', 'checked', 'href', 'placeholder',
+    'aria-selected', 'tabindex', 'type', 'name', 'title'];
+  for (const n of structural) assert(fn(n) === false, n + ' is identity or state, NOT rendering');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

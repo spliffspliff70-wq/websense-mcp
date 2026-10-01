@@ -28,7 +28,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test-regressions.mjs"
+    "test": "node tools/precheck-backticks.mjs && node test-regressions.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

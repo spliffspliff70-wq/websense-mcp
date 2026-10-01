@@ -1,35 +1,35 @@
-fix(regions): a repeat must match by NAME at the same phase; class is a per-page call
+fix(diff): SVG drawing attributes are rendering, not structure
 
-Follow-up to 67ef928, after testing both settings as Ali asked rather than guessing.
+Found by living with the tool rather than reading it: after Ali asked me to confirm the
+DIFF was wired, I scrolled the x.com tab and read the auto-DIFF back.
 
-THE BUG THE THRESHOLD WAS HIDING
-Removing the `>= 3` threshold in 67ef928 let a run of TWO collapse, and that silently
-deleted x.com's rail: primaryColumn and sidebarColumn are different places that happen
-to have one region child each, so they matched on shape, and the outline printed the
-feed with a count and never showed the rail at all. The number was load-bearing for the
-wrong reason.
+    DIFF (auto, after scroll): ... "structure":{"changed":[...89 entries...],"count":89}
+    ... "mutated":true
 
-PROPER FIX — no number involved: the repetition key is shape + the element's own NAME
-compared at the same phase of the period. The shape says the subtree looks the same; the
-name says it IS the same thing.
-  - identical names still collapse at any length (cellInnerDiv x9, content-section x4);
-  - an alternating run still collapses, each phase keeping its own name;
-  - two differently-named places never merge, so nothing is hidden.
-A collapsed run now also carries every DISTINCT name it holds, so a group can never
-imply that its members are identical when they are not.
+89 "structure" changes from a SCROLL. The viewport group did its job (the 2,000 moved
+elements collapsed to one line, "Not a mutation"), but the bulk of those 89 were icons
+redrawing their path data plus points/transform on other shapes — rendering, arriving
+under the heading that is supposed to mean the page really changed. Scroll churn as a
+mutation is the exact bug this design exists to prevent.
 
-CLASS: DECIDED FROM THE PAGE, NOT BY PREFERENCE
-Measured both ways. With classes always on, x.com's outline was 242 lines of which 187
-were CSS-in-JS hashes (.css-g5y9jx, .css-146c3p1) and MDN's went from 7 useful lines to
-~50. With classes always off, books.toscrape — which names its whole layout with class
-only (div.page > article.product_pod) — produced ONE line and no map at all.
-So: run with the page's structural words first, and consult classes only when that
-produced no structure whatsoever. Per-page and derived from the page. This is not a
-filter — the classes are in the inventory and in page_slice either way.
+isPresentationAttr already covered class/style/dir/lang/data-*; it did not cover the SVG
+spec's drawing attributes. Added: d, points, transform, viewBox, fill, stroke,
+stroke-*, fill/stroke-opacity, opacity, cx, cy, r, rx, ry, x1/y1/x2/y2, offset,
+stop-color, stop-opacity, gradientUnits, preserveAspectRatio. These are standards-level
+drawing attributes, not a site vocabulary, and a change to one is a repaint in the same
+way a style change is. role/id/value/disabled/checked/href/aria-* stay structural.
 
-MEASURED, final
-  x.com/home       2764 el   141 lines / 7.5 KB   no CSS hashes; feed AND rail both named
-  bbc.com/news     1424 el   158 lines / 10.1 KB
-  books.toscrape    543 el    17 lines / 518 B    class fallback fires; product grid intact
+Tested as BEHAVIOUR, not by grepping source: the predicate is extracted out of the
+collector template literal and executed, asserting 17 rendering attrs classify true and
+12 structural attrs classify false — so nothing structural can be swept in later.
 
-153 tests pass.
+ALSO: tools/precheck-backticks.mjs, wired in front of the suite (`npm test`).
+The in-suite backtick guard is useless on its own — test-regressions.mjs imports the
+collectors, so a stray backtick makes the module fail to PARSE and the suite dies before
+the guard can report anything. I proved that the hard way today: I wrote the SVG comment
+with backticks inside it, broke the module, and spent a cycle on a SyntaxError whose cause
+was a comment I had just written. The new check runs first, scans only the template BODY
+between the delimiters (so legitimate backticks elsewhere in a file are not flagged), and
+was verified against an injected fault.
+
+154 tests pass.

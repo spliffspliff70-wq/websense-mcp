@@ -48,6 +48,22 @@ export const DIFF_COLLECTOR = `() => {
   function isPresentationAttr(n) {
     if (n === 'class' || n === 'style' || n === 'dir' || n === 'lang') return true;
     if (n.length > 5 && n.lastIndexOf('data-', 0) === 0) return true;
+    // ★ SVG GEOMETRY IS RENDERING TOO (found live 2026-10-01). A scroll on x.com reported
+    // mutated:true with 89 "structure" changes, and the bulk of them were icons redrawing
+    // their path data (the SVG d attribute) plus points/transform on other shapes. Nothing
+    // about the page's STRUCTURE had changed; a spinner span did what it was told. These are
+    // the SVG spec's drawing attributes, not a site vocabulary, and a change to one is a
+    // repaint in exactly the way a style change is.
+    // (NOTE: no backticks anywhere in this file — it is a template literal. Wrap names in
+    // double quotes, never backticks, or the module will not parse at all.)
+    if (n === 'd' || n === 'points' || n === 'transform' || n === 'viewBox'
+      || n === 'fill' || n === 'stroke' || n === 'stroke-width' || n === 'stroke-linecap'
+      || n === 'stroke-linejoin' || n === 'stroke-dasharray' || n === 'stroke-dashoffset'
+      || n === 'fill-opacity' || n === 'stroke-opacity' || n === 'opacity'
+      || n === 'cx' || n === 'cy' || n === 'r' || n === 'rx' || n === 'ry'
+      || n === 'x1' || n === 'y1' || n === 'x2' || n === 'y2'
+      || n === 'offset' || n === 'stop-color' || n === 'stop-opacity'
+      || n === 'gradientUnits' || n === 'preserveAspectRatio') return true;
     return false;
   }
 
