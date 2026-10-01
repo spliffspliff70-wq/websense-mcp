@@ -773,14 +773,14 @@ export function regionTree(snap, opts = {}) {
   //     merged them on their name KIND and printed one with a count, HIDING the other entirely.
   // Where the collapsed members carry different names the line says so, rather than implying
   // they are identical.
-  // ⚠️ DO NOT KEY A RUN ON THE NAME ALONE (measured 2026-10-01, reverted the same hour).
-  // It was tried, and it folded the x.com timeline from four post templates to one — but it
-  // also merged books.toscrape's TWO genuinely different div.page_inner boxes (the header and
-  // the content) into one line with "REPEATS x2", taking that page's outline from 17 useful
-  // lines to 3, because a CLASS token is not a page-authored identity, it is just the first
-  // word of a class list. The shape stays in the key: it is what tells two same-named places
-  // apart. The cost of keeping it is honest and visible — two x.com posts that differ only by
-  // one anonymous wrapper div still end their run early — and it is reported, not hidden.
+  // ★ THE SHAPE OF A REGION, USED ONLY AS PART OF ITS IDENTITY (2026-10-01).
+  // tag + which name-kind it carries + the tags of its immediate region children. Back, after a
+  // day of trying to do without it: keying a run on the NAME alone merged books.toscrape's two
+  // div.page_inner boxes, and adding the parent's identity or its tag then broke bbc/stripe,
+  // where a real list wraps every item in its own single-child element (bbc's level2-navigation
+  // is ELEVEN li, each holding one anchor-inner-wrapper). Measured across six pages, name+shape
+  // is the identity rule that holds everywhere; what was actually broken was the GROUPING MODEL
+  // below it (a contiguous-period scan), not the identity. See the run loop in emit.
   const shapeCache = new Array(els.length);
   const shapeOf = (i) => {
     if (shapeCache[i] !== undefined) return shapeCache[i];
@@ -825,38 +825,38 @@ export function regionTree(snap, opts = {}) {
     // length, an alternating run still collapses (each phase keeps its own name), and two
     // differently-named places never merge.
     const rc = regionChild[cur];
-    // Name AND shape, both. The name says what kind of thing it is; the shape stops two
-    // same-named but different places from merging (see the note above shapeOf).
-    const keys = rc.map((c) => shapeOf(c) + '\u0000' + nameOf(els[c], c));
-    let k = 0;
-    while (k < rc.length) {
-      const rest = keys.slice(k);
-      let bestSpan = 1, bestP = 1;
-      for (let p = 1; p * 2 <= rest.length; p++) {
-        let j = p;
-        while (j < rest.length && rest[j] === rest[j - p]) j++;
-        if (j > bestSpan) { bestSpan = j; bestP = p; }
-      }
-      if (bestSpan > bestP) {   // the run is longer than ONE period — no x3 style threshold
-        for (let m = 0; m < bestP; m++) emit(rc[k + m], d + 1);
-        // ★ A COLLAPSE MUST NOT HIDE A NAME (Ali, 2026-10-01: nothing may limit the data taken
-        // from the page). The members of a run share a SHAPE, but they do not necessarily share
-        // a NAME — old.reddit's 25 posts are div[data-fullname=t3_…] with an id each, and x.com's
-        // primaryColumn sits beside sidebarColumn as two DIFFERENT places of one shape. Printing
-        // only the first name and a count hid the rail entirely on the live feed. So the run
-        // carries every DISTINCT name it holds.
-        const distinct = [];
-        for (let m = 0; m < bestSpan; m++) {
-          const nm = nameOf(els[rc[k + m]], rc[k + m]);
-          if (distinct.indexOf(nm) < 0) distinct.push(nm);
-        }
-        lines.push('  '.repeat(d + 1) + '^ the block above REPEATS x' + bestSpan
-          + (distinct.length === 1 ? '' : ' — ' + distinct.join(' , ')));
-        seenRep.push(bestSpan);
-        k += bestSpan;
-      } else {
-        emit(rc[k], d + 1);
-        k += 1;
+    // ★ THE GROUPING MODEL WAS THE REAL DEFECT, NOT THE IDENTITY RULE (2026-10-01).
+    //
+    // This looked for the longest CONTIGUOUS periodic run (period p: rest[j] === rest[j-p]) and
+    // emitted one template per phase. A page whose children interleave does not have a periodic
+    // run, so the scan fragmented: on x.com/home the timeline's children came out as
+    //   [A, B, A, A, A, A, A]        (A = six posts, B = one post behind an extra wrapper)
+    // the best it could find was period 3 spanning 4, which made it print THREE full post
+    // templates to describe five items, then look again from index 4. 137 lines / 7,013 B for a
+    // feed in which every child is data-testid=cellInnerDiv.
+    //
+    // Four rules were tried against six real pages before this one (all recorded in git):
+    //   (a) name + shape, contiguous scan   -> books ok, bbc ok, x.com 137 lines. Fragmentation.
+    //   (b) name alone                      -> merged books' two div.page_inner boxes. 17->3 lines.
+    //   (c) name + same DOM parent          -> fixed books, broke bbc/stripe (193 vs 149 lines)
+    //                                          because bbc wraps each nav item in its own <li>.
+    //   (d) name + parent-tag shape         -> books ok, x.com 61 lines, bbc 166 (worse), stripe 83.
+    // (e) <- SHIPPED. Keep the identity rule that held on every page (name + shape) and GROUP BY
+    // IT across the whole child list instead of demanding contiguity. A feed does not need to be
+    // periodic to be a feed. Order is preserved by insertion: first appearance decides position.
+    // A group's members share the key, so they share the name by construction — the collapsed
+    // name list that used to be needed is now vacuous, and nothing can be hidden by a collapse.
+    const groups = new Map();
+    for (const c of rc) {
+      const k = shapeOf(c) + '\u0000' + nameOf(els[c], c);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(c);
+    }
+    for (const list of groups.values()) {
+      emit(list[0], d + 1);
+      if (list.length > 1) {
+        lines.push('  '.repeat(d + 1) + '^ the block above REPEATS x' + list.length);
+        seenRep.push(list.length);
       }
     }
   };

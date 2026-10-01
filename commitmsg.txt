@@ -1,57 +1,45 @@
-regions: a name is not a value — stop shipping the page's content as structure
+regions: group a collapse by identity, not by a contiguous run
 
-Ali (2026-10-01), replying to the byte breakdown: "But this is content not
-structure why is that bloating your context..."
+The grouping model was the real defect. It looked for the longest CONTIGUOUS
+periodic run — period p: rest[j] === rest[j-p] — and emitted one template per
+phase. A real feed has no periodic run, so the scan fragmented and paid a full
+template per phase boundary: on x.com/home the timeline's children are
+[A, B, A, A, A, A, A] (A = six posts, B = one post behind an extra wrapper), the
+best it could find was period 3 spanning 4, and it printed THREE full post
+templates to describe five items. 137 lines / 7,013 B for a feed in which every
+child is data-testid=cellInnerDiv.
 
-Three defects, each found by measuring rather than reading the code.
+A collapse now GROUPS BY IDENTITY (name + shape) across the whole child list.
+Order comes from first appearance. A feed does not need to be periodic to be a
+feed. Because a group's members share the key they share the name by
+construction, so the "collapsed run lists every distinct name" clause became
+vacuous — and nothing can be hidden by a collapse.
 
-1. THE GUARDS WERE COUPLED. The collection loop that fills carriers/slots ran
-   only while the spread filter was on, so switching that filter off (the
-   no-filtering rule) left both maps EMPTY and every test built on them
-   answered "no". The per-instance value test was switched off with it — which
-   is why 7 React-minted ids were being printed as place-NAMES on x.com.
-   Collecting what the page wrote is not a cut; only rejecting on it is, and
-   that stays opt-in. The two tests are now separate functions.
+FOUR RULES WERE TRIED AGAINST SIX REAL PAGES BEFORE THIS ONE, each recorded in
+the source and pinned by a test because each was wrong in a way only measurement
+caught:
+  (a) name + shape, contiguous scan   books ok, bbc ok,   x.com 137 lines
+  (b) name alone                      MERGED books' two div.page_inner boxes: 17 -> 3 lines
+  (c) name + same DOM parent          fixed books, broke bbc (193 vs 149): bbc wraps every
+                                      nav item in its own <li>
+  (d) name + parent-tag shape         books ok, x.com 61, but bbc 166 (worse than 150)
+  (e) SHIPPED: name + shape, grouped  every page equal or better
 
-2. A VALUE IS RE-TYPED, NEVER RENAMED, NEVER INVENTED. A label that summarises
-   its own children is a DATUM, not a name: an x.com tweet's engagement group
-   carries "68 chars of counts" directly above the four buttons that each say
-   one of those numbers. It now prints as a datum marker and the text stays in
-   the inventory, one page_slice{indices:[i]} away — the same contract the
-   grouped DIFF already uses for content. Two earlier cuts of this rule were
-   wrong and are recorded in the source: "the slot holds a different value on
-   every occurrence" demoted aside "Subscribe to Premium" and aside "Who to
-   follow" (same tag path, different parents — two real places), and "the
-   invariant part of a label is its name" renamed primaryColumn and
-   sidebarColumn into ONE place called "Column".
+Measured offline, one live capture each, before -> after:
+  x.com/home    137 lines / 7,013 B  ->  74 lines / 3,761 B
+  bbc.com/news  150 lines / 9,621 B  -> 105 lines / 5,823 B
+  stripe/pricing 125 lines / 7,057 B ->  97 lines / 5,622 B
+  books.toscrape 11 / 325  MDN 22 / 776  old.reddit 29 / 940  -- all unchanged
 
-3. THE HOOK BOUND IS DERIVED, NOT A CONSTANT. "v.length <= 40" is gone: a
-   data-* value is printed when the attribute is a LABEL on this page (it has
-   a family of values to compare against), an attribute with a single carrier
-   falls back to CONTENT_PREVIEW — the one bound the grouped DIFF already uses
-   for content, now shared instead of duplicated. Whitespace inside a hook
-   value means prose, not a token.
+★ A CORRECTION, because I put a wrong number in the previous commit and in a
+test comment: I wrote that "7 of the x.com tweets sit behind an extra anonymous
+wrapper", using it to rule out the same-parent rule. Measured on the live
+timeline it is ONE of seven (two of nine in an earlier capture), and all seven
+sit under the single DOM parent #533 — they are true siblings. The wrong number
+had already been used to dismiss the rule that, corrected, turned out to matter.
 
-Measured live, same session, same pages, before and after:
-  x.com/home    147 lines / 8,457 B  ->  144 lines / 7,695 B
-  bbc.com/news  150 lines / 9,621 B  ->  149 lines / 9,290 B
-  books.toscrape 17 lines /   518 B  ->   11 lines /   325 B (20 cards fold)
-  React-minted ids printed as names:  7 -> 0
-
-ONE CHANGE WAS TRIED AND REVERTED, WITH ITS NUMBERS. Keying a repeat on the
-name alone folds the x.com feed to a single post template — and merges
-books.toscrape's two genuinely different div.page_inner boxes (header and
-content) into one line, taking that page's outline from 17 lines to 3. A class
-token is not a page-authored identity; it is the first word of a class list.
-Reverted, and the measured root cause is documented and pinned by a test: a run
-compares region children that are not necessarily SIBLINGS (on x.com, 27 of 42
-multi-child regions span more than one DOM parent). The honest fix is an
-effective parent that looks through pass-through wrappers — not built, and not
-claimed as done.
-
-Tools kept: regions-generalize (live A/B across a URL list), regions-breakdown
-(where the bytes go), slice-to-file (raw MCP HTTP, for slices too big for a
-tool result and for the orphaned-client-registry case), name-audit, and the
-source pinning the reverted trade.
+The live path needs one server restart to pick this up; it is NOT verified
+through the gateway yet, only by running the real regionTree over saved
+inventories.
 
 154 tests pass.

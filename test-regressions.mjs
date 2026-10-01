@@ -2582,54 +2582,69 @@ test('regions: the page\'s OWN named containers, nested, with NO counts', () => 
   assert(/2 Replies\. Reply/.test(tLab.outline),
     'and the children keep their own labels — the datum is the parent summary, not the control');
 
-  // ★ A RUN IS KEYED ON NAME **AND** SHAPE — AND THAT TOO IS A MEASURED TRADE-OFF (2026-10-01).
-  // Keying on the name alone was tried against the live sample and REVERTED: it folded the
-  // x.com timeline from four spelled-out post templates to one, but it also merged
-  // books.toscrape's two genuinely different div.page_inner boxes — the header and the content —
-  // into a single line with "REPEATS x2", dropping that page's outline from 17 useful lines to
-  // 3. A CLASS token is not a page-authored identity; it is the first word of a class list.
-  // So the shape stays in the key, and the cost is paid in the open: two posts that differ only
-  // by one anonymous wrapper div end their run early. This test pins the trade as it actually is.
-  const snapRun = { elements: [
+  // ★ A COLLAPSE GROUPS BY IDENTITY — IT DOES NOT HUNT FOR A PERIODIC RUN (2026-10-01).
+  // The defect was the GROUPING MODEL, not the identity rule, and it took four measured
+  // attempts against six real pages to separate the two:
+  //   (a) name + shape, contiguous period scan -> books ok, bbc ok, x.com 137 lines / 7,013 B,
+  //       because a feed whose children are [A, B, A, A, A, A, A] has no periodic run: the scan
+  //       found period 3 spanning 4 and printed THREE full post templates for five items.
+  //   (b) name alone -> merged books.toscrape's two div.page_inner boxes (header + content),
+  //       because regionChild() takes the nearest region descendant at ANY depth. 17 -> 3 lines.
+  //   (c) name + same DOM parent -> fixed books, broke bbc/stripe (193 vs 149 lines): a real
+  //       list can wrap every item in its own single-child element (bbc's level2-navigation is
+  //       ELEVEN li, each holding one anchor-inner-wrapper). My stated reason for rejecting this
+  //       earlier — "7 of the x.com tweets sit behind an extra wrapper" — was WRONG; measured,
+  //       it is 1 of 7 and they share one DOM parent.
+  //   (d) name + parent-tag -> books ok, x.com 61 lines, but bbc 166 (worse than 150).
+  //   (e) SHIPPED: keep name + shape (the identity rule that held on every one of the six pages)
+  //       and group by it across the whole child list. Order comes from first appearance.
+  // Whole-sample result, offline, one capture each: x.com/home 137->74 lines, bbc 150->105,
+  // stripe 125->97, books 11->11, mdn 22->22, old.reddit 29->29. Nothing regressed.
+
+  // (1) ORDER-INDEPENDENCE — an interleaved odd child must not fragment the group.
+  const snapInter = { elements: [
     mk(0, 'html', null, null),
     mk(1, 'section', { 'aria-label': 'Timeline' }, 0),
-    mk(2, 'div', { 'data-testid': 'cell' }, 1),
-    mk(3, 'article', { 'data-testid': 'post-body' }, 2),
-    mk(4, 'span', { 'aria-label': 'a1' }, 3),
-    mk(5, 'div', { 'data-testid': 'cell' }, 1),
-    mk(6, 'div', { 'data-testid': 'wrapper' }, 5),
-    mk(7, 'article', { 'data-testid': 'post-body' }, 6),
-    mk(8, 'span', { 'aria-label': 'a2' }, 7),
-  ] };
-  const tRun = regionTree(snapRun);
-  assert((tRun.outline.match(/data-testid=cell/g) || []).length === 2,
-    'same-named regions of DIFFERENT shape stay separate — a hook word alone is not identity');
-  assert(/REPEATS/.test(regionTree({ elements: [
-    mk(0, 'html', null, null),
-    mk(1, 'section', { 'aria-label': 'Timeline' }, 0),
-    mk(2, 'div', { 'data-testid': 'cell' }, 1),
+    mk(2, 'div', { 'data-testid': 'cell' }, 1),      // A
     mk(3, 'article', null, 2),
     mk(4, 'span', { 'aria-label': 'a1' }, 3),
-    mk(5, 'div', { 'data-testid': 'cell' }, 1),
-    mk(6, 'article', null, 5),
-    mk(7, 'span', { 'aria-label': 'a2' }, 6),
-  ] }).outline), 'but same-named regions of the SAME shape still collapse');
-  //
-  // ⚠️ OPEN, MEASURED, NOT SOLVED — the run test compares region children that are not
-  // necessarily each other's SIBLINGS. regionChild() takes the nearest region descendant of any
-  // depth, so two boxes from different branches of the page can be compared as if they were
-  // consecutive list items. Measured on the sample: books.toscrape has exactly ONE such region
-  // (body, holding the header .page_inner and the content .page_inner) and x.com has 27 of its
-  // 42 multi-child regions. Keying the run on the name alone folded x.com's feed to one
-  // template but merged books' two .page_inner boxes into one line — 17 lines down to 3 — so it
-  // was REVERTED (see the note above shapeOf in src/snapshot.js). Requiring the same DOM parent
-  // is not the fix either: 7 of the x.com tweets sit behind an extra anonymous wrapper, so
-  // their immediate parents differ while they are still consecutive posts. The honest fix is an
-  // "effective parent" that looks through pass-through wrappers — not built, and not claimed.
+    mk(5, 'div', { 'data-testid': 'cell' }, 1),      // B — same name, DIFFERENT shape
+    mk(6, 'div', { 'data-testid': 'wrapper' }, 5),
+    mk(7, 'article', null, 6),
+    mk(8, 'span', { 'aria-label': 'b1' }, 7),
+    mk(9, 'div', { 'data-testid': 'cell' }, 1),      // A
+    mk(10, 'article', null, 9),
+    mk(11, 'span', { 'aria-label': 'a2' }, 10),
+    mk(12, 'div', { 'data-testid': 'cell' }, 1),     // A
+    mk(13, 'article', null, 12),
+    mk(14, 'span', { 'aria-label': 'a3' }, 13),
+  ] };
+  const tInter = regionTree(snapInter);
+  assert(/REPEATS x3/.test(tInter.outline),
+    'three of a kind must collapse to ONE template + x3 however they are interleaved');
+  assert((tInter.outline.match(/data-testid=cell/g) || []).length === 2,
+    'the odd child is shown once and the group once — NOT once per phase (the old scan gave 4)');
 
-  // ...and an ALTERNATING run still collapses, with BOTH phases shown. This is the pattern the
-  // old adjacent-identical test missed entirely (bbc.com's nav alternates div>div>a / div>button),
-  // and it is still the most common real shape: a row and its control, repeated.
+  // (2) SHAPE IS STILL PART OF IDENTITY — two same-named boxes whose subtrees differ are two
+  // places. This is what keeps books.toscrape's header .page_inner and content .page_inner apart.
+  const snapCross = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'body', { 'aria-label': 'Body' }, 0),
+    mk(2, 'div', { 'data-testid': 'box' }, 1),
+    mk(3, 'span', { 'aria-label': 'h1' }, 2),
+    mk(4, 'div', { 'data-testid': 'box' }, 1),
+    mk(5, 'div', { 'data-testid': 'wrapper' }, 4),
+    mk(6, 'span', { 'aria-label': 'c1' }, 5),
+  ] };
+  const tCross = regionTree(snapCross);
+  assert((tCross.outline.match(/data-testid=box/g) || []).length === 2,
+    'two same-named boxes of DIFFERENT shape are two places (books.toscrape regressed here before)');
+  assert(!/REPEATS/.test(tCross.outline), 'and they must not be reported as a repeat');
+
+  // ...and an ALTERNATING run (A,B,A,B) is now TWO groups of two, each collapsing to one
+  // template — which is the same description the old period scan produced for this shape, but
+  // derived from identity rather than from finding a period. Both phases must still be shown:
+  // an alternating run is not one thing, and merging its phases was the bug that hid the rail.
   const snapAnon = { elements: [
     mk(0, 'html', null, null),
     mk(1, 'nav', { 'aria-label': 'Nav' }, 0),
@@ -2647,8 +2662,8 @@ test('regions: the page\'s OWN named containers, nested, with NO counts', () => 
     mk(13, 'span', { 'aria-label': 'ib' }, 12),
   ] };
   const tAnon = regionTree(snapAnon);
-  assert(/REPEATS x4/.test(tAnon.outline),
-    'an alternating run (A,B,A,B) must collapse as ONE period — not as adjacent pairs');
+  assert((tAnon.outline.match(/REPEATS x2/g) || []).length === 2,
+    'an alternating run (A,B,A,B) is TWO groups of two, each collapsing to one template');
   assert(/data-testid=row/.test(tAnon.outline) && /data-testid=btn/.test(tAnon.outline),
     'and BOTH phases must be shown — an alternating run is not one thing');
 
