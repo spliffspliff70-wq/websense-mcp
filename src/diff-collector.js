@@ -38,7 +38,16 @@ export const DIFF_COLLECTOR = `() => {
   function fingerprint(r) {
     var a = r.attrs || {};
     var parts = [];
-    for (var k in a) if (Object.prototype.hasOwnProperty.call(a, k)) parts.push(k + '=' + a[k]);
+    for (var k in a) {
+      if (!Object.prototype.hasOwnProperty.call(a, k)) continue;
+      // ★ PRESENTATION IS NOT IDENTITY (measured 2026-10-01). class and style are how the
+      // element is PAINTED, and on a CSS-in-JS site they flip constantly: a 972px scroll on
+      // x.com reported 98,441 chars of structure.changed entries whose only difference was
+      // class/style. Those are VISUAL changes — Ali's own three groups say so ("content/
+      // scroll visual difs") — so identity excludes them and they are classified as visual.
+      if (k === 'class' || k === 'style') continue;
+      parts.push(k + '=' + a[k]);
+    }
     parts.sort();
     return (r.tag || '') + '|' + parts.join('&');
   }
@@ -96,6 +105,7 @@ export const DIFF_COLLECTOR = `() => {
   var addedIdx = [];   // indices only — see ident() above
   var structure = { removed: [], changed: [] };
   var content = { changed: [] };
+  var visual = { changed: [] };   // presentation-only (class/style) — repaint, not a change
   var viewport = { moved: [] };
 
   for (var c = 0; c < now.elements.length; c++) {
@@ -110,18 +120,29 @@ export const DIFF_COLLECTOR = `() => {
     var gsame = geom(nr) === geom(or);
     var nameSame = (nr.name || '') === (or.name || '');
     var valSame = (nr.value == null ? '' : nr.value) === (or.value == null ? '' : or.value);
+    // Which attributes differ, and are they ONLY presentation (class/style)?
+    var attrsDiff = fieldsDiffer(nr, or);
+    var presentOnly = [];
+    for (var pd = 0; pd < attrsDiff.length; pd++) {
+      if (attrsDiff[pd] === 'class' || attrsDiff[pd] === 'style') presentOnly.push(attrsDiff[pd]);
+    }
+    var onlyPresentation = attrsDiff.length > 0 && presentOnly.length === attrsDiff.length;
     if (fsame && nameSame && valSame) {
       if (!gsame) viewport.moved.push({ i: nr.i, loc: nr.loc, was: { x: or.x, y: or.y, vp: or.vp }, now: { x: nr.x, y: nr.y, vp: nr.vp } });
+      // ★ VISUAL, not structural (2026-10-01). The element was REPAINTED and nothing about
+      // it changed identity. This is reported so nothing is hidden, but it is not a page
+      // change — on x.com these alone were 98 KB of a 367 KB diff.
+      else if (onlyPresentation) visual.changed.push({ i: nr.i, loc: nr.loc, changed: presentOnly });
       continue;
     }
     if (!fsame) {
       // WHICH fields changed, not their values — the values are in the inventory.
       var o2 = ident(nr);
-      o2.changed = fieldsDiffer(nr, or);
+      o2.changed = attrsDiff;
       structure.changed.push(o2);
       continue;
     }
-    // shape identical -> whatever moved is content, and geometry-only is viewport
+    // identity same, presentation same -> whatever moved is content, and geometry-only is viewport
     if (!valSame || !nameSame) {
       // ★ CONTENT CARRIES A READABLE PREVIEW + THE LENGTH, NOT THE WHOLE TEXT (measured
       // 2026-10-01). This group was 227,703 of a 271,713-char diff (84%), because the
@@ -142,6 +163,7 @@ export const DIFF_COLLECTOR = `() => {
       }
       content.changed.push(cc);
     }
+    else if (onlyPresentation) visual.changed.push({ i: nr.i, loc: nr.loc, changed: presentOnly });
     else if (!gsame) viewport.moved.push({ i: nr.i, loc: nr.loc, was: { x: or.x, y: or.y, vp: or.vp }, now: { x: nr.x, y: nr.y, vp: nr.vp } });
   }
   for (var d = 0; d < prev.els.length; d++) {
@@ -153,15 +175,48 @@ export const DIFF_COLLECTOR = `() => {
 
   var structN = addedIdx.length + structure.removed.length + structure.changed.length;
   var contentN = content.changed.length;
-  var viewportN = viewport.moved.length;
+
+  // ★ A UNIFORM MOVE IS ONE FACT, NOT N THOUSANDS (measured 2026-10-01).
+  // Scrolling an already-hydrated x.com page listed 2,525 individual "moved" elements —
+  // 230,879 chars, 68% of a 367 KB diff — to say "the page scrolled 972px", because every
+  // element had moved by the SAME delta. Reporting that N times is not completeness, it is
+  // repetition. A uniform translation is fully and exactly described by its delta plus the
+  // count, so that is what it now reports, and the per-element list is kept only when the
+  // movements DIFFER (a genuine relayout, where each element's movement is its own fact).
+  var moved = viewport.moved;
+  var viewportN = moved.length;
+  var uniform = null;
+  if (viewportN > 1) {
+    uniform = { dx: null, dy: null };
+    var u = moved[0].now.x - moved[0].was.x;
+    var v = moved[0].now.y - moved[0].was.y;
+    for (var mi = 1; mi < viewportN; mi++) {
+      if ((moved[mi].now.x - moved[mi].was.x) !== u || (moved[mi].now.y - moved[mi].was.y) !== v) {
+        uniform = null;
+        break;
+      }
+    }
+    if (uniform) { uniform.dx = u; uniform.dy = v; }
+  }
   out.structure = { added: addedIdx, removed: structure.removed, changed: structure.changed, count: structN };
   out.content = { changed: content.changed, count: contentN };
-  out.viewport = { moved: viewport.moved, count: viewportN };
+  // VISUAL: reported, but never a mutation. On x.com a scroll repaints thousands of nodes.
+  out.visual = { changed: visual.changed, count: visual.changed.length };
+  if (uniform) {
+    out.viewport = {
+      scroll: { dx: uniform.dx, dy: uniform.dy },
+      moved: viewportN,
+      uniform: true,
+      note: 'every moved element moved by the same delta — this is a SCROLL, not a layout change',
+    };
+  } else {
+    out.viewport = { moved: moved, count: viewportN };
+  }
   out.mutated = structN > 0 || contentN > 0;
   out.hint = out.mutated
-    ? 'STRUCTURE and/or CONTENT moved. viewport.moved is scroll/layout churn and is NOT a mutation.'
-    : (viewportN > 0
-        ? 'NOTHING structural changed — the page was only scrolled/relaid out. Treat this action as NOT LANDED.'
+    ? 'STRUCTURE and/or CONTENT moved — the page really changed. visual (repaint) and viewport (scroll/layout) are context, NOT mutations.'
+    : ((visual.changed.length || viewportN)
+        ? 'NOTHING structural changed. The page was only repainted and/or scrolled — treat this action as NOT LANDED.'
         : 'NOTHING on the page changed at all. Treat this action as NOT LANDED — do not retry blind.');
   return out;
 }`;

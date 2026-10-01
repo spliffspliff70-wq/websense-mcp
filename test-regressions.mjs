@@ -2040,7 +2040,7 @@ test('diff: the auto-DIFF groups structure / content / viewport', () => {
     'ident must carry identity only — never attrs or name (both are already in the inventory)');
   assert(/addedIdx\.push\(nr\.i\)/.test(code),
     'adds must be recorded as INDICES so a large change stays an index');
-  assert(/o2\.changed = fieldsDiffer\(nr, or\)/.test(code),
+  assert(/o2\.changed = attrsDiff;/.test(code),
     'changes must name WHICH fields moved, not their values');
   // ★ CONTENT MUST NOT SHIP WHOLE TEXT EITHER. name on a style tag is its entire CSS
   // source; that group alone was 227,703 of a 271,713-char diff (84%). Preview + true
@@ -2050,6 +2050,25 @@ test('diff: the auto-DIFF groups structure / content / viewport', () => {
   assert(!/cc\.name = nr\.name;/.test(code), 'content must not ship the raw name');
   assert(/cc\.value = nr\.value/.test(code) && /cc\.wasValue = or\.value/.test(code),
     'a FIELD value stays exact — it is short and it is the answer to "did my input land"');
+  // ★ A UNIFORM MOVE IS ONE FACT, NOT N THOUSANDS. Scrolling an already-hydrated x.com page
+  // listed 2,525 individual movements — 230,879 chars, 68% of a 367 KB diff — to say "the
+  // page scrolled 972px". A uniform translation is fully described by its delta + count.
+  assert(/var uniform = null;/.test(code) && /out\.viewport = \{\s*scroll:/.test(code),
+    'a uniform movement must collapse to a scroll delta, not enumerate every element');
+  assert(/note: 'every moved element moved by the same delta/.test(code),
+    'and must say so, so the reader knows it is a scroll and not a layout change');
+  assert(/if \(uniform\) \{[\s\S]*?\} else \{\s*out\.viewport = \{ moved: moved/.test(code),
+    'a NON-uniform movement must still enumerate — that is a real relayout');
+  // ★ PRESENTATION IS NOT IDENTITY. class/style flip constantly on a CSS-in-JS site; a
+  // 972px scroll produced 98,441 chars of structure.changed entries whose only difference
+  // was class/style. Those are VISUAL, which is Ali own second group ("content/scroll
+  // visual difs").
+  assert(/if \(k === 'class' \|\| k === 'style'\) continue;/.test(code),
+    'class and style must be excluded from the identity fingerprint');
+  assert(/var visual = \{ changed: \[\] \};/.test(code), 'a visual group must exist');
+  assert(/out\.visual = \{ changed: visual\.changed/.test(code), 'visual must be reported (nothing hidden)');
+  assert(/out\.mutated = structN > 0 \|\| contentN > 0;/.test(code),
+    'mutated must still be structure+content ONLY — a repaint is not a mutation');
 });
 
 test('snapshot: elements carry a parent pointer, and branchChain walks it', () => {

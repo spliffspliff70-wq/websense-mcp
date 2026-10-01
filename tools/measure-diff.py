@@ -1,6 +1,6 @@
-import io, re
+import io, re, sys
 
-p = r"C:/Users/Ali/AppData/Local/hermes/cache/terminal/hermes-results/call_00_ET_aTuGuO4AOuSLtwM1WBoX1983.txt"
+p = sys.argv[1] if len(sys.argv) > 1 else r"C:/Users/Ali/AppData/Local/hermes/cache/terminal/hermes-results/call_00_ET_aTuGuO4AOuSLtwM1WBoX1983.txt"
 raw = io.open(p, encoding="utf-8", errors="replace").read()
 print("total tool result chars:", len(raw))
 
