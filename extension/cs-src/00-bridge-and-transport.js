@@ -374,10 +374,10 @@
       case 'press_key': return nativePressKeyEnhanced(params.key, params.ref, params.modifiers);
       case 'evaluate': return nativeEvaluate(params.script);
       case 'evaluate_safe': return nativeEvaluateSafe(params.query || {});
-      case 'type_many': return nativeTypeMany(params.fields);
+      case 'type_many': return await nativeTypeMany(params.fields);
       case 'hover': return nativeHover(await resolveRefHealed(params.ref));
       case 'right_click': return nativeRightClick(await resolveRefHealed(params.ref));
-      case 'drag_drop': return nativeDragDrop(resolveRef(params.fromRef), resolveRef(params.toRef));
+      case 'drag_drop': return nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef));   // ★ 2026-10-01: was the SYNC resolveRef; the relay copy uses the HEALED one, which is the whole point of the healer (a stale ref otherwise fails silently mid-drag)
       case 'click_xy': return nativeClickXY(params.x, params.y, params.ref, params.button);
       case 'console_log': if (!consoleCapturing) startConsoleCapture(); return getConsoleLog(params.clear !== false, params.maxEntries || 100);
       case 'copy_to_clipboard': return nativeCopyToClipboard(params.text);
@@ -409,11 +409,45 @@
       case 'layout_relation': return layoutRelation(params.refA || '', params.refB || '');
       case 'get_events': return getEvents(params.since);
       case 'ping': return { pong: true, ts: Date.now() };
-      case 'get_status': return { hubConnected: true, pageConnected: true, currentUrl: location.href, currentTitle: document.title, source: 'content-script' };
+      case 'get_status': {
+        // ★ 2026-10-01: this was a STATIC STUB — hubConnected:true, pageConnected:true,
+        // hardcoded. It claimed a healthy bridge regardless of reality, and it carried none
+        // of the dialog truth. The relay copy reported `connected`/`pendingDialogs` instead,
+        // so the two copies answered DIFFERENT SHAPES for one op. The server tolerates both
+        // (it tests `st.hubConnected || st.connected || st.ok`), which is exactly why the
+        // divergence went unnoticed. Now both report the union, and the dialog count is real.
+        let pd = 0;
+        try { pd = WS_DIALOGS.length + readMainWorldDialogs().length; } catch (_) {}
+        return { ok: true, connected: true, hubConnected: true, pageConnected: true,
+                 url: location.href, title: document.title, pendingDialogs: pd,
+                 source: 'content-script', isMainFrame: (function(){ try { return window.self === window.top; } catch (_) { return false; } })() };
+      }
       case 'handle_dialog': {
+        // ★ 2026-10-01: this copy handled ONLY the isolated-world queue, so a dialog the
+        // PAGE itself raised (alert/confirm/prompt from page JS — the common case) was
+        // invisible here while the relay copy resolved it. That is the exact 2026-09-25
+        // divergence: the MAIN-world hook (extension/dialog-hook.js) publishes the page's
+        // own dialogs to a DOM attribute, and only one of the two copies read it. Now both
+        // try the MAIN world FIRST (where the page's dialogs land) and fall back to the
+        // isolated queue (dialogs raised by other extension-injected code).
+        const act0 = params.action || 'accept';
+        const mwList = readMainWorldDialogs();
+        if (mwList.length) {
+          const mIdx = (params.index !== undefined && params.index !== null) ? params.index : (mwList.length - 1);
+          const mw = mwList[mIdx];
+          if (!mw) return { success: false, error: 'No pending MAIN-world dialog at index ' + mIdx };
+          const mwReply = await resolveMainWorldDialog(mw.id, act0, params.value);
+          return {
+            success: true, handled: mw.type, source: 'main_world', id: mw.id,
+            message: mw.message,
+            value: (mw.type === 'confirm') ? (act0 === 'dismiss' ? false : true)
+              : (mw.type === 'prompt' ? (params.value != null ? params.value : mw.defaultValue) : undefined),
+            hookReply: mwReply,
+          };
+        }
         const idx = (params.index !== undefined && params.index !== null) ? params.index : (WS_DIALOGS.length - 1);
         const dlg = WS_DIALOGS[idx];
-        if (!dlg) return { success: false, error: 'No pending dialog at index ' + idx };
+        if (!dlg) return { success: false, error: 'No pending dialog (none in the MAIN world or the isolated world)' };
         const act = params.action || 'accept';
         if (dlg._timer) { try { clearTimeout(dlg._timer); } catch (_) {} }
         if (dlg.type === 'alert') { WS_DIALOGS.splice(idx, 1); return { success: true, handled: 'alert' }; }
@@ -447,10 +481,37 @@
       case 'scroll_and_extract': return await scrollAndExtract(params);
       case 'preload_content': return await preloadPage(params);
       case 'doctor_content': return doctorContent();
-      case 'network_log': return { note: 'network_log not available from content bridge' };
+      case 'network_log': {
+        // ★ 2026-10-01: this used to return "not available from content bridge" — a FALSE
+        // capability claim, the same class as upload_file's. startNetworkCapture and
+        // getNetworkLog are defined in this same content-script world (70-capture-and-readers),
+        // so the capability was always here; this copy just refused. Same op, and one routing
+        // path silently returned nothing.
+        if (!networkCapturing) startNetworkCapture();
+        return getNetworkLog(params.clear !== false, params.maxEntries || 50);
+      }
       case 'mermaid_export': return { note: 'mermaid_export handled by server' };
       case 'wait_for': return { note: 'wait_for not available from content bridge' };
-      case 'upload_file': return { error: 'upload_file requires the background SW (drag-and-drop DataTransfer unavailable in content world) — use the SW relay' };
+      case 'upload_file': {
+        // ★ 2026-10-01: this used to RETURN AN ERROR — "requires the background SW
+        // (drag-and-drop DataTransfer unavailable in content world)". That claim was WRONG,
+        // and it made upload_file fail outright whenever the hub routed it here: the relay
+        // path (70) implements exactly this from the SAME content-script world, which proves
+        // the capability is available. Two dispatchers, one op, one of them always erroring.
+        // ★ AWAIT IS LOAD-BEARING (the bug fixed on the other copy 2026-09-21):
+        // resolveRefHealed is ASYNC; without await, upEl is a PROMISE with no tagName /
+        // querySelector / parentElement, so locateFileInput falls through every structural
+        // branch to the proximity last resort where domCloseness(promise, candidate) scores
+        // 0 for every candidate — `best` never moves off all[0], the FIRST file input on the
+        // page. Measured on LemonSqueezy: a .zip attached to the product IMAGE input while
+        // the real files input stayed empty, reported as success:true / fileCount:1.
+        const upEl = await resolveRefHealed(params.ref);
+        const upDet = detectEditor(upEl);
+        if (upDet.kind === 'editor') {
+          return await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
+        }
+        return await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
+      }
       case 'read_clipboard': {
         try {
           const ta = document.createElement('textarea');

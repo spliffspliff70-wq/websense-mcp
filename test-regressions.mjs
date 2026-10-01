@@ -2185,5 +2185,72 @@ test('snapshot lifecycle: nothing expires on a clock; reads SELF-HEAL', () => {
     'every performed action must mark the copy dirty');
 });
 
+test('dispatchers: the two copies of a duplicated op must not drift apart', () => {
+  // ★ 2026-10-01, Ali: "make them not conflict for all we worked on and have proven to be
+  // better". Root cause (mem 994): WebSense has TWO content-script dispatchers —
+  //   00-bridge-and-transport.js  wsDispatchPage     (direct WS)
+  //   70-capture-and-readers.js   handleMessageAsync (offscreen relay)
+  // and 48 OPS EXIST IN BOTH, hand-maintained. Every fix must be written twice, and about
+  // half the time only one copy receives it. That mechanism produced the 2026-09-25
+  // pendingDialogs:[] bug and, when this test was written, ELEVEN live divergences.
+  //
+  // This guards the SEMANTICS, not the statement form: which helpers an op calls and which
+  // params it reads. `return X` vs `result = X; break;` is not a behaviour and is ignored.
+  const strip = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  const bodies = (file) => {
+    const src = strip(readFileSync(new URL('./extension/cs-src/' + file, import.meta.url), 'utf8'));
+    const out = {};
+    const re = /case '([a-z_0-9]+)':([\s\S]*?)(?=\n\s*case '|\n\s*default:)/g;
+    let m;
+    while ((m = re.exec(src))) out[m[1]] = m[2];
+    return out;
+  };
+  const A = bodies('00-bridge-and-transport.js');
+  const B = bodies('70-capture-and-readers.js');
+
+  // Deliberate, documented differences. Anything NOT listed must agree.
+  const INTENTIONAL = {
+    page_state: 'both call the one canonical getPageState(); the relay adds answerTabId/answerFrameId from its sender',
+    explore_page: 'same extractActionGraph call; the relay wraps it in try/catch for a structured failure',
+  };
+
+  const HELPERS = /\b(native[A-Z]\w*|extractActionGraph|exploreIncremental|resolveRefHealed|resolveRef|getQuickState|getPageState|getFormState|getNetworkLog|startNetworkCapture|readMainWorldDialogs|resolveMainWorldDialog|readContent|preloadPage|scrollAndExtract|detectEditor)\b/g;
+  const PARAMS = /params\.(\w+)/g;
+  const sig = (body) => {
+    const h = new Set(), p = new Set();
+    let m;
+    HELPERS.lastIndex = 0; while ((m = HELPERS.exec(body))) h.add(m[1]);
+    PARAMS.lastIndex = 0; while ((m = PARAMS.exec(body))) p.add(m[1]);
+    return JSON.stringify([[...h].sort(), [...p].sort()]);
+  };
+
+  const shared = Object.keys(A).filter((k) => k in B).sort();
+  assert(shared.length > 40, 'the duplicated set must still be ~48 ops, saw ' + shared.length);
+
+  const drifted = [];
+  for (const op of shared) {
+    if (op in INTENTIONAL) continue;
+    if (sig(A[op]) !== sig(B[op])) drifted.push(op);
+  }
+  assert(drifted.length === 0,
+    'these duplicated ops disagree between the two dispatchers — a fix landed on one copy only: ' + drifted.join(', '));
+
+  // And the specific things that WERE broken, pinned so they cannot regress to one-sided.
+  for (const [op, must] of [
+    ['upload_file', /nativeUpload/, 'upload_file'],
+    ['network_log', /getNetworkLog/, 'network_log'],
+    ['handle_dialog', /readMainWorldDialogs/, 'handle_dialog (MAIN-world dialogs first)'],
+    ['form_state', /getFormState/, 'form_state (the dedicated function, not an inline SAG)'],
+    ['get_status', /pendingDialogs/, 'get_status (real dialog count, not a hardcoded healthy stub)'],
+    ['drag_drop', /resolveRefHealed/, 'drag_drop (the HEALED resolver)'],
+    ['type_many', /await\s+nativeTypeMany/, 'type_many (AWAITED)'],
+    ['click', /await\s+nativeClick/, 'click (AWAITED before afterState)'],
+  ]) {
+    assert(A[op] && B[op], op + ' must exist in BOTH dispatchers');
+    assert(must.test(A[op]) && must.test(B[op]),
+      op + ' must be the same capability in BOTH copies: ' + must);
+  }
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

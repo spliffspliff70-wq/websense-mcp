@@ -174,6 +174,12 @@
       scrollPct: Math.round(window.scrollY / Math.max(1, (document.documentElement.scrollHeight || 1) - window.innerHeight) * 100),
       scrollContainer: scrollC,
       isMainFrame: isTop,
+      // ★ ONE FRESHNESS TRUTH (2026-10-01). The relay copy used to report a HARDCODED
+      // wsVersion:'v4.6.0', which was both a hardcoded value and stale — the real build was
+      // v4.6.1. The build stamp is substituted here at build time and encodes BOTH the
+      // version and the source hash, so reporting it is the only freshness claim that
+      // cannot rot. Reported from one place so both dispatchers agree.
+      csBuild:'__CS_BUILD__',
     };
   }
 
@@ -234,9 +240,18 @@
     let result;
     try {
       switch (type) {
-        case 'explore_page': try { result = params.incremental ? await exploreIncremental(params) : await extractActionGraph(params); } catch(e) { result = { success: false, error: 'explore_page failed: ' + e.message, stack: (e.stack||'').slice(0, 500) }; } break;
-        case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||0}); result = sag.actions; break; }   // 0 = UNBOUNDED (no caps)
-        case 'click': { const before=getQuickState(); nativeClick(await resolveRefHealed(params.ref)); result={success:true,ref:params.ref,beforeState:before,afterState:getQuickState()}; break; }
+        case 'explore_page': try {
+          // ★ MATCHES the direct-WS copy (2026-10-01). This used to branch on
+          // params.incremental itself and hand extractActionGraph the RAW params — but
+          // extractActionGraph already dispatches to exploreIncremental when
+          // options.incremental is set (50-candidates.js), so the branch was a duplicate of
+          // logic that lives in one place, and passing raw params silently DROPPED the
+          // explicit defaults (includeContent !== false, full, includeHidden) that the other
+          // copy sets. Same op, one implementation of the incremental decision.
+          result = await extractActionGraph({ full: !!params.full, includeContent: params.includeContent !== false, includeHidden: !!params.includeHidden, frameId: params.frameId, incremental: !!params.incremental, maxActions: params.maxActions, contentMaxLen: params.contentMaxLen, settle: params.settle, quietMs: params.quietMs, fresh: params.fresh });
+        } catch(e) { result = { success: false, error: 'explore_page failed: ' + e.message, stack: (e.stack||'').slice(0, 500) }; } break;
+        case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||0,frameId:params.frameId}); result = sag.actions; break; }   // 0 = UNBOUNDED (no caps)
+        case 'click': { const before=getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); result={success:true,ref:params.ref,...(cr && typeof cr === 'object' ? cr : {}),beforeState:before,afterState:getQuickState()}; break; }
                 case 'type_text': { result = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); result.ref = params.ref; break; }
                 case 'select_option': { result=nativeSelect(await resolveRefHealed(params.ref),params.value, params.clearAll); result.ref=params.ref; break; }
                 case 'form_special': { result=await nativeSetSpecial(await resolveRefHealed(params.ref), params.value); result.ref=params.ref; break; }
@@ -281,8 +296,21 @@
         case 'tab_contents': result=getTabContents(params.ref); break;
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
-        case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'__CS_BUILD__',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'form_state': result = getFormState(params.formRef, params.frameId); break;   // ★ 2026-10-01: was an inline extractActionGraph({full:true}) + find — a second implementation of a dedicated function that already exists (20-dom-semantics getFormState), and a much more expensive one (a full SAG to answer a form question)
+        case 'page_state': {
+          // ★ ONE IMPLEMENTATION (2026-10-01). This was a 977-char INLINE COPY of the state
+          // reader, and it had already drifted from the canonical getPageState(): a stale
+          // hardcoded wsVersion, and narrower hasCaptcha / isLoading selectors missing
+          // iframe[src*="recaptcha"] and .loader. The 2026-09-25 MAIN-world dialog fix also
+          // landed in getPageState() only — which is exactly how two copies of one op end up
+          // disagreeing about pendingDialogs. Now: read the state from ONE place, then add
+          // only what this dispatcher alone can know (the sender's routing identity).
+          const ps = getPageState();
+          ps.answerTabId = (sender && sender.tab && sender.tab.id) || null;
+          ps.answerFrameId = (sender && sender.frameId) || null;
+          result = ps;
+          break;
+        }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;

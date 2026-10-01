@@ -382,10 +382,10 @@
       case 'press_key': return nativePressKeyEnhanced(params.key, params.ref, params.modifiers);
       case 'evaluate': return nativeEvaluate(params.script);
       case 'evaluate_safe': return nativeEvaluateSafe(params.query || {});
-      case 'type_many': return nativeTypeMany(params.fields);
+      case 'type_many': return await nativeTypeMany(params.fields);
       case 'hover': return nativeHover(await resolveRefHealed(params.ref));
       case 'right_click': return nativeRightClick(await resolveRefHealed(params.ref));
-      case 'drag_drop': return nativeDragDrop(resolveRef(params.fromRef), resolveRef(params.toRef));
+      case 'drag_drop': return nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef));   // ★ 2026-10-01: was the SYNC resolveRef; the relay copy uses the HEALED one, which is the whole point of the healer (a stale ref otherwise fails silently mid-drag)
       case 'click_xy': return nativeClickXY(params.x, params.y, params.ref, params.button);
       case 'console_log': if (!consoleCapturing) startConsoleCapture(); return getConsoleLog(params.clear !== false, params.maxEntries || 100);
       case 'copy_to_clipboard': return nativeCopyToClipboard(params.text);
@@ -417,11 +417,45 @@
       case 'layout_relation': return layoutRelation(params.refA || '', params.refB || '');
       case 'get_events': return getEvents(params.since);
       case 'ping': return { pong: true, ts: Date.now() };
-      case 'get_status': return { hubConnected: true, pageConnected: true, currentUrl: location.href, currentTitle: document.title, source: 'content-script' };
+      case 'get_status': {
+        // ★ 2026-10-01: this was a STATIC STUB — hubConnected:true, pageConnected:true,
+        // hardcoded. It claimed a healthy bridge regardless of reality, and it carried none
+        // of the dialog truth. The relay copy reported `connected`/`pendingDialogs` instead,
+        // so the two copies answered DIFFERENT SHAPES for one op. The server tolerates both
+        // (it tests `st.hubConnected || st.connected || st.ok`), which is exactly why the
+        // divergence went unnoticed. Now both report the union, and the dialog count is real.
+        let pd = 0;
+        try { pd = WS_DIALOGS.length + readMainWorldDialogs().length; } catch (_) {}
+        return { ok: true, connected: true, hubConnected: true, pageConnected: true,
+                 url: location.href, title: document.title, pendingDialogs: pd,
+                 source: 'content-script', isMainFrame: (function(){ try { return window.self === window.top; } catch (_) { return false; } })() };
+      }
       case 'handle_dialog': {
+        // ★ 2026-10-01: this copy handled ONLY the isolated-world queue, so a dialog the
+        // PAGE itself raised (alert/confirm/prompt from page JS — the common case) was
+        // invisible here while the relay copy resolved it. That is the exact 2026-09-25
+        // divergence: the MAIN-world hook (extension/dialog-hook.js) publishes the page's
+        // own dialogs to a DOM attribute, and only one of the two copies read it. Now both
+        // try the MAIN world FIRST (where the page's dialogs land) and fall back to the
+        // isolated queue (dialogs raised by other extension-injected code).
+        const act0 = params.action || 'accept';
+        const mwList = readMainWorldDialogs();
+        if (mwList.length) {
+          const mIdx = (params.index !== undefined && params.index !== null) ? params.index : (mwList.length - 1);
+          const mw = mwList[mIdx];
+          if (!mw) return { success: false, error: 'No pending MAIN-world dialog at index ' + mIdx };
+          const mwReply = await resolveMainWorldDialog(mw.id, act0, params.value);
+          return {
+            success: true, handled: mw.type, source: 'main_world', id: mw.id,
+            message: mw.message,
+            value: (mw.type === 'confirm') ? (act0 === 'dismiss' ? false : true)
+              : (mw.type === 'prompt' ? (params.value != null ? params.value : mw.defaultValue) : undefined),
+            hookReply: mwReply,
+          };
+        }
         const idx = (params.index !== undefined && params.index !== null) ? params.index : (WS_DIALOGS.length - 1);
         const dlg = WS_DIALOGS[idx];
-        if (!dlg) return { success: false, error: 'No pending dialog at index ' + idx };
+        if (!dlg) return { success: false, error: 'No pending dialog (none in the MAIN world or the isolated world)' };
         const act = params.action || 'accept';
         if (dlg._timer) { try { clearTimeout(dlg._timer); } catch (_) {} }
         if (dlg.type === 'alert') { WS_DIALOGS.splice(idx, 1); return { success: true, handled: 'alert' }; }
@@ -455,10 +489,37 @@
       case 'scroll_and_extract': return await scrollAndExtract(params);
       case 'preload_content': return await preloadPage(params);
       case 'doctor_content': return doctorContent();
-      case 'network_log': return { note: 'network_log not available from content bridge' };
+      case 'network_log': {
+        // ★ 2026-10-01: this used to return "not available from content bridge" — a FALSE
+        // capability claim, the same class as upload_file's. startNetworkCapture and
+        // getNetworkLog are defined in this same content-script world (70-capture-and-readers),
+        // so the capability was always here; this copy just refused. Same op, and one routing
+        // path silently returned nothing.
+        if (!networkCapturing) startNetworkCapture();
+        return getNetworkLog(params.clear !== false, params.maxEntries || 50);
+      }
       case 'mermaid_export': return { note: 'mermaid_export handled by server' };
       case 'wait_for': return { note: 'wait_for not available from content bridge' };
-      case 'upload_file': return { error: 'upload_file requires the background SW (drag-and-drop DataTransfer unavailable in content world) — use the SW relay' };
+      case 'upload_file': {
+        // ★ 2026-10-01: this used to RETURN AN ERROR — "requires the background SW
+        // (drag-and-drop DataTransfer unavailable in content world)". That claim was WRONG,
+        // and it made upload_file fail outright whenever the hub routed it here: the relay
+        // path (70) implements exactly this from the SAME content-script world, which proves
+        // the capability is available. Two dispatchers, one op, one of them always erroring.
+        // ★ AWAIT IS LOAD-BEARING (the bug fixed on the other copy 2026-09-21):
+        // resolveRefHealed is ASYNC; without await, upEl is a PROMISE with no tagName /
+        // querySelector / parentElement, so locateFileInput falls through every structural
+        // branch to the proximity last resort where domCloseness(promise, candidate) scores
+        // 0 for every candidate — `best` never moves off all[0], the FIRST file input on the
+        // page. Measured on LemonSqueezy: a .zip attached to the product IMAGE input while
+        // the real files input stayed empty, reported as success:true / fileCount:1.
+        const upEl = await resolveRefHealed(params.ref);
+        const upDet = detectEditor(upEl);
+        if (upDet.kind === 'editor') {
+          return await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
+        }
+        return await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
+      }
       case 'read_clipboard': {
         try {
           const ta = document.createElement('textarea');
@@ -3828,6 +3889,12 @@
       scrollPct: Math.round(window.scrollY / Math.max(1, (document.documentElement.scrollHeight || 1) - window.innerHeight) * 100),
       scrollContainer: scrollC,
       isMainFrame: isTop,
+      // ★ ONE FRESHNESS TRUTH (2026-10-01). The relay copy used to report a HARDCODED
+      // wsVersion:'v4.6.0', which was both a hardcoded value and stale — the real build was
+      // v4.6.1. The build stamp is substituted here at build time and encodes BOTH the
+      // version and the source hash, so reporting it is the only freshness claim that
+      // cannot rot. Reported from one place so both dispatchers agree.
+      csBuild:'v4.6.1-504f7aef',
     };
   }
 
@@ -3888,9 +3955,18 @@
     let result;
     try {
       switch (type) {
-        case 'explore_page': try { result = params.incremental ? await exploreIncremental(params) : await extractActionGraph(params); } catch(e) { result = { success: false, error: 'explore_page failed: ' + e.message, stack: (e.stack||'').slice(0, 500) }; } break;
-        case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||0}); result = sag.actions; break; }   // 0 = UNBOUNDED (no caps)
-        case 'click': { const before=getQuickState(); nativeClick(await resolveRefHealed(params.ref)); result={success:true,ref:params.ref,beforeState:before,afterState:getQuickState()}; break; }
+        case 'explore_page': try {
+          // ★ MATCHES the direct-WS copy (2026-10-01). This used to branch on
+          // params.incremental itself and hand extractActionGraph the RAW params — but
+          // extractActionGraph already dispatches to exploreIncremental when
+          // options.incremental is set (50-candidates.js), so the branch was a duplicate of
+          // logic that lives in one place, and passing raw params silently DROPPED the
+          // explicit defaults (includeContent !== false, full, includeHidden) that the other
+          // copy sets. Same op, one implementation of the incremental decision.
+          result = await extractActionGraph({ full: !!params.full, includeContent: params.includeContent !== false, includeHidden: !!params.includeHidden, frameId: params.frameId, incremental: !!params.incremental, maxActions: params.maxActions, contentMaxLen: params.contentMaxLen, settle: params.settle, quietMs: params.quietMs, fresh: params.fresh });
+        } catch(e) { result = { success: false, error: 'explore_page failed: ' + e.message, stack: (e.stack||'').slice(0, 500) }; } break;
+        case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||0,frameId:params.frameId}); result = sag.actions; break; }   // 0 = UNBOUNDED (no caps)
+        case 'click': { const before=getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); result={success:true,ref:params.ref,...(cr && typeof cr === 'object' ? cr : {}),beforeState:before,afterState:getQuickState()}; break; }
                 case 'type_text': { result = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); result.ref = params.ref; break; }
                 case 'select_option': { result=nativeSelect(await resolveRefHealed(params.ref),params.value, params.clearAll); result.ref=params.ref; break; }
                 case 'form_special': { result=await nativeSetSpecial(await resolveRefHealed(params.ref), params.value); result.ref=params.ref; break; }
@@ -3935,8 +4011,21 @@
         case 'tab_contents': result=getTabContents(params.ref); break;
         case 'accordion_contents': result=getAccordionContents(params.ref); break;
         case 'action_preview': result=previewAction(params.ref); break;
-        case 'form_state': { const sag = await extractActionGraph({includeContent:false,full:true}); result=params.formRef?(sag.forms.find((f)=>f.ref===params.formRef)||{error:'Form not found'}):sag.forms; break; }
-        case 'page_state': { result={url:window.location.href,title:document.title,readyState:document.readyState,hasModal:!!document.querySelector('[role="dialog"][aria-modal="true"],dialog[open],.modal:not([hidden])'),hasCaptcha:!!document.querySelector('iframe[src*="captcha"],.g-recaptcha,#captcha'),isLoading:!!document.querySelector('[aria-busy="true"],.loading,.spinner'),pendingDialogs:WS_DIALOGS.slice(-5).map(function(d){return {type:d.type,message:d.message};}).concat(readMainWorldDialogs().slice(-5)),recentDialogs:readRecentMainWorldDialogs().slice(-8),hasBeforeUnload:WS_HAS_BEFOREUNLOAD,viewport:{w:window.innerWidth,h:window.innerHeight},scrollPct:Math.round(window.scrollY/Math.max(1,(document.documentElement.scrollHeight||1)-window.innerHeight)*100),wsVersion:'v4.6.0',csBuild:'v4.6.1-339c0234',wsDebug:(window.__WEBSENSE_DEBUG__||[]).slice(-30),answerTabId:(sender && sender.tab && sender.tab.id)||null,answerFrameId:(sender&&sender.frameId)||null,answerTop:!!(window.self===window.top)}; break; }
+        case 'form_state': result = getFormState(params.formRef, params.frameId); break;   // ★ 2026-10-01: was an inline extractActionGraph({full:true}) + find — a second implementation of a dedicated function that already exists (20-dom-semantics getFormState), and a much more expensive one (a full SAG to answer a form question)
+        case 'page_state': {
+          // ★ ONE IMPLEMENTATION (2026-10-01). This was a 977-char INLINE COPY of the state
+          // reader, and it had already drifted from the canonical getPageState(): a stale
+          // hardcoded wsVersion, and narrower hasCaptcha / isLoading selectors missing
+          // iframe[src*="recaptcha"] and .loader. The 2026-09-25 MAIN-world dialog fix also
+          // landed in getPageState() only — which is exactly how two copies of one op end up
+          // disagreeing about pendingDialogs. Now: read the state from ONE place, then add
+          // only what this dispatcher alone can know (the sender's routing identity).
+          const ps = getPageState();
+          ps.answerTabId = (sender && sender.tab && sender.tab.id) || null;
+          ps.answerFrameId = (sender && sender.frameId) || null;
+          result = ps;
+          break;
+        }
         case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
         case 'read_content': result = readContent(params); break;
         case 'dump_markdown': result = nativeDumpMarkdown(params); break;
