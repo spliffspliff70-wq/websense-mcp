@@ -738,7 +738,21 @@ async function handleTabControl(action, payload) {
         await new Promise((r) => setTimeout(r, 25));
       }
       await cmd('mouseReleased', { x: t.x, y: t.y, buttons: 0, clickCount: 1 });
-      return { success: true, mode: 'trusted', via: 'mousePressed>6x mouseMoved>mouseReleased', from: s, to: t, emulation: prep.emulation };
+      // ★ COMPLETE THE DRAG SESSION (2026-10-01). Trusted mouse input STARTS a drag (dragstart,
+      // dragenter, dragover all fire trusted) but Chrome's drag session does not COMPLETE from
+      // injected mouse events, so NO drop is dispatched — measured on the fixture: the trusted
+      // sequence carried dragover and never drop. Input.dispatchDragEvent is the documented way to
+      // deliver it, and the protocol requires setInterceptDrags first.
+      let dropped = null;
+      try {
+        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.setInterceptDrags', { enabled: true });
+        const dd = { items: [{ mimeType: 'text/plain', data: 'ws' }], files: [], dragOperationsMask: 1 };
+        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'dragEnter', x: t.x, y: t.y, data: dd });
+        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'dragOver', x: t.x, y: t.y, data: dd });
+        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'drop', x: t.x, y: t.y, data: dd });
+        dropped = true;
+      } catch (e) { dropped = String((e && e.message) || e); }
+      return { success: true, mode: 'trusted', via: 'mousePressed>6x mouseMoved>mouseReleased', dropped: dropped, from: s, to: t, emulation: prep.emulation };
     }
     case 'capture_visible_tab': {
       // Phase 4 (2026-08-15): browser_screenshot tool. chrome.tabs.captureVisibleTab
