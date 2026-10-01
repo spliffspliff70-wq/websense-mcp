@@ -6,7 +6,7 @@ Thanks for your interest in contributing! 🎉
 
 1. **Fork** the repo and create your branch from `main`
 2. **Install**: `npm install`
-3. **Test**: `npm test` — the full suite must pass (currently 133)
+3. **Test**: `npm test` — the full suite must pass (currently 170)
 4. **Syntax check** your changes: `node --check <file>` for every touched `.js` file
 5. **Content-script changes**: edit `extension/cs-src/*.js`, then run `node tools/build-cs.mjs`.
    Never hand-edit `extension/websense-cs.js` — it is generated, and a test fails if the

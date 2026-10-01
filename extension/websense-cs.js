@@ -179,6 +179,45 @@ function resolveMainWorldDialog(id, action, value) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ handleReadClipboard — THE ONE implementation, hoisted next to the dialog readers (2026-10-01)
+//
+// WHY IT LIVES HERE. It used to be declared INSIDE the switch block of 70's
+// handleMessageAsync. A `function` declaration in a block is BLOCK-SCOPED under
+// 'use strict' (which the built artifact uses), so it was visible only to the case that
+// sat in the same block — exactly the trap that made readMainWorldDialogs invisible to 00.
+// Now that the shared dispatcher in 00 owns the read_clipboard op, the definition has to be
+// in the earliest scope of the concatenation, like the dialog readers above.
+//
+// WHAT IT DOES: navigator.clipboard.readText() needs the document focused AND the
+// clipboardRead permission; in a backgrounded tab it silently returns '' or throws
+// NotAllowedError. Fall back to execCommand('paste') into a hidden textarea, which the
+// extension's clipboardWrite permission allows without document focus. The direct-WS path
+// used to carry an execCommand-only inline duplicate of this; it is gone — one copy.
+function handleReadClipboard() {
+  return (async () => {
+    let txt = null;
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        txt = await navigator.clipboard.readText();
+      }
+    } catch (e) { /* fall through to execCommand path */ }
+    if (!txt) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('paste');
+        txt = ok ? ta.value : '';
+        ta.remove();
+      } catch (e2) { txt = ''; }
+    }
+    return { success: true, text: txt || '' };
+  })();
+}
+
   // ═══ Ad-frame detection — skip the WS bridge entirely in ad iframes ═══
   // Content scripts with all_frames:true run inside Google SafeFrame / ad
   // iframes too. Those must NOT connect to the hub — they'd hijack page ops.
@@ -430,8 +469,22 @@ function resolveMainWorldDialog(id, action, value) {
     }
   }
 
-  async function wsDispatchPage(msg) {
+  // ═══ THE ONE PAGE-OP DISPATCHER (2026-10-01) ═══
+  // Every shared page op has EXACTLY ONE implementation — this switch — and the other
+  // routing path (the offscreen relay: 70-capture-and-readers.handleMessageAsync) now
+  // DELEGATES here instead of carrying a second copy. Before this, 48 ops existed in
+  // BOTH switches and had already drifted, e.g.:
+  //   · action_preview called `getActionPreview` — a function defined NOWHERE, so that op
+  //     threw a ReferenceError on every direct-WS call,
+  //   · extract_text returned {text} here but a bare string on the relay,
+  //   · ping answered {pong,ts} here and {pong,url} on the relay,
+  //   · get_status answered a rich union here and a thin object with a stale hardcoded
+  //     wsVersion on the relay.
+  // One copy cannot drift from itself. `ctx` carries ONLY what each path alone can know
+  // (the relay's sender identity) — it is never a second copy of an op body.
+  async function wsDispatchPage(msg, ctx) {
     var params = msg;
+    ctx = ctx || {};
     switch (msg.type) {
       case 'explore_page': return await extractActionGraph({ full: !!params.full, includeContent: params.includeContent !== false, includeHidden: !!params.includeHidden, frameId: params.frameId, incremental: !!params.incremental, maxActions: params.maxActions, contentMaxLen: params.contentMaxLen, settle: params.settle, quietMs: params.quietMs, fresh: params.fresh });
       // Only reached when the hub routes here (a live direct bridge). Relay to the
@@ -462,15 +515,29 @@ function resolveMainWorldDialog(id, action, value) {
       case 'console_log': if (!consoleCapturing) startConsoleCapture(); return getConsoleLog(params.clear !== false, params.maxEntries || 100);
       case 'copy_to_clipboard': return nativeCopyToClipboard(params.text);
       case 'form_state': return getFormState(params.formRef, params.frameId);
-      case 'action_preview': return getActionPreview(params.ref);
+      case 'action_preview': return previewAction(params.ref);   // ★ 2026-10-01: was getActionPreview — a function that exists NOWHERE in the bundle, so action_preview threw a ReferenceError on this path while the relay path worked. Found by the dispatcher-unification audit; pin it in the test.
       // Pass the RAW ref — these readers resolve internally (70-capture).
       // Pre-resolving here made them re-resolve an Element via the string-keyed
       // ref map → always null → "Element not found" on this direct-WS path.
       case 'dropdown_options': return getDropdownOptions(params.ref);
       case 'tab_contents': return getTabContents(params.ref);
       case 'accordion_contents': return getAccordionContents(params.ref);
-      case 'page_state': return getPageState(params.frameId);
-      case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; var et=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; et+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; return { text: et }; }
+      case 'page_state': {
+        // ★ ONE implementation — the canonical getPageState() in 70-capture. ctx adds ONLY
+        // the relay path's routing identity (its sender tab/frame), which no other
+        // dispatcher can know. It is NOT a second copy of the reader: before this the relay
+        // carried a 977-char inline copy that had already drifted (stale wsVersion, narrower
+        // hasCaptcha/isLoading selectors) and the 2026-09-25 MAIN-world dialog fix landed in
+        // getPageState() only — which is exactly how two copies of one op end up disagreeing
+        // about pendingDialogs.
+        const ps = getPageState(params.frameId);
+        if (ctx.sender) {
+          ps.answerTabId = (ctx.sender.tab && ctx.sender.tab.id) || null;
+          ps.answerFrameId = ctx.sender.frameId || null;
+        }
+        return ps;
+      }
+      case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; let et=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; et+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; return et; }   // bare string, NOT {text}: the server's read handler tests `typeof raw.data === 'string'` to run goal-summarization, and the relay copy always returned a string
       case 'read_content': return readContent(params);
       case 'dump_markdown': return nativeDumpMarkdown(params);
       case 'resolve_ref': {
@@ -488,7 +555,7 @@ function resolveMainWorldDialog(id, action, value) {
       case 'screen_center': return screenCenter(params.ref || params.selector || '');
       case 'layout_relation': return layoutRelation(params.refA || '', params.refB || '');
       case 'get_events': return getEvents(params.since);
-      case 'ping': return { pong: true, ts: Date.now() };
+      case 'ping': return { pong: true, ts: Date.now(), url: location.href };   // union: the relay reported url, the direct path reported ts — now one shape
       case 'get_status': {
         // ★ 2026-10-01: this was a STATIC STUB — hubConnected:true, pageConnected:true,
         // hardcoded. It claimed a healthy bridge regardless of reality, and it carried none
@@ -592,16 +659,7 @@ function resolveMainWorldDialog(id, action, value) {
         }
         return await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
       }
-      case 'read_clipboard': {
-        try {
-          const ta = document.createElement('textarea');
-          ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;';
-          document.body.appendChild(ta); ta.focus(); ta.select();
-          const ok = document.execCommand('paste');
-          ta.remove();
-          return { success: true, text: ok ? ta.value : '' };
-        } catch (e) { return { success: false, error: 'clipboard read failed: ' + (e.message || e) }; }
-      }
+      case 'read_clipboard': return await handleReadClipboard();   // ★ 2026-10-01: was an execCommand-only inline copy; handleReadClipboard tries navigator.clipboard.readText() FIRST then falls back, and is now the ONE implementation for both paths
       case 'reset_session': wsReady = true; return { success: true };
       default: return { error: 'Unknown content action: ' + msg.type };
     }
@@ -4024,7 +4082,7 @@ function resolveMainWorldDialog(id, action, value) {
       // v4.6.1. The build stamp is substituted here at build time and encodes BOTH the
       // version and the source hash, so reporting it is the only freshness claim that
       // cannot rot. Reported from one place so both dispatchers agree.
-      csBuild:'v4.6.1-7db2a261',
+      csBuild:'v4.6.1-d57fb3a3',
     };
   }
 
@@ -4085,215 +4143,9 @@ function resolveMainWorldDialog(id, action, value) {
     let result;
     try {
       switch (type) {
-        case 'explore_page': try {
-          // ★ MATCHES the direct-WS copy (2026-10-01). This used to branch on
-          // params.incremental itself and hand extractActionGraph the RAW params — but
-          // extractActionGraph already dispatches to exploreIncremental when
-          // options.incremental is set (50-candidates.js), so the branch was a duplicate of
-          // logic that lives in one place, and passing raw params silently DROPPED the
-          // explicit defaults (includeContent !== false, full, includeHidden) that the other
-          // copy sets. Same op, one implementation of the incremental decision.
-          result = await extractActionGraph({ full: !!params.full, includeContent: params.includeContent !== false, includeHidden: !!params.includeHidden, frameId: params.frameId, incremental: !!params.incremental, maxActions: params.maxActions, contentMaxLen: params.contentMaxLen, settle: params.settle, quietMs: params.quietMs, fresh: params.fresh });
-        } catch(e) { result = { success: false, error: 'explore_page failed: ' + e.message, stack: (e.stack||'').slice(0, 500) }; } break;
-        case 'discover_actions': { const sag = await extractActionGraph({includeContent:false,full:false,includeHidden:false,maxActions:params.maxActions||0,frameId:params.frameId}); result = sag.actions; break; }   // 0 = UNBOUNDED (no caps)
-        case 'click': { const before=getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); result={success:true,ref:params.ref,...(cr && typeof cr === 'object' ? cr : {}),beforeState:before,afterState:getQuickState()}; break; }
-                case 'type_text': { result = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); result.ref = params.ref; break; }
-                case 'select_option': { result=nativeSelect(await resolveRefHealed(params.ref),params.value, params.clearAll); result.ref=params.ref; break; }
-                case 'form_special': { result=await nativeSetSpecial(await resolveRefHealed(params.ref), params.value); result.ref=params.ref; break; }
-                case 'toggle': { result=nativeToggle(await resolveRefHealed(params.ref)); result.ref=params.ref; break; }
-                case 'scroll': result=nativeScroll(params.direction,params.amount||1,params.ref); break;
-                case 'scroll_to': result=nativeScrollTo(params.y); break;
-                case 'scroll_into_view': result=nativeScrollIntoView(await resolveRefHealed(params.ref)); break;
-                case 'press_key': result=nativePressKeyEnhanced(params.key, params.ref, params.modifiers); break;
-                case 'evaluate': result=nativeEvaluate(params.script); break;
-                case 'evaluate_safe': result=nativeEvaluateSafe(params.query || {}); break;
-                case 'type_many': result=await nativeTypeMany(params.fields); break;
-                case 'hover': result=nativeHover(await resolveRefHealed(params.ref)); break;
-                case 'right_click': result=nativeRightClick(await resolveRefHealed(params.ref)); break;
-                case 'drag_drop': result=nativeDragDrop(await resolveRefHealed(params.fromRef), await resolveRefHealed(params.toRef)); break;
-                case 'click_xy': result=nativeClickXY(params.x, params.y, params.ref, params.button); break;
-        case 'copy_to_clipboard': result=nativeCopyToClipboard(params.text); break;
-        case 'upload_file': {
-          // v4: editor targets get the paste strategy; input/dropzone targets
-          // keep the classic strategies.
-          // AWAIT IS LOAD-BEARING (bug fixed 2026-09-21). resolveRefHealed is
-          // ASYNC; without await, upEl was a PROMISE. It has no tagName /
-          // querySelector / parentElement, so locateFileInput fell through every
-          // structural branch to the proximity last resort — where
-          // domCloseness(promise, candidate) scores 0 for EVERY candidate, so
-          // `best` never moved off all[0]: the FIRST file input on the page.
-          // Measured on LemonSqueezy: a .zip repeatedly attached to the product
-          // IMAGE input while the real files input stayed empty, and the call
-          // still reported success:true / fileCount:1 / preview-visible — i.e.
-          // the ref was silently ignored and the wrong field was corrupted.
-          const upEl = await resolveRefHealed(params.ref);
-          const upDet = detectEditor(upEl);
-          if (upDet.kind === 'editor') {
-            result = await nativeUploadPasteIntoEditor(upEl, params.fileContent, params.fileName, params.mimeType);
-          } else {
-            result = await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
-          }
-          break;
-        }
-        case 'network_log': if (!networkCapturing) startNetworkCapture(); result=getNetworkLog(params.clear !== false, params.maxEntries || 50); break;
-        case 'console_log': if (!consoleCapturing) startConsoleCapture(); result=getConsoleLog(params.clear !== false, params.maxEntries || 100); break;
-        case 'dropdown_options': result=getDropdownOptions(params.ref); break;
-        case 'tab_contents': result=getTabContents(params.ref); break;
-        case 'accordion_contents': result=getAccordionContents(params.ref); break;
-        case 'action_preview': result=previewAction(params.ref); break;
-        case 'form_state': result = getFormState(params.formRef, params.frameId); break;   // ★ 2026-10-01: was an inline extractActionGraph({full:true}) + find — a second implementation of a dedicated function that already exists (20-dom-semantics getFormState), and a much more expensive one (a full SAG to answer a form question)
-        case 'page_state': {
-          // ★ ONE IMPLEMENTATION (2026-10-01). This was a 977-char INLINE COPY of the state
-          // reader, and it had already drifted from the canonical getPageState(): a stale
-          // hardcoded wsVersion, and narrower hasCaptcha / isLoading selectors missing
-          // iframe[src*="recaptcha"] and .loader. The 2026-09-25 MAIN-world dialog fix also
-          // landed in getPageState() only — which is exactly how two copies of one op end up
-          // disagreeing about pendingDialogs. Now: read the state from ONE place, then add
-          // only what this dispatcher alone can know (the sender's routing identity).
-          const ps = getPageState();
-          ps.answerTabId = (sender && sender.tab && sender.tab.id) || null;
-          ps.answerFrameId = (sender && sender.frameId) || null;
-          result = ps;
-          break;
-        }
-        case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; result=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; result+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; break; }
-        case 'read_content': result = readContent(params); break;
-        case 'dump_markdown': result = nativeDumpMarkdown(params); break;
-        case 'resolve_ref': {
-          const el = resolveRef(params.ref);
-          if (!el) result = { success: false, error: 'ref not found: ' + params.ref };
-          else {
-            const loc = buildLocator(el);
-            result = { success: true, found: true, ref: params.ref, tag: el.tagName.toLowerCase(),
-              text: (el.innerText || el.textContent || '').trim().slice(0, 80),
-              value: (el.value != null ? el.value : '').toString().slice(0, 80),
-              locator: loc && loc.length ? loc[0] : null, connected: el.isConnected };
-          }
-          break;
-        }
-        case 'page_diff': result = getPageDiff(); break;
-        case 'find_intent': result = findIntent(params.intent || ''); break;
-        case 'geometry': result = getGeometry(params.ref || params.selector || ''); break;
-        case 'screen_center': result = screenCenter(params.ref || params.selector || ''); break;
-        case 'layout_relation': result = layoutRelation(params.refA || '', params.refB || ''); break;
-        case 'get_events': result = getEvents(params.since); break;
-        case 'explore_intent': result = exploreIntent(params.goal || ''); break;
-        case 'read_selector': {
-          try {
-            const el = deepQuery(params.selector);
-            if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
-            else result = { success: true, selector: params.selector, text: (el.innerText || el.textContent || '').trim().slice(0, 2000), value: (el.value != null ? el.value : null) };
-          } catch (e) { result = { success: false, error: e.message }; }
-          break;
-        }
-        case 'write_selector': {
-          try {
-            const el = deepQuery(params.selector);
-            if (!el) result = { success: false, error: 'selector not found: ' + params.selector };
-            else {
-              const v = String(params.value == null ? '' : params.value);
-              const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : (el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype);
-              const setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
-              if (setter) setter.call(el, v); else el.value = v;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-              result = { success: true, selector: params.selector, set: v, actual: el.value };
-            }
-          } catch (e) { result = { success: false, error: e.message }; }
-          break;
-        }
-        case 'scroll_and_extract': result = await scrollAndExtract(params); break;
-        case 'preload_content': result = await preloadPage(params); break;
-        case 'doctor_content': result = doctorContent(); break;
-        case 'get_status': result={connected:true,url:window.location.href,title:document.title,wsVersion:'v2-logged',pendingDialogs:WS_DIALOGS.length + readMainWorldDialogs().length}; break;
-        case 'ping': result={pong:true,url:window.location.href}; break;
-        case 'handle_dialog': {
-          // 2026-09-25: try the MAIN-world queue FIRST — that is where the PAGE's
-          // own dialogs land. The isolated-world queue is the fallback for
-          // dialogs raised by other extension-injected code.
-          var act0 = params.action || 'accept';
-          var mwList = readMainWorldDialogs();
-          if (mwList.length) {
-            var mIdx = (params.index !== undefined && params.index !== null) ? params.index : (mwList.length - 1);
-            var mw = mwList[mIdx];
-            if (!mw) { result = { success: false, error: 'No pending MAIN-world dialog at index ' + mIdx }; break; }
-            var mwReply = await resolveMainWorldDialog(mw.id, act0, params.value);
-            result = {
-              success: true, handled: mw.type, source: 'main_world', id: mw.id,
-              message: mw.message,
-              value: (mw.type === 'confirm') ? (act0 === 'dismiss' ? false : true)
-                : (mw.type === 'prompt' ? (params.value != null ? params.value : mw.defaultValue) : undefined),
-              hookReply: mwReply,
-            };
-            break;
-          }
-          var idx = (params.index !== undefined && params.index !== null) ? params.index : (WS_DIALOGS.length - 1);
-          var dlg = WS_DIALOGS[idx];
-          if (!dlg) { result = { success: false, error: 'No pending dialog (none in the MAIN world or the isolated world)' }; break; }
-          var act = params.action || 'accept';
-          // Phase 3 (2026-08-15): clear the auto-resolve timer — the agent is
-          // resolving explicitly, so the 30s fallback must not double-fire.
-          if (dlg._timer) { try { clearTimeout(dlg._timer); } catch (_) {} }
-          if (dlg.type === 'alert') { WS_DIALOGS.splice(idx, 1); result = { success: true, handled: 'alert' }; }
-          else if (dlg.type === 'confirm') { var cv = (act === 'dismiss') ? false : true; if (dlg._res) dlg._res(cv); WS_DIALOGS.splice(idx, 1); result = { success: true, handled: 'confirm', value: cv }; }
-          else if (dlg.type === 'prompt') { var pv = (act === 'dismiss') ? null : (params.value !== undefined && params.value !== null ? params.value : dlg.defaultValue); if (dlg._res) dlg._res(pv); WS_DIALOGS.splice(idx, 1); result = { success: true, handled: 'prompt', value: pv }; }
-          break;
-        }
-  // ═══ MAIN-WORLD DIALOGS — readMainWorldDialogs / readRecentMainWorldDialogs /
-  // resolveMainWorldDialog are DEFINED ONCE, at the top of 00-bridge-and-transport.js.
-  // They used to live here, and 00's handle_dialog/get_status could not see them:
-  // handle_dialog failed with "readMainWorldDialogs is not defined" while get_status
-  // swallowed the same ReferenceError inside a try/catch and reported pendingDialogs: []
-  // — a wrong answer indistinguishable from "no dialogs". Hoisting them to the first
-  // position in the concatenation makes them visible to every dispatcher.
-  // ═══
-  // Dialogs that already fired and were auto-answered. alert() is synchronous,
-  // so the page continues the moment it is raised — the dialog can never still
-  // be "pending" when an agent looks. Without this history the agent had no way
-  // to know a confirmation prompt had appeared and been waved through, which is
-  // a silent-wrong-outcome, not just a missing feature.
-  // (readRecentMainWorldDialogs / resolveMainWorldDialog also live in 00 now.)
-  // Ask the MAIN-world hook to resolve one of its dialogs. It exposes
-  // __wsResolveDialog on window, but from the isolated world that is a
-  // DIFFERENT global — so go through a CustomEvent the hook listens for.
-  // (resolveMainWorldDialog lives in 00 now — see the note above.)
-  function handleReadClipboard() {
-  // navigator.clipboard.readText() needs the document focused AND the
-  // clipboardRead permission; in a backgrounded tab it silently returns
-  // '' or throws NotAllowedError. Fall back to execCommand('paste')
-  // into a hidden textarea, which the extension's clipboardWrite
-  // permission allows without document focus.
-  return (async () => {
-    let txt = null;
-    try {
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        txt = await navigator.clipboard.readText();
-      }
-    } catch (e) { /* fall through to execCommand path */ }
-    if (!txt) {
-      try {
-        const ta = document.createElement('textarea');
-        ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;';
-        document.body.appendChild(ta);
-        ta.focus();
-        ta.select();
-        const ok = document.execCommand('paste');
-        txt = ok ? ta.value : '';
-        ta.remove();
-      } catch (e2) { txt = ''; }
-    }
-    return { success: true, text: txt || '' };
-  })();
-}
-
-        case 'read_clipboard': {
-          result = await handleReadClipboard();
-          break;
-        }
-        // P2 (2026-08-31): tab-ops relay fallback — when the offscreen doc is
-        // stale/down, hub tab ops fall to a content script which forwards via
-        // the SW. cookie_op/download_op/get_active_tab must relay to the SW's
-        // handleTabControl instead of hitting the default error.
+        // ── Ops ONLY this route can serve. These need the offscreen document or the
+        //    service worker (tab/cookie/download control), which a page script has no
+        //    API for — so they stay here as a routing table, not an implementation.
         case 'cookie_op':
         case 'download_op':
         case 'get_active_tab':
@@ -4306,7 +4158,15 @@ function resolveMainWorldDialog(id, action, value) {
           result = await relayTabControl(type, params);
           break;
         }
-        default: result={error:'Unknown action type: '+type};
+        // ── EVERY page op: DELEGATE. This path used to carry a hand-maintained SECOND
+        //    copy of 48 ops (2026-10-01 audit: 48 in both switches, and already drifted —
+        //    action_preview called a function that exists nowhere, extract_text/ping/
+        //    get_status answered different shapes). There is now ONE implementation,
+        //    wsDispatchPage() in 00-bridge-and-transport.js; it is declared in the FIRST
+        //    file of the concatenation, so it is hoisted and visible here. `ctx` carries
+        //    only the sender identity this route alone knows.
+        default:
+          result = await wsDispatchPage(message, { sender: sender });
       }
       sendResponse({type:type+'_result',id,success:true,data:result});
     } catch(err) {

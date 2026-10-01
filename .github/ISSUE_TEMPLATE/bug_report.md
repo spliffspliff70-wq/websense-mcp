@@ -29,4 +29,4 @@ Verbatim error text or wrong behavior. If an effect was `suspected_noop` / `unve
 
 **Regression tests**
 
-Run `node test-regressions.mjs` — did they pass? (42 expected)
+Run `node test-regressions.mjs` — did they pass? (170 expected)

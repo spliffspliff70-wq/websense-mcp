@@ -23,5 +23,5 @@ jobs:
           node --check extension/websense-cs.js
           node --check extension/background.js
           node --check extension/offscreen.js
-      - name: Regression tests
-        run: node test-regressions.mjs
+      - name: Regression tests (incl. backtick precheck + doc-drift guards)
+        run: npm test

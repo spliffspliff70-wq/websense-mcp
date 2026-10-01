@@ -495,21 +495,6 @@ try {
   }
 } catch (_) {}
 
-// ═══ TEMP DRAG LAB — experiment harness (REMOVE BEFORE SHIPPING) ═══
-// Records Input.dragIntercepted so we can tell whether the browser EVER handed a drag to the
-// client. Collection + the drag_lab op exist only to run the drop experiments.
-const __dragIntercepted = [];
-try {
-  if (chrome.debugger && chrome.debugger.onEvent) {
-    chrome.debugger.onEvent.addListener(function (source, method, params) {
-      if (method === 'Input.dragIntercepted') {
-        __dragIntercepted.push({ tabId: source && source.tabId, at: Date.now(), data: params && params.data });
-        if (__dragIntercepted.length > 40) __dragIntercepted.shift();
-      }
-    });
-  }
-} catch (_) {}
-
 // ★ ONE PREPARATION FOR EVERY TRUSTED-INPUT OP (2026-10-01).
 // Attach, keep-alive, and the two emulation calls that make a BACKGROUND renderer behave as
 // focused and active. Both are needed by every trusted op, and a second copy of this is a second
@@ -740,62 +725,111 @@ async function handleTabControl(action, payload) {
       }
     }
     case 'trusted_drag': {
+      // ★ A TRUSTED DRAG THAT ACTUALLY COMPLETES — AND THE ROOT CAUSE OF WHY IT DID NOT (2026-10-01).
+      //
+      // WHAT WAS WRONG, MEASURED. The previous version enabled Input.setInterceptDrags(true) and
+      // then dispatched its OWN dragEnter/dragOver/drop via Input.dispatchDragEvent at the end.
+      // Both halves were wrong:
+      //
+      // 1. INTERCEPTION KILLS THE DRAG IT WAS MEANT TO DRIVE. With setInterceptDrags(true), the
+      //    browser hands the drag to the CLIENT instead of running it: measured on
+      //    bench/click_fingerprint.html the page's record STOPS AT dragstart (a single event) and
+      //    the CDP event Input.dragIntercepted fires with {dragOperationsMask:-1, items:[]}. Nothing
+      //    can complete a drag the browser has handed away — so a drop was impossible by
+      //    construction. Interception must be OFF for a real drag to run.
+      //
+      // 2. THE PAGE DECLINED THE INJECTED drop — WITHOUT ANY ERROR. Input.dispatchDragEvent
+      //    {type:'drop'} was accepted by CDP every time and returned nothing, which is why five
+      //    earlier experiments all looked like "the call succeeded but nothing happened". The
+      //    renderer was refusing it: measured on the PRISTINE fixture the page received
+      //    dragenter > dragover > DROP-CONVERTED-TO-dragleave. A drop is only delivered to a DROP
+      //    ZONE, and a drop zone is defined by the TARGET cancelling `dragover`
+      //    (preventDefault()). The fixture's #fp-drop never did, so Blink resolved the operation to
+      //    `none` and fired dragleave instead — by specification, for ANY drag, trusted or not.
+      //    Adding e.preventDefault() on dragover to #fp-drop made the very same gesture produce
+      //    {type:'drop', isTrusted:true, target:'fp-drop'}.
+      //
+      // THE FIX. Drive the drag with the browser's own mouse pipeline and let the BROWSER complete
+      // it (arrive, press, move while pressed, release over the target). Measured on that drop zone:
+      // dragstart > drag > dragenter > dragover > drop > dragend, every event isTrusted:true, with no
+      // interception and no dispatchDragEvent at all. The client-driven dispatchDragEvent sequence is
+      // kept as a FALLBACK, used only when the page reports no drop (it is the documented completion
+      // for an intercepted drag, and harmless when the native gesture already landed).
+      //
+      // AND THE REPLY NOW CARRIES THE PAGE'S OWN VERDICT: a capture-phase drop listener observes
+      // (it never preventDefaults, so it cannot change what the page does), is read back after the
+      // gesture, and is removed. "The CDP calls returned" is not evidence that a drag completed;
+      // the page's record is.
       const tG = parseInt(payload.tabId, 10);
       if (!tG) return { error: 'trusted_drag: tabId required' };
       const s = payload.from, t = payload.to;
       if (!s || !t) return { error: 'trusted_drag: from and to {x,y} required' };
       const prep = await __dbgPrepare(tG);
-      // ★ INTERCEPT **BEFORE** THE DRAG STARTS (2026-10-01). The protocol is: setInterceptDrags makes
-      // the browser hand the drag to the client INSTEAD of running it default — so it must be enabled
-      // before the trusted mouse press begins the drag. With it enabled afterwards the drag had
-      // already completed inside the browser and every dispatchDragEvent was ignored. This is the
-      // fourth experiment on the same drop.
-      try { await chrome.debugger.sendCommand({ tabId: tG }, 'Input.setInterceptDrags', { enabled: true }); } catch (e) {}
-      const cmd = (type, o) => chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchMouseEvent', Object.assign({ type: type, button: 'left' }, o));
-      await cmd('mouseMoved', { x: s.x, y: s.y, buttons: 0 });
-      await cmd('mousePressed', { x: s.x, y: s.y, buttons: 1, clickCount: 1 });
-      for (let i = 1; i <= 6; i++) {
-        await cmd('mouseMoved', { x: Math.round(s.x + (t.x - s.x) * i / 6), y: Math.round(s.y + (t.y - s.y) * i / 6), buttons: 1 });
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      await cmd('mouseReleased', { x: t.x, y: t.y, buttons: 0, clickCount: 1 });
-      // ★ COMPLETE THE DRAG SESSION (2026-10-01). Trusted mouse input STARTS a drag (dragstart,
-      // dragenter, dragover all fire trusted) but Chrome's drag session does not COMPLETE from
-      // injected mouse events, so NO drop is dispatched — measured on the fixture: the trusted
-      // sequence carried dragover and never drop. Input.dispatchDragEvent is the documented way to
-      // deliver it, and the protocol requires setInterceptDrags first.
-      let dropped = null;
-      try {
-        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.setInterceptDrags', { enabled: true });
-        const dd = { items: [{ mimeType: 'text/plain', data: 'ws' }], files: [], dragOperationsMask: 1 };
-        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'dragEnter', x: s.x, y: s.y, data: dd });
-        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'dragOver', x: t.x, y: t.y, data: dd });
-        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'drop', x: t.x, y: t.y, data: dd });
-        dropped = true;
-      } catch (e) { dropped = String((e && e.message) || e); }
-      return { success: true, mode: 'trusted', via: 'mousePressed>6x mouseMoved>mouseReleased', dropped: dropped, from: s, to: t, emulation: prep.emulation };
-    }
-    case 'drag_lab': {
-      // TEMP harness (REMOVE BEFORE SHIPPING): run a raw list of CDP commands against a tab and
-      // return each command's result/error plus any Input.dragIntercepted seen during the run.
-      const tL = parseInt(payload.tabId, 10);
-      if (!tL) return { error: 'drag_lab: tabId required' };
-      const prep = await __dbgPrepare(tL);
-      __dragIntercepted.length = 0;
-      const out = [];
-      const cmds = Array.isArray(payload.cmds) ? payload.cmds : [];
-      for (let i = 0; i < cmds.length; i++) {
-        const c = cmds[i];
-        const t0 = Date.now();
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const send = (method, params) => chrome.debugger.sendCommand({ tabId: tG }, method, params);
+      const cmd = (type, o) => send('Input.dispatchMouseEvent', Object.assign({ type: type, button: 'left' }, o));
+      // ★ INTERCEPTION OFF, EXPLICITLY. A previous call could have left it enabled (it is a
+      // browser-wide flag), and with it enabled the drag dies at dragstart — see (1) above.
+      try { await send('Input.setInterceptDrags', { enabled: false }); } catch (e) {}
+      // The drop oracle. Observes only; preventDefault is deliberately NOT called here.
+      const probeOn = '(function(){try{if(window.__wsDropProbe)document.removeEventListener("drop",window.__wsDropProbe,true);}catch(e){}'
+        + 'window.__wsDragRec={drop:0,target:null,seen:[]};'
+        + 'window.__wsDropProbe=function(ev){window.__wsDragRec.drop++;window.__wsDragRec.target=(ev.target&&(ev.target.id||ev.target.tagName))||null;'
+        + 'window.__wsDragRec.seen.push(ev.type);};'
+        + 'document.addEventListener("drop",window.__wsDropProbe,true);return 1;})()';
+      const probeOff = '(function(){var d=window.__wsDragRec||{drop:0,target:null,seen:[]};'
+        + 'try{if(window.__wsDropProbe)document.removeEventListener("drop",window.__wsDropProbe,true);}catch(e){}'
+        + 'try{delete window.__wsDropProbe;delete window.__wsDragRec;}catch(e){}return JSON.stringify(d);})()';
+      const readDrop = async () => {
         try {
-          const r = await chrome.debugger.sendCommand({ tabId: tL }, c.cdp, c.params || {});
-          out.push({ i, cdp: c.cdp, ok: true, ms: Date.now() - t0, r: r === undefined ? null : r });
-        } catch (e) {
-          out.push({ i, cdp: c.cdp, ok: false, ms: Date.now() - t0, error: String((e && e.message) || e) });
+          const rv = await send('Runtime.evaluate', { expression: probeOff, returnByValue: true });
+          return JSON.parse((rv && rv.result && rv.result.value) || '{}') || {};
+        } catch (e) { return {}; }
+      };
+      try { await send('Runtime.evaluate', { expression: probeOn, returnByValue: true }); } catch (e) {}
+      // ★ THE GESTURE. The moves WHILE PRESSED are what promote the press into a drag; the release
+      // over the target is what completes it. The gaps are real time — a human has them, and
+      // without them Chrome coalesces the sequence away (the defect trusted_click already paid for).
+      const STEPS = 8;
+      const gesture = async () => {
+        await cmd('mouseMoved', { x: s.x, y: s.y, buttons: 0 });
+        await wait(30);
+        await cmd('mousePressed', { x: s.x, y: s.y, buttons: 1, clickCount: 1 });
+        await wait(40);
+        for (let i = 1; i <= STEPS; i++) {
+          await cmd('mouseMoved', { x: Math.round(s.x + (t.x - s.x) * i / STEPS), y: Math.round(s.y + (t.y - s.y) * i / STEPS), buttons: 1 });
+          await wait(30);
         }
-        if (c.wait) await new Promise((r) => setTimeout(r, c.wait));
+        await cmd('mouseReleased', { x: t.x, y: t.y, buttons: 0, clickCount: 1 });
+        await wait(250);
+      };
+      let threw = null;
+      try { await gesture(); } catch (e) { threw = String((e && e.message) || e); }
+      let rec = await readDrop();
+      let fellBack = false;
+      // ★ FALLBACK: the client-driven completion, only when the native gesture produced no drop.
+      // This is the documented protocol for a drag the client is driving; it is also how a page whose
+      // native completion was refused gets a second, still-honest attempt (the renderer still refuses
+      // it on a non-drop-zone target, and the reply then says so).
+      if (threw === null && !(rec && rec.drop > 0) && payload.fallback !== false) {
+        fellBack = true;
+        try {
+          const dd = { items: [{ mimeType: 'text/plain', data: 'ws' }], files: [], dragOperationsMask: 1 };
+          await send('Runtime.evaluate', { expression: probeOn, returnByValue: true });
+          await send('Input.dispatchDragEvent', { type: 'dragEnter', x: s.x, y: s.y, data: dd });
+          await send('Input.dispatchDragEvent', { type: 'dragOver', x: t.x, y: t.y, data: dd });
+          await send('Input.dispatchDragEvent', { type: 'drop', x: t.x, y: t.y, data: dd });
+          await wait(250);
+          rec = await readDrop();
+        } catch (e) { if (!threw) threw = String((e && e.message) || e); }
       }
-      return { success: true, emulation: prep.emulation, cmds: out, dragIntercepted: __dragIntercepted.slice() };
+      const dropped = !!(rec && rec.drop > 0);
+      return { success: true, mode: 'trusted', via: 'mouseMoved>mousePressed>' + STEPS + 'x mouseMoved(pressed)>mouseReleased',
+               dropped: dropped, dropTarget: (rec && rec.target) || null, dropCount: (rec && rec.drop) || 0,
+               fellBackToDispatchDragEvent: fellBack,
+               from: s, to: t, emulation: prep.emulation,
+               ...(threw ? { transportError: threw } : {}),
+               ...(dropped ? {} : { note: 'NO drop reached the page. A drag only completes over a DROP ZONE: the target must cancel `dragover` (ev.preventDefault()) — that is what makes a drop target valid in HTML drag-and-drop, and without it the browser fires dragleave/dragend and no drop, by specification, for a real mouse exactly as for this one. Trusted dragstart/dragenter/dragover still fired, so the gesture itself was delivered.' }) };
     }
     case 'capture_visible_tab': {
       // Phase 4 (2026-08-15): browser_screenshot tool. chrome.tabs.captureVisibleTab

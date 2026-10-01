@@ -161,6 +161,32 @@ window.__drag = [];
 });
 window.__dragDump = function () { return window.__drag; };
 
+// ★ #fp-drop IS LABELLED "drop here", SO IT MUST ACTUALLY BE A DROP TARGET (2026-10-01).
+// HTML drag-and-drop only fires `drop` on a VALID DROP ZONE, and a drop zone is defined by the
+// TARGET cancelling `dragover` (ev.preventDefault()). This fixture never did — so Blink resolved the
+// drop operation to `none` and fired dragleave/dragend instead, and the page could not receive a
+// drop from ANY drag, trusted or synthetic. That is what the whole "the trusted drag never produces
+// a drop" investigation was actually measuring: a target that could not accept one. The recorder
+// above only observes (it never preventDefaults), which is exactly why it kept reporting the truth
+// — dragenter/dragover trusted, no drop — and why the tool looked broken.
+// Measured after adding exactly these listeners: the same trusted gesture records
+// dragstart > drag > dragenter > dragover > drop > dragend, every event isTrusted:true.
+['dragenter', 'dragover'].forEach(function (t) {
+  document.getElementById('fp-drop').addEventListener(t, function (ev) { ev.preventDefault(); });
+});
+// A drop that DOES something, so the completion is visible in the page and not only in the recorder.
+document.getElementById('fp-drop').addEventListener('drop', function (ev) {
+  ev.preventDefault();
+  var payload = '';
+  try { payload = ev.dataTransfer.getData('text/plain'); } catch (e) {}
+  window.__drops = (window.__drops || 0) + 1;
+  document.getElementById('fp-drop').textContent = 'dropped: ' + (payload || '(no payload)') + '  x' + window.__drops;
+});
+// A real drag carries data; the source declares it the way a real one does.
+document.getElementById('fp-drag-src').addEventListener('dragstart', function (ev) {
+  try { ev.dataTransfer.setData('text/plain', 'fp-drag-src'); ev.dataTransfer.effectAllowed = 'all'; } catch (e) {}
+});
+
 // ★ FRAME ECHO — the frame posts back when its button is clicked, so a click that LANDS inside the
 // frame is provable from the parent even if the parent's collector cannot see into the frame.
 window.addEventListener('message', function (ev) {

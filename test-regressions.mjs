@@ -1195,11 +1195,9 @@ test('upload: the upload_file case AWAITS resolveRefHealed (a Promise never reac
   // This is why the earlier PROXIMITY fix alone changed nothing in production:
   // proximity was correct, but it never received an element to measure against.
   const src = CS_SRC;
-  // IMPORTANT: the CS ships TWO 'upload_file' labels. The bridge dispatcher
-  // (00-bridge-and-transport.js) deliberately returns a "requires the SW relay"
-  // error; the REAL handler is the brace-form case in 70-capture-and-readers.js.
-  // Matching the bare label picks the stub and the assertion fails for the wrong
-  // reason — so match the brace form.
+  // ★ 2026-10-01b: there used to be TWO 'upload_file' labels (a "requires the SW relay" stub
+  // in 00 and the real handler in 70). The unification left exactly ONE — the real handler,
+  // now owned by the single dispatcher (wsDispatchPage in 00). Match it directly.
   const i = src.indexOf("case 'upload_file': {");
   assert(i !== -1, "the upload_file handler case (brace form) must exist");
   // Bound the branch by the NEXT case label rather than a fixed char count: the
@@ -1651,7 +1649,7 @@ test('no shipped source carries a literal ...[truncated] marker', () => {
 
 // ═══ DOC DRIFT: the guide must state the TRUE tool count and list every tool ═══
 // Found 2026-09-21: the guide header said "29 consolidated tools" while its own list said
-// "THE 20 TOOLS", with 31 tools registered — 11 of them undocumented. This guard makes the
+// "THE 20 TOOLS", with a 31-tool registered surface — 11 of them undocumented. This guard makes the
 // count self-enforcing so the docs cannot drift silently again.
 test('docs: the guide states the TRUE tool count and lists every registered tool', () => {
   const regs = [...SRV_SRC.matchAll(/reg\(server, '([a-z_]+)'/g)].map((m) => m[1]);
@@ -2210,59 +2208,47 @@ test('snapshot lifecycle: nothing expires on a clock; reads SELF-HEAL', () => {
     'every performed action must mark the copy dirty');
 });
 
-test('dispatchers: the two copies of a duplicated op must not drift apart', () => {
-  // ★ 2026-10-01, Ali: "make them not conflict for all we worked on and have proven to be
-  // better". Root cause (mem 994): WebSense has TWO content-script dispatchers —
+test('dispatchers: every shared op has ONE implementation, and the relay DELEGATES to it', () => {
+  // ★ 2026-10-01b, Ali: "make them not conflict for all we worked on and have proven to be
+  // better". The earlier 2026-10-01a pass closed ELEVEN live divergences by hand, in BOTH
+  // copies — which left the MECHANISM intact. Root cause (mem 994): WebSense had TWO
+  // content-script dispatchers —
   //   00-bridge-and-transport.js  wsDispatchPage     (direct WS)
   //   70-capture-and-readers.js   handleMessageAsync (offscreen relay)
-  // and 48 OPS EXIST IN BOTH, hand-maintained. Every fix must be written twice, and about
-  // half the time only one copy receives it. That mechanism produced the 2026-09-25
-  // pendingDialogs:[] bug and, when this test was written, ELEVEN live divergences.
+  // — with 48 OPS HAND-MAINTAINED IN BOTH. Every fix had to be written twice, and about half
+  // the time only one copy received it. That mechanism produced the 2026-09-25
+  // pendingDialogs:[] bug, the upload_file one-sided failure, and — when this test was
+  // rewritten — a live path whose action_preview called `getActionPreview`, a function that
+  // exists NOWHERE, so every direct-WS action_preview threw a ReferenceError.
   //
-  // This guards the SEMANTICS, not the statement form: which helpers an op calls and which
-  // params it reads. `return X` vs `result = X; break;` is not a behaviour and is ignored.
+  // The fix is STRUCTURE, not vigilance: there is now ONE implementation (wsDispatchPage in
+  // 00) that owns every page op, and the relay path keeps ONLY the tab-relay ops it alone can
+  // serve and DELEGATES the rest. This test fails the moment a second copy reappears: the
+  // overlap of case labels between the two files must be ZERO.
   const strip = (s) => s.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
-  const bodies = (file) => {
-    const src = strip(readFileSync(new URL('./extension/cs-src/' + file, import.meta.url), 'utf8'));
-    const out = {};
-    const re = /case '([a-z_0-9]+)':([\s\S]*?)(?=\n\s*case '|\n\s*default:)/g;
-    let m;
-    while ((m = re.exec(src))) out[m[1]] = m[2];
-    return out;
-  };
-  const A = bodies('00-bridge-and-transport.js');
-  const B = bodies('70-capture-and-readers.js');
+  const srcOf = (file) => strip(readFileSync(new URL('./extension/cs-src/' + file, import.meta.url), 'utf8'));
+  const A = srcOf('00-bridge-and-transport.js');
+  const B = srcOf('70-capture-and-readers.js');
+  const cases = (s) => new Set([...s.matchAll(/case '([a-z_0-9]+)'\s*:/g)].map((m) => m[1]));
 
-  // Deliberate, documented differences. Anything NOT listed must agree.
-  const INTENTIONAL = {
-    page_state: 'both call the one canonical getPageState(); the relay adds answerTabId/answerFrameId from its sender',
-    explore_page: 'same extractActionGraph call; the relay wraps it in try/catch for a structured failure',
-  };
+  const aOps = cases(A), bOps = cases(B);
+  const overlap = [...aOps].filter((k) => bOps.has(k));
+  assert.strictEqual(overlap.length, 0,
+    'a shared op must have ONE implementation; these are duplicated across BOTH dispatchers again: '
+    + overlap.join(', '));
+  assert(aOps.size > 45, 'the ONE dispatcher must own the whole page-op set, saw ' + aOps.size);
 
-  const HELPERS = /\b(native[A-Z]\w*|extractActionGraph|exploreIncremental|resolveRefHealed|resolveRef|getQuickState|getPageState|getFormState|getNetworkLog|startNetworkCapture|readMainWorldDialogs|resolveMainWorldDialog|readContent|preloadPage|scrollAndExtract|detectEditor)\b/g;
-  const PARAMS = /params\.(\w+)/g;
-  const sig = (body) => {
-    const h = new Set(), p = new Set();
-    let m;
-    HELPERS.lastIndex = 0; while ((m = HELPERS.exec(body))) h.add(m[1]);
-    PARAMS.lastIndex = 0; while ((m = PARAMS.exec(body))) p.add(m[1]);
-    return JSON.stringify([[...h].sort(), [...p].sort()]);
-  };
-
-  const shared = Object.keys(A).filter((k) => k in B).sort();
-  assert(shared.length > 40, 'the duplicated set must still be ~48 ops, saw ' + shared.length);
-
-  const drifted = [];
-  for (const op of shared) {
-    if (op in INTENTIONAL) continue;
-    if (sig(A[op]) !== sig(B[op])) drifted.push(op);
+  // The relay must DELEGATE, explicitly — and keep the ops only IT can serve.
+  assert(/result\s*=\s*await\s+wsDispatchPage\(message,\s*\{\s*sender:\s*sender\s*\}\)/.test(B),
+    'the relay path must DELEGATE to the one dispatcher, wsDispatchPage(), passing sender as ctx');
+  for (const op of ['cookie_op', 'download_op', 'get_active_tab', 'respawn_offscreen',
+                    'switch_tab', 'close_tab', 'list_frames', 'download_state', 'list_tabs']) {
+    assert(bOps.has(op), 'the relay-only op ' + op + ' must stay routed in 70');
   }
-  assert(drifted.length === 0,
-    'these duplicated ops disagree between the two dispatchers — a fix landed on one copy only: ' + drifted.join(', '));
 
-  // And the specific things that WERE broken, pinned so they cannot regress to one-sided.
-  for (const [op, must] of [
-    ['upload_file', /nativeUpload/, 'upload_file'],
+  // The capability fixes that WERE one-sided must live in the ONE implementation.
+  for (const [op, must, what] of [
+    ['upload_file', /nativeUpload/, 'upload_file (a real handler, not a "requires the SW" error)'],
     ['network_log', /getNetworkLog/, 'network_log'],
     ['handle_dialog', /readMainWorldDialogs/, 'handle_dialog (MAIN-world dialogs first)'],
     ['form_state', /getFormState/, 'form_state (the dedicated function, not an inline SAG)'],
@@ -2270,11 +2256,21 @@ test('dispatchers: the two copies of a duplicated op must not drift apart', () =
     ['drag_drop', /resolveRefHealed/, 'drag_drop (the HEALED resolver)'],
     ['type_many', /await\s+nativeTypeMany/, 'type_many (AWAITED)'],
     ['click', /await\s+nativeClick/, 'click (AWAITED before afterState)'],
+    ['action_preview', /previewAction/, 'action_preview (the real function)'],
+    ['read_clipboard', /handleReadClipboard/, 'read_clipboard (the ONE clipboard reader)'],
   ]) {
-    assert(A[op] && B[op], op + ' must exist in BOTH dispatchers');
-    assert(must.test(A[op]) && must.test(B[op]),
-      op + ' must be the same capability in BOTH copies: ' + must);
+    assert(new RegExp("case '" + op + "'").test(A), op + ' must be in the ONE dispatcher');
+    const i = A.search(new RegExp("case '" + op + "'"));
+    const j = A.indexOf("case '", i + 5);
+    assert(must.test(A.slice(i, j === -1 ? i + 1500 : j)),
+      op + ' must be its implementation here: ' + what);
+    assert(!new RegExp("case '" + op + "'").test(B), op + ' must NOT have a second copy in 70');
   }
+
+  // The dead symbol that motivated this rewrite: a call into a function nobody defines.
+  const ART = strip(readFileSync(new URL('./extension/websense-cs.js', import.meta.url), 'utf8'));
+  assert(!/getActionPreview/.test(A + B + ART),
+    'getActionPreview is defined NOWHERE — path A\'s action_preview threw a ReferenceError on every call');
 });
 
 test('find: every filter the handler applies must ALSO be declared in the schema', () => {
@@ -2632,7 +2628,7 @@ test('page ops: every tool that can act on a tab must DECLARE tabId in its schem
   // silently acted on a tab the caller had not chosen.
   // That is the worst failure shape available: the parameter is documented, accepted without
   // complaint, and inert — so every page op can land somewhere you did not pick and report a
-  // result you cannot attribute. Only 9 of 33 tools declared it; 28 do now.
+  // result you cannot attribute. Only 9 of the then-registered tools declared it; 28 did after the fix.
   const src = SRV_SRC;
 
   // Any tool whose body routes through the hub for a PAGE op must accept a tab.
@@ -2669,14 +2665,18 @@ test('page ops: every tool that can act on a tab must DECLARE tabId in its schem
          /tabId/.test(src), 'tabId must be declared');
 });
 
-test('cs: the main-world dialog helpers are defined EXACTLY ONCE, in a scope both dispatchers see', () => {
+test('cs: the dialog + clipboard helpers are defined EXACTLY ONCE, in a scope both dispatchers see', () => {
   // ★ 2026-10-01. They lived in 70 and 00 could not see them: handle_dialog failed with
   // "readMainWorldDialogs is not defined", and get_status called it inside try/catch so it
   // SILENTLY reported pendingDialogs: [] — a wrong answer indistinguishable from "no
   // dialogs". Hoisted to the top of 00, which is first in the concatenation.
+  // handleReadClipboard joins them for the same reason (2026-10-01b): it was declared INSIDE
+  // the switch block of 70's handleMessageAsync — block-scoped under 'use strict' — so once
+  // the shared dispatcher in 00 took over the read_clipboard op it could not have reached it.
   const files = readdirSync(new URL('./extension/cs-src/', import.meta.url))
     .filter((f) => f.endsWith('.js')).sort();
-  const FNS = ['readMainWorldDialogs', 'readRecentMainWorldDialogs', 'resolveMainWorldDialog'];
+  const FNS = ['readMainWorldDialogs', 'readRecentMainWorldDialogs', 'resolveMainWorldDialog',
+               'handleReadClipboard'];
   const where = {};
   for (const f of files) {
     const s = readFileSync(new URL('./extension/cs-src/' + f, import.meta.url), 'utf8')

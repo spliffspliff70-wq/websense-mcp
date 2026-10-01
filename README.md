@@ -4,184 +4,211 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4?logo=googlechrome&logoColor=white)](extension/manifest.json)
 
-> Non-vision, AI-native web automation via the Semantic Action Graph. No screenshots, no CDP, no bot detection.
+> Non-vision, AI-native web automation via a Chrome extension. No screenshots, no debug port, no bot detection — the model reads structured JSON and acts through the browser's own input pipeline.
 
-## Quick Start
+WebSense gives an AI agent hands on a real, logged-in Chrome profile. The agent gets a **lossless, addressable map** of the page, acts on it **by reference**, and is told — with a grouped diff — whether the page actually changed. No vision model, no headless browser, no remote-debugging port.
 
-1. `git clone https://github.com/spliffspliff70-wq/websense-mcp && cd websense-mcp && npm install`
-2. Load the extension: `chrome://extensions` → Developer mode → Load unpacked → select
-   `extension/`. It auto-connects to the WebSocket hub on port 38401 (no launcher page).
-3. Register the MCP server in your client (stdio, or `--http` for the streamable-HTTP transport):
+---
+
+## Requirements
+
+- **Node.js ≥ 18**
+- **Google Chrome / Chromium** (Manifest V3, offscreen WebSocket bridge). Chrome-only: there is no Firefox code in this repo.
+- **OS-level input is Windows-only.** Everything else (browse / find / act, trusted input, frames, diffs) is cross-platform. `act{how:"os"}`, `real_click`, `real_paste`, `real_activate_tab` and `dialog{keystroke}` use Windows `SendInput` / PowerShell.
+- **`main_world`** (the CSP-proof MAIN-world read path) needs **Chrome 138+** with the per-extension **"Allow User Scripts"** toggle enabled.
+
+## Install
+
+```bash
+git clone https://github.com/spliffspliff70-wq/websense-mcp
+cd websense-mcp
+npm install
+```
+
+**1. Load the extension.** Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select the `extension/` folder. It connects to the WebSocket hub on `ws://127.0.0.1:38401` automatically — there is no launcher page. (For `main_world`, open the extension's **Details** and enable **Allow User Scripts**.)
+
+**2. Register the MCP server** with your client.
+
+stdio — one client per server process:
+
 ```json
 { "mcpServers": { "websense": { "command": "node", "args": ["src/server.js"] } } }
 ```
-4. Call any tool (e.g. `explore_page`). Flow: `MCP → WS → Extension → Content Script → DOM`.
 
-**Bridge port:** default `38401`. Override with `--port <n>` (server) and the matching
-`PORT` constant in `extension/offscreen.js` (extension). If the port is already taken, the
-hub logs a warning and the server keeps running (MCP still works) — the bridge just isn't
-claimed. Run multiple isolated servers with different `--port` values.
+streamable HTTP — one server, many clients:
 
-> **Chrome-only.** WebSense is built, tested and supported on Chrome / Chromium (MV3, offscreen
-> WS bridge). It has never been developed or tested on Firefox, and there is no Firefox code in
-> this repo. Do not expect it to work there.
+```bash
+node src/server.js --http --http-port 9222
+# then point each client at http://localhost:9222/mcp
+```
+
+**3. Call `websense_guide`** (or just `browse`). The guide is the runtime source of truth and documents every tool.
+
+**Bridge port.** Default `38401`, plain `ws://` on `127.0.0.1` (loopback is exempt from mixed-content blocking, so it works from HTTPS pages). Override with `--port <n>` on the server and the matching `PORT` constant in `extension/offscreen.js`. If the port is already taken the hub logs a warning and the server keeps running — MCP still works, the bridge just isn't claimed. Run isolated servers with different `--port` values.
+
+## The model's surface: 7 listed tools
+
+A model sees exactly seven tools. The rest stay callable by name but are not listed, so a model never has to choose between a wall of one-verb tools.
+
+| tool | what it does |
+|---|---|
+| `browse` | **TOOL 1** — open (or bind) a tab and map it in one call: navigate, seed the diff baseline, collect a lossless inventory, and return only the INDEX + the page's vocabulary + a region outline. |
+| `find` | **TOOL 2** — search the stored inventory. Every hit answers **WHERE** (region + branch chain, resolved from parent pointers) and **WHAT** (role / name / attrs / state). |
+| `act` | Do something: `click · hover · rightclick · drag · type · key · form · upload · scroll · dialog`. Add `how:"trusted"` for the browser's own input pipeline. |
+| `page_slice` | Full-fidelity records for one slice of the inventory (`tag / role / region / vp / interactive / query`), or any cached part of a diff. |
+| `tabs` | Tab/window ops: `list · switch · close · bind · frames · windows · focus · move · transfer · switchread`. |
+| `debug` | WebSense itself + raw reads: `status · session · logs · cookies · clipboard · screenshot · ax · evaluate · main_world · explore_page · reload · respawn · guide`. |
+| `websense_guide` | Start here — returns the full in-tool guide. |
+
+**37 tools are registered; 30 of them are unlisted but callable by name.** The listable extras are summarised under [Other registered tools](#other-registered-tools).
+
+## Quick start — the loop
+
+1. **`browse {url}`** — one call that navigates (or binds), seeds the diff baseline, stores a **lossless** inventory of every element (nothing filtered, capped or truncated) and returns the small INDEX + a region outline. The full records stay server-side, addressable by index.
+2. **`find {query}`** — locate the control. Each hit tells you WHERE it is and WHAT it is, so five controls called "New" are distinguishable.
+3. **`act {action, ref, ...}`** — do it. Reach for `how:"trusted"` when the page checks `isTrusted`, reads coordinates, or a default action must run. Works in a background tab — no focus steal.
+4. **Read the diff** the reply carries.
+
+### The diff (did it land?)
+
+Every mutating action returns a second block: a grouped **DIFF** against your `browse` baseline.
+
+- **structure** — the page's *shape* changed (elements added/removed; tag/role/name/attrs changed). Page truth.
+- **content** — the *same* element's value/text changed and its shape did not. The page answered you.
+- **viewport** — only `vp`/`x`/`y` differ. That is scroll/layout churn and is **not** a mutation.
+
+`mutated` is true only when structure or content moved — viewport churn can never make an action look landed. The reply ends with a `FULL DIFF: <handle>` line; fetch any part with `page_slice{diff:"<handle>", part:"structure|content|visual|viewport"}`. The full delta is cached because it can be hundreds of KB for one action — the summary is what changed, the handle is the rest. Pass `verify:false` to skip the diff on a call you don't need checked.
+
+**A navigation is the strongest confirmation and is not in the groups:** when a `click` or `press_key` (Enter/Space) replaces the document, the result carries `effect:"confirmed"` plus a `navigation {from,to}`, and the diff line says so explicitly — a diff across a navigation compares two different documents, so its groups are meaningless.
+
+### Trusted input — `act{how:"trusted"}`
+
+`how:"trusted"` drives `chrome.debugger` + `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`, so the page receives **`isTrusted`** events and **the browser itself runs the default action** (a link navigates, an Enter submits, a checkbox toggles, an arrow key moves a slider) instead of the tool guessing. It works in a **background tab** — no focus steal, no window activation. Chrome shows its "debugging this browser" infobar while attached.
+
+Off-screen targets are scrolled into view first. Measured: a trusted click aimed at `y=1727` below the fold hit nothing; after the fix it re-aimed at `y=938` and the page recorded the click.
+
+`how:"os"` is the OS-level rung (Windows `SendInput`) — reach for it only when a page rejects programmatic input outright, or for a raw-input / canvas surface. It lands on the frontmost window and so steals focus.
+
+## Dialog handling
+
+- **JS dialogs** (`alert` / `confirm` / `prompt`) **are captured**, including the ones the page itself raises — a **MAIN-world hook shadows the three functions** (the content script's isolated-world copy was never called by page code, so dialogs used to go unseen and Chrome auto-dismissed them in a background tab). `status` lists them in `pendingDialogs` (waiting) and `recentDialogs` (already fired, with the outcome). Resolve with `dialog{action:"accept"|"dismiss"}` (+ `value` for a prompt); the answer really reaches the page's promise. Confirm/prompt auto-answer after 30s so a page can never wedge.
+- **DOM modals** (`[role=dialog]`, most in-app modals) are closed by ref; `status.hasModal` / `dialogCount` come from a **visibility-blind** scan (a hidden modal still counts).
+- **OS-level dialogs** (HTTP basic-auth, proxy-auth, print) cannot be intercepted by JS. `dialog{keystroke:true, key:"enter"|"escape"}` injects a global keystroke through Windows control (PowerShell `SendKeys`) — Windows-only.
+- **File picker:** handled by `form{action:"upload"}` (DataTransfer API) — no OS dialog.
+
+## Iframes / frames
+
+**Same-origin iframes are walked and clickable** — verified: the frame echoes the click. List them with `tabs{action:"frames"}` (pass `tabId`; omit it for your bound tab) and pass `frameId` to any element tool — this unlocks **Gmail compose**, **Notion**, **Figma** and any site that renders key UI inside child frames. **Cross-origin frames are skipped**: nothing in the page can read them and no click can be aimed inside them.
+
+## Other registered tools
+
+These are registered and callable by name — the standalone forms that `act` / `debug` absorbed are noted inline:
+
+- `explore_page` — quick look at a page's actions (SAG). `compact:true`, `intent:"submit"`, `goal:"log in"`, `preload:true`, `incremental:true`. For a full page map use `browse` + `find` instead.
+- `read` — page text: `text · content · markdown · diff · scrollextract · preload`.
+- `click` — click a ref (default) `· mode:"hover" · "rightclick" · "drag" (fromRef/toRef) · x,y` for canvas.
+- `trusted_click` · `trusted_key` — the standalone trusted mouse / keyboard paths.
+- `press_key` — **synthetic** key events only; runs no default action. Use `trusted_key` / `act{how:"trusted"}` when the default matters.
+- `type_text` — fill one input (React-safe native setter) or `fields:[{ref,text},…]` for a verified batch.
+- `form` — `state · select · toggle · special · upload`.
+- `reveal` — pre-extract hidden content: `dropdown · tabs · accordion`.
+- `scroll` — `direction`+`amount` (ticks) · `y` absolute · `intoView`.
+- `status` — `page · bridge · doctor · downloads`.
+- `wait` — poll conditions (ANDed) until met, or wait for an event.
+- `evaluate` — run JS and return its value (auto-reroutes through the MAIN world on a CSP block) or a no-eval `query` DOM read.
+- `main_world` — run a compiled function in the page's MAIN world (CSP-proof; needs "Allow User Scripts").
+- `ax` — native accessibility tree via `chrome.debugger` (for canvas SPAs and `chrome://` pages).
+- `screenshot` — `captureVisibleTab` → PNG/JPEG dataUrl, for a vision model.
+- `dialog` — `accept | dismiss` (+ `value`); captures the page's own JS `alert`/`confirm`/`prompt`.
+- `session` — `reset · map · mermaid`.
+- `network_log` · `console_log` — captured page fetch/XHR · console + JS errors.
+- `cookies` — `list · get · clear` (values are masked on other surfaces).
+- `clipboard` — `copy · read`.
+- `inspect` — `element · geometry · relation`.
+- `navigate` — navigate a tab (reuses your bound tab; no tab spam).
+- `page_snapshot` — collect / return the lossless inventory index directly.
+- `respawn_offscreen` · `extension_reload` — extension maintenance (MV3 traps).
+- `real_activate_tab` · `real_click` · `real_paste` — Windows OS-level input; the last rung.
 
 ## Architecture
+
 ```
 MCP Client (Claude / Cline / Cursor / Hermes)
-    ↔ stdio
+    ↔ stdio or streamable HTTP
 WebSense MCP Server (src/server.js)
-    ↔ WebSocket localhost:38401
+    ↔ WebSocket  ws://127.0.0.1:38401
 Chrome Extension (extension/)
-    ├── background.js    service worker, tab management
+    ├── background.js    service worker, tab management, binding
     ├── offscreen.js     WebSocket client, auto-reconnect
     └── websense-cs.js   SAG extraction + native DOM interaction (CSP-safe)
-    ↔ chrome.runtime.sendMessage
+    ↔ chrome.runtime.sendMessage / chrome.debugger (trusted input)
 Live DOM
 ```
 
-## Tools (33) — call `websense_guide` first
+## What's new in 2.0
 
-> **Count verified 2026-09-21** by `tools/list` against the RUNNING server
-> (`POST http://127.0.0.1:9222/mcp`, streamable HTTP JSON-RPC): **33 tools**.
-> The same 33 `reg(server, …)` names are in `src/server.js`. Anything in these
-> docs that says 20/21/29/31/43/61 tools is stale.
+- **A 7-tool listed surface** — `browse · find · act · page_slice · tabs · debug · websense_guide`. `act` and `debug` are facades that dispatch to the real handlers, so the 30 unlisted tools remain callable by name with identical behaviour.
+- **`browse` → `find` → `act` → read the diff** replaces `explore_page → click/type` as the primary loop. `browse` returns an INDEX over a lossless inventory; `find` returns WHERE + WHAT per hit; `page_slice` loads one branch at full fidelity.
+- **A grouped auto-diff after every mutating action**, with `mutated` derived from structure + content only (viewport churn cannot fake a landing), a summary in the reply, and the full delta cached behind `FULL DIFF: <handle>`.
+- **Trusted input**: `act{how:"trusted"}` runs through `chrome.debugger` + `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`, so the page sees `isTrusted` events and the browser performs the default action — in a background tab. Off-screen targets are scrolled into view first.
+- **Same-origin iframes** are walked and clickable.
 
-### Guide & Status
-`websense_guide` · `status` (kind:page|bridge|doctor|downloads)
-### Exploration
-`explore_page` (compact:list, intent:find, goal:goal-filter, preload:lazy, incremental:delta-since-last-scan)
-### Page Map (lossless, addressable)
-`page_snapshot` (LOSSLESS inventory of the page held server-side; returns only the small INDEX — counts + sliceable dimensions. Nothing is cut: not interactive-only, not in-viewport-only, and it is scroll-stable) · `page_slice` (fetch ONE slice at full fidelity: tag|role|region|vp|interactive|query — every record carries a usable locator)
-### Read
-`read` (format:text|content|markdown|diff|scrollextract|preload)
-### Interact
-`click` (ref|xy, mode:click|hover|rightclick|drag) · `type_text` (ref+text|fields:[]) · `form` (state|select|toggle|upload) · `scroll` (direction|y|intoView) · `press_key`
-### Element Intel
-`reveal` (kind:dropdown|tabs|accordion) · `inspect` (kind:element|geometry|relation)
-### Tabs & Navigation
-`navigate` · `tabs` (list|switch|close|bind|frames|windows|focus|move|transfer|switchread)
-### Wait
-`wait` (conditions ANDed | event mode)
-### Page Control
-`evaluate` (script|query) · `main_world` (compiled fn in the page MAIN world — F12-insider path for reads/writes the isolated world can't do) · `screenshot` · `dialog` (accept|dismiss|keystroke)
-### Session & Network
-`session` (reset|map|mermaid) · `network_log` · `console_log` (captured console + JS errors) · `cookies` (list/get/set/clear metadata — never values) · `clipboard` (copy|read)
-### AX Bridge
-`ax` (state|read|click|type) — for canvas SPAs & chrome:// pages
-### REAL Input (genuine OS-level, for synthetic-ignoring widgets)
-`real_activate_tab` (UIA tab-pill click; address by title OR by `index` — SPA tabs share titles) · `real_click` (SendInput at viewport x,y) · `real_paste` (OS click + clipboard + Ctrl+V)
-### Extension maintenance
-`respawn_offscreen` (recreate the offscreen doc so current on-disk code loads) · `extension_reload` (chrome.runtime.reload + reconnect wait)
+## Known limitations (honest)
 
-> **Each tool absorbed 2-10 old one-verb tools.** Full absorption table in `websense_guide`. All 65 original capabilities are callable — just through the consolidated tool with a `mode`/`format`/`action`/`kind` parameter instead of a separate tool name.
-
-## Dialog handling
-- **JS dialogs** (`alert` / `confirm` / `prompt`) are captured, including the ones the **page itself**
-  raises — a MAIN-world hook shadows the three functions (the content script's isolated-world copy was
-  never called by page code, so dialogs used to go unseen and Chrome auto-dismissed them in a
-  background tab). `status` lists them in `pendingDialogs` (waiting) and `recentDialogs` (already
-  fired, with the outcome). Resolve with `dialog action:"accept"|"dismiss"` (+ `value` for `prompt`);
-  the answer really reaches the page's promise. Confirm/prompt auto-answer after 30s so a page can
-  never wedge.
-- **DOM modals** (`[role=dialog]`, most in-app modals) are closed by ref; `status.hasModal` /
-  `dialogCount` come from a **visibility-blind** scan (a hidden modal still counts).
-- **OS-level dialogs** (HTTP basic-auth, proxy-auth, print): can't be intercepted by JS. `dialog keystroke:true key:"enter"|"escape"` injects a global keystroke through Windows control (PowerShell `SendKeys`). This is the windows-control bridge.
-- **File picker:** handled by `form action:"upload"` (DataTransfer API) — no OS dialog.
-
-## Iframes / frames (the other gap vs. a human — now closed)
-- `tabs action:"frames"` returns every frame in the target tab (pass `tabId`; omit it and you
-  get your bound tab) with its `frameId` and URL.
-- Pass `frameId` to any element tool (`explore_page({frameId})`, `click({ref, frameId})`, `type_text({ref, frameId})`, …) to target a specific iframe. This unlocks **Gmail compose**, **Notion**, **Figma**, and any site that renders key UI inside child frames.
-- `read` (format:"text") and element labels now include CSS `::before`/`::after` content (icon-font glyphs, counters) that `innerText` misses.
-
-## Cross-browser
-- **Chrome / Edge / Opera:** load `extension/manifest.json` (MV3, offscreen WS bridge).
-
-## Key Features
-- **CSP-Safe (32/33 tools):** native DOM functions in the content script's isolated world. No eval, no string-to-code. Works on LinkedIn, GitHub, Google — any strict-CSP site. (`evaluate` is the only eval-based tool — and its `script` mode is blocked by the extension's own MV3 CSP on *every* page, so use its `query` mode or `main_world`; `dialog keystroke:true` is a Windows-control keystroke, and `main_world` uses Chrome's userScripts MAIN-world path which is CSP-proof by design.)
-- **React-Compatible:** native prototype value setters bypass React's value tracker, then `input`/`change` events are dispatched.
-- **No Bot Detection:** real Chrome profile, cookies, fingerprint. No CDP, no `navigator.webdriver`, no headless.
-- **No Vision:** all structured JSON; no screenshots, no vision model.
-- **Action-Typed Elements:** every element classified by action type with predicted effects.
-- **Exploration Graph:** persistent navigation map with Mermaid export.
-- **Frame-Aware:** targets iframes via `frameId`; no DOM region is unreachable.
-
-## Known limitations
-- **`dialog` cannot answer a native dialog raised while the tab is hidden** — Chrome auto-dismisses
-  those before the page can be reached. A MAIN-world hook records them either way
-  (`status.recentDialogs`), so you can see that one fired, but the answer comes from the hook's
-  auto-resolution rather than from you. Activate the tab first if the answer matters.
-- **`evaluate` script mode** runs your JS and returns its value. The isolated-world path
-  (`new Function`) is blocked by the **extension's own MV3 CSP**, so it transparently re-routes
-  through the MAIN world (`chrome.userScripts`, no eval) and reports `via:"main_world"`. This
-  works on every page — it is not a strict-site limitation. `evaluate{query:{…}}` is still the
-  lighter path for plain DOM reads.
-- **Refs are stable:** `E#` refs are assigned in viewport order on the first scan and then held by
-  element identity (per-element cache + a `data-websense-ref` attribute), so they survive
-  re-explores, scrolls, and framework re-renders. Measured: 41/41 unchanged across a full
-  re-explore, 0 changed after a scroll, 0 after a re-render, and a stale ref healed onto a
-  replacement node with the same label and no id/class. A ref only dies when its element leaves
-  the DOM with nothing to heal from. CSS-selector refs (`#id`) are still the safest choice for
-  anything long-lived or across navigations.
-- **One profile, per-tab isolation:** concurrent jobs share one Chrome profile — there is no
-  cookie/storage isolation between them, so scope work with `tabs action:"bind"` + explicit
-  `tabId`. Session state (map/history) *is* per-session: `session action:"reset"` clears only
-  your own history, and one job's steps never appear in another's map.
-- **Logged-in sites (LinkedIn etc.):** must already be authenticated in that Chrome profile; `navigate` opens a fresh tab that needs an existing session cookie.
-- **Canvas/WebGL content** (Telegram web, TradingView, chrome:// pages): use `ax action:"read"` to see the native accessibility tree, then `ax action:"click"|"type"` to interact. Fallback: `screenshot` + vision.
-- **`ax` tool uses chrome.debugger** — stable Chrome compatible, shows a warning banner while attached. Requires explicit tabId.
-
-## v1.4.5 (2026-09-25) — twelve defects, three of them false promises
-- **Truth fixes:** the action `effect` verdict was `unverifiable` for every relayed action (it never
-  unwrapped the relay envelope); it no longer recommends a real OS click for a merely unmeasurable
-  action; and the DELTA block no longer claims `mutated:false` means the action failed (it only
-  means no *interactive-element* fingerprint changed).
-- **Now working (previously never did):** `network_log` captures real page traffic (MAIN-world
-  hook), `wait{selector}` succeeds, `reveal kind:"dropdown"` resolves, `status kind:"doctor"`
-  reports a live service worker, `navigate`/`tabs frames` honor `tabId`, batch `type_text` counts
-  are honest, `extension_reload` really reloads, and `respawn_offscreen` stops reporting false
-  failures.
-- **Privacy:** password/OTP values are masked on every surface that can echo them.
-- **Docs:** the in-tool guide, `MODEL_PROMPT.md` (now generated from the guide, with a test that
-  fails on drift) and this README all state the measured behavior. See `CHANGELOG.md` for the
-  full list.
-
-## v2.1-latchproof (2026-08-15)
-- **Multi-slot concurrency** (`hub.js`): request correlator is now `Map<id,entry>` — concurrent sessions no longer clobber each other.
-- **Latch-proof routing** (`background.js`): `chrome.tabs.onActivated/onRemoved` events keep the tab registry live; 0×0 viewport self-heal.
-- **Honest interaction** (`websense-cs.js`): `type_text` verify-persist — reports `confirmed`/`reverted` instead of phantom success.
-- **AX bridge** (`offscreen.js`): `ax` tool (`state`/`read`/`click`/`type`) via `chrome.debugger` (CDP Accessibility domain). Stable Chrome compatible, no dev-channel flags.
-- **windows-control DPI-aware** (`uia_common.py`): physical→logical coordinate scaling fixes clicks on scaled displays.
+- **A trusted drag does not complete.** The trusted path produces trusted `dragstart`/`dragenter`/`dragover` but **no `drop`**, so a drag does not finish. The plain `drag` mode fires the whole sequence, but its events are **not** trusted, so a page checking `isTrusted` ignores them.
+- **OS-click equivalence is unproven.** `act{how:"trusted"}` is the browser's own input pipeline; it is not proven byte-identical to a real OS click. `real_click` (Windows `SendInput`) is the only genuinely OS-level path.
+- **Canvas / WebGL coordinate clicks work (verified within 1px) but are not trusted events.** Use `act{action:"click", x, y}`; the page receives an untrusted click at the right pixel.
+- **Chrome-only.** MV3 + offscreen WebSocket bridge; no Firefox code.
+- **OS-level input is Windows-only** (`real_*`, `dialog{keystroke}`).
+- **`main_world` requires the "Allow User Scripts" toggle** (Chrome 138+). Without it the CSP-proof MAIN-world path is unavailable.
+- **`evaluate{script}`** runs your JS and returns its value; the isolated-world `new Function` path is blocked by the extension's own MV3 CSP, so it transparently re-routes through the MAIN world (`chrome.userScripts`, no eval) and reports `via:"main_world"`. `evaluate{query:{…}}` remains the lighter path for plain DOM reads.
+- **A JS dialog raised while the tab is hidden cannot be answered** — Chrome auto-dismisses it before the page can be reached. A MAIN-world hook still records it (`status.recentDialogs`), so you can see that one fired. Activate the tab first if the answer matters.
+- **`ax` attaches `chrome.debugger`** and shows Chrome's warning banner while attached; it requires an explicit `tabId`.
+- **One profile, per-tab isolation.** Concurrent jobs share one Chrome profile — there is no cookie/storage isolation between them. Scope work with `tabs{action:"bind", tabId}` + an explicit `tabId`. Session state (map/history) *is* per-session: `session{action:"reset"}` clears only your own history.
+- **Logged-in sites (LinkedIn, etc.)** must already be authenticated in that Chrome profile; `navigate` opens a fresh tab that needs an existing session cookie.
+- **Refs are stable** — `E#` refs are assigned in viewport order on the first scan, then **held by element identity** (a per-element cache + a `data-websense-ref` attribute), so they survive re-explores, scrolls and framework re-renders. A ref dies only when its element leaves the DOM with nothing to heal from. CSS-selector refs (`#id`) remain the safest choice for anything long-lived or across navigations.
 
 ## Testing
+
 ```bash
-# Regression suite (127 tests: hub, delta, guide-truth guards — no Chrome needed)
+# Regression suite — no Chrome needed (hub, diff, snapshot, trusted-input,
+# guide-truth and doc-drift guards). Currently 170 tests.
 npm test
 
-# Full end-to-end live test (needs Chrome + extension loaded)
+# Print the LISTED surface from a running server (tools/list is filtered to it)
+node tools/tools-list.mjs          # names-only preflight
+node tools/tools-list.mjs --full   # name + one-line description
+
+# End-to-end MCP client test (needs Chrome + the extension loaded)
 node test/mcp-client-test.js
 
-# Keep MODEL_PROMPT.md in sync with the in-tool guide (runs inside npm test)
+# Keep MODEL_PROMPT.md in sync with the in-tool guide (also enforced inside npm test)
 node tools/export-guide.mjs --check
 ```
 
-## File Structure
+## File structure
+
 ```
-websense/
-├── package.json
+websense-mcp/
 ├── src/
-│   ├── server.js       # MCP server with 33 consolidated tools
-│   ├── hub.js          # WebSocket hub
-│   ├── session.js      # Exploration map + diff engine
-│   └── mermaid.js      # Mermaid export
+│   ├── server.js          # MCP server: tool registration, the 7-tool listed surface, facades
+│   ├── hub.js             # WebSocket hub on ws://127.0.0.1:38401
+│   ├── session.js         # exploration map + per-session state
+│   ├── snapshot.js        # lossless page inventory (collector + slicer)
+│   ├── diff-cache.js      # cached grouped diffs behind FULL DIFF handles
+│   ├── diff-collector.js  # in-page diff collection
+│   └── climb.js, incr.js, upload.js, summarize.js, mermaid.js
 ├── extension/
-│   ├── manifest.json   # Chrome MV3
-│   ├── background.js    # Service worker (tab mgmt, offscreen lifecycle)
-│   ├── offscreen.js     # WebSocket client (auto-reconnect)
-│   ├── offscreen.html
-│   └── websense-cs.js   # SAG extraction + native DOM interaction
-└── test/
-    └── mcp-client-test.js   # End-to-end MCP client test
+│   ├── manifest.json      # Chrome MV3
+│   ├── background.js      # service worker (tab mgmt, offscreen lifecycle)
+│   ├── offscreen.js       # WebSocket client (auto-reconnect)
+│   ├── websense-cs.js     # built content script (generated — do not hand-edit)
+│   └── cs-src/            # content-script sources (edit here; build with tools/build-cs.mjs)
+├── test/
+│   └── mcp-client-test.js # end-to-end MCP client test
+└── tools/                 # build + measurement scripts (build-cs, export-guide, tools-list…)
 ```
 
+## License
+
+MIT — see [LICENSE](LICENSE).

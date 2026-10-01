@@ -872,7 +872,7 @@ async function callTool(name, args) {
 
 function registerFacades(server) {
   reg(server, 'act', {
-    description: 'DO something to the page: click, hover, rightclick, drag, type, key, form, upload, scroll, dialog. how="trusted" sends the input through the browser own pipeline so it is a real isTrusted event and default actions run. Not read: use find + page_slice.',
+    description: 'DO something: click, hover, rightclick, drag, type, key, form, upload, scroll, dialog. how:"trusted" = the browser own input, so the event is really isTrusted and default actions run; how:"os" = OS-level. For reading use find.',
     inputSchema: {
       action: z.enum(['click', 'hover', 'rightclick', 'drag', 'type', 'key', 'form', 'upload', 'scroll', 'dialog']).describe('what to do'),
       how: z.enum(['auto', 'trusted', 'os']).optional().describe('auto = normal path, trusted = browser input pipeline, os = OS-level input'),
@@ -894,24 +894,52 @@ function registerFacades(server) {
     }
     if (a === 'drag' && trusted) {
       const tb = o.tabId || sessionTabOf();
-      // ★ SCROLL IT INTO VIEW FIRST (2026-10-01). A rect below the fold is a coordinate the
-      // browser's input pipeline CANNOT deliver to: the fixture's drag pair sits at y~2086 and the
-      // trusted drag produced ZERO events. One page-side call both scrolls the target into view and
-      // returns its live centre, so the coordinate is guaranteed deliverable.
-      const centre = async (sel, scroll) => {
-        if (!sel) return null;
+      // ★ BOTH ENDS OF THE DRAG MUST BE ON SCREEN, ON THE SAME LAYOUT (2026-10-01).
+      // A drag needs the SOURCE and the TARGET inside the viewport at the SAME time: browser input
+      // is delivered at viewport coordinates, and a rect below the fold receives nothing (measured:
+      // the fixture's pair at y~2086 produced ZERO events). The old version scrolled the SOURCE in
+      // and then read the TARGET from that layout — fine while the two are neighbours, but the
+      // target can land off-screen for a long drag, and then the release lands on nothing and the
+      // drag silently cannot complete. So: scroll the source in, measure BOTH, and if either centre
+      // is outside the viewport scroll the TARGET in and measure BOTH again. One round trip.
+      const DRAG_BOXES_FUNC = 'function(){' +
+        'var FS=' + 'FRV' + ',TS=' + 'TRV' + ';' +
+        'function q(s){try{return document.querySelector(s);}catch(e){return null;}}' +
+        'var a=q(FS),b=q(TS);' +
+        'if(!a)return {ok:false,why:"source not found: "+FS};' +
+        'if(!b)return {ok:false,why:"target not found: "+TS};' +
+        'function box(e){var r=e.getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};}' +
+        'function inside(p){return p.x>=0&&p.y>=0&&p.x<window.innerWidth&&p.y<window.innerHeight;}' +
+        'a.scrollIntoView({block:"center"});var A=box(a),B=box(b);' +
+        'if(!inside(A)||!inside(B)){b.scrollIntoView({block:"center"});A=box(a);B=box(b);}' +
+        'return {ok:true,from:{x:A.x,y:A.y},to:{x:B.x,y:B.y},bothInside:inside(A)&&inside(B),' +
+        'viewport:{w:window.innerWidth,h:window.innerHeight}};' +
+        '}';
+      let boxes = null;
+      try {
         const raw = await callTool('main_world', { tabId: tb, verify: false,
-          func: 'function(){var e=document.querySelector(' + JSON.stringify(String(sel)) + ');if(!e)return null;' + (scroll ? 'e.scrollIntoView({block:"center"});' : '') + 'var r=e.getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};}' });
-        const txt = ((raw && raw.content && raw.content[0] && raw.content[0].text) || '');
-        // The value can come back as a JSON STRING, so its quotes are escaped backslash-quote and a
-        // pattern expecting a bare quote never matches. This one does not care about the quoting.
-        const m2 = txt.match(/x[^-\d]{0,10}(-?\d+)[\s\S]{0,60}?y[^-\d]{0,10}(-?\d+)/);
-        return m2 ? { x: Number(m2[1]), y: Number(m2[2]) } : null;
-      };
-      const A = await centre(o.fromRef, true), B = await centre(o.toRef, false);
-      if (!A || !B) return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'act drag(trusted): could not resolve both boxes', from: A, to: B }) }] };
-      const dr = await getActiveHub().send({ type: 'trusted_drag', tabId: tb, from: A, to: B });
-      return { content: [{ type: 'text', text: JSON.stringify(unwrapRelay(dr)) }] };
+          func: DRAG_BOXES_FUNC.replace(/FRV/g, JSON.stringify(String(o.fromRef || ''))).replace(/TRV/g, JSON.stringify(String(o.toRef || ''))) });
+        boxes = mainWorldValue(raw);
+      } catch (e) { return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'act drag(trusted): could not measure the drag boxes: ' + String((e && e.message) || e) }) }] }; }
+      if (!boxes || !boxes.ok) {
+        return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'act drag(trusted): could not resolve both boxes',
+          detail: (boxes && boxes.why) || 'the page returned no boxes',
+          escalation: { recommended: 're_read', reason: 'a drag needs BOTH ends resolvable by document.querySelector. If an end is inside a same-origin IFRAME use trusted_click-style frame addressing; a cross-origin frame cannot be aimed into at all. Re-read with explore_page/find and pass locators that exist.' } }) }] };
+      }
+      const dr = await getActiveHub().send({ type: 'trusted_drag', tabId: tb, from: boxes.from, to: boxes.to });
+      const rr = unwrapRelay(dr);
+      // ★ THE VERDICT IS THE PAGE'S, AND IT IS CARRIED THROUGH (2026-10-01). The extension reads a
+      // capture-phase drop listener back after the gesture, so `dropped` here is what the PAGE
+      // recorded — not whether a CDP call returned. Renderers refuse the completion on a target that
+      // does not cancel `dragover`, and the reply now says which of those two things happened.
+      if (rr && typeof rr === 'object') {
+        rr.drag = { from: boxes.from, to: boxes.to, bothEndsInsideViewport: !!boxes.bothInside,
+                    viewport: boxes.viewport };
+      }
+      if (boxes.bothInside === false && rr && typeof rr === 'object' && !rr.error) {
+        rr.warning = 'one end of the drag is OUTSIDE the viewport (' + JSON.stringify(boxes) + ') — browser input is delivered at viewport coordinates, so a release at an off-screen point lands on nothing and no drop can follow. Scroll the page (or resize the window) and retry.';
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(rr !== undefined && rr !== null ? rr : dr) }] };
     }
     if (a === 'hover' || a === 'rightclick' || a === 'drag') {
       return await callTool('click', pass({ mode: a }));
@@ -954,7 +982,7 @@ function registerAllTools(server) {
 
   // ═══ 1. GUIDE ═══
   reg(server, 'websense_guide', {
-    description: 'START HERE. The listed tools: browse, find, act, page_slice, tabs, debug, guide. Call once before using others.',
+    description: 'START HERE. The listed tools: browse, find, act, page_slice, tabs, debug, guide. Call once before you act.',
   }, async () => {
     return textResult(`WebSense MCP — Guide (7 listed / 37 registered)
 ==============================================
@@ -2334,7 +2362,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   // and returns only the small INDEX. page_slice then fetches ONE slice at full fidelity.
   // Store everything, ship the index, make every element addressable.
   reg(server, 'page_snapshot', {
-    description: 'LOSSLESS page inventory held server-side; returns the small INDEX (counts + addressable dimensions). Then call page_slice to fetch one slice at full fidelity. Unlike explore_page nothing is filtered out (no interactive-only, no in-viewport-only), and unlike the scan cache the snapshot does NOT change when you scroll. fresh:true re-collects.',
+    description: 'LOSSLESS page inventory held server-side; returns the small INDEX (counts + addressable dimensions). Then call page_slice to fetch one slice at full fidelity. Unlike explore_page nothing is filtered out (no interactive-only, no in-viewport-only), and unlike the scan cache the snapshot does NOT change when you scroll. There is no TTL: reads self-heal, and fresh:true forces a re-collect.',
     inputSchema: {
       tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       fresh: z.boolean().optional().describe('Re-collect even if a live snapshot exists'),

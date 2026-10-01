@@ -9,7 +9,7 @@
   does nothing, is worse than no parameter: it makes every page op land somewhere you did not
   choose and report a result you cannot attribute.
 
-Measured with tools/tabid-audit.py: 33 tools, 9 declared tabId, and the page ops below did not.
+Measured with tools/tabid-audit.py: 33 registered tools, 9 declared tabId, and the page ops below did not.
 
 This edits src/server.js in place: after each named tool's `inputSchema: {`, it inserts the
 same field the other tools use. Idempotent — running twice changes nothing.

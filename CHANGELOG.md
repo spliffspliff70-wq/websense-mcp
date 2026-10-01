@@ -3,6 +3,13 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [2.0.0] — 2026-10-01
+
+- **A 7-tool listed surface** — `browse`, `find`, `act`, `page_slice`, `tabs`, `debug`, `websense_guide`. The other 30 registered tools stay callable by name but are no longer listed.
+- **New primary loop** — `browse` returns an INDEX over a lossless page inventory, `find` answers WHERE + WHAT per hit, `act` performs the action, and every mutating action returns a grouped diff (`mutated` from structure + content only; the full delta cached behind `FULL DIFF: <handle>`).
+- **Trusted input** — `act{how:"trusted"}` drives `chrome.debugger` + `Input.dispatchMouseEvent`/`dispatchKeyEvent`, so the page receives `isTrusted` events and the browser runs the default action, in a background tab. Same-origin iframes are walked and clickable.
+- **Honest limits** — a trusted drag does not complete (no `drop`), and OS-click equivalence is unproven. See the README's Known limitations.
+
 ## [1.4.9] — 2026-10-01
 
 - **Tab hijacking closed: the router no longer guesses a tab from a process-wide cursor.**

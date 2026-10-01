@@ -171,6 +171,45 @@ function resolveMainWorldDialog(id, action, value) {
   });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ handleReadClipboard — THE ONE implementation, hoisted next to the dialog readers (2026-10-01)
+//
+// WHY IT LIVES HERE. It used to be declared INSIDE the switch block of 70's
+// handleMessageAsync. A `function` declaration in a block is BLOCK-SCOPED under
+// 'use strict' (which the built artifact uses), so it was visible only to the case that
+// sat in the same block — exactly the trap that made readMainWorldDialogs invisible to 00.
+// Now that the shared dispatcher in 00 owns the read_clipboard op, the definition has to be
+// in the earliest scope of the concatenation, like the dialog readers above.
+//
+// WHAT IT DOES: navigator.clipboard.readText() needs the document focused AND the
+// clipboardRead permission; in a backgrounded tab it silently returns '' or throws
+// NotAllowedError. Fall back to execCommand('paste') into a hidden textarea, which the
+// extension's clipboardWrite permission allows without document focus. The direct-WS path
+// used to carry an execCommand-only inline duplicate of this; it is gone — one copy.
+function handleReadClipboard() {
+  return (async () => {
+    let txt = null;
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        txt = await navigator.clipboard.readText();
+      }
+    } catch (e) { /* fall through to execCommand path */ }
+    if (!txt) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand('paste');
+        txt = ok ? ta.value : '';
+        ta.remove();
+      } catch (e2) { txt = ''; }
+    }
+    return { success: true, text: txt || '' };
+  })();
+}
+
   // ═══ Ad-frame detection — skip the WS bridge entirely in ad iframes ═══
   // Content scripts with all_frames:true run inside Google SafeFrame / ad
   // iframes too. Those must NOT connect to the hub — they'd hijack page ops.
@@ -422,8 +461,22 @@ function resolveMainWorldDialog(id, action, value) {
     }
   }
 
-  async function wsDispatchPage(msg) {
+  // ═══ THE ONE PAGE-OP DISPATCHER (2026-10-01) ═══
+  // Every shared page op has EXACTLY ONE implementation — this switch — and the other
+  // routing path (the offscreen relay: 70-capture-and-readers.handleMessageAsync) now
+  // DELEGATES here instead of carrying a second copy. Before this, 48 ops existed in
+  // BOTH switches and had already drifted, e.g.:
+  //   · action_preview called `getActionPreview` — a function defined NOWHERE, so that op
+  //     threw a ReferenceError on every direct-WS call,
+  //   · extract_text returned {text} here but a bare string on the relay,
+  //   · ping answered {pong,ts} here and {pong,url} on the relay,
+  //   · get_status answered a rich union here and a thin object with a stale hardcoded
+  //     wsVersion on the relay.
+  // One copy cannot drift from itself. `ctx` carries ONLY what each path alone can know
+  // (the relay's sender identity) — it is never a second copy of an op body.
+  async function wsDispatchPage(msg, ctx) {
     var params = msg;
+    ctx = ctx || {};
     switch (msg.type) {
       case 'explore_page': return await extractActionGraph({ full: !!params.full, includeContent: params.includeContent !== false, includeHidden: !!params.includeHidden, frameId: params.frameId, incremental: !!params.incremental, maxActions: params.maxActions, contentMaxLen: params.contentMaxLen, settle: params.settle, quietMs: params.quietMs, fresh: params.fresh });
       // Only reached when the hub routes here (a live direct bridge). Relay to the
@@ -454,15 +507,29 @@ function resolveMainWorldDialog(id, action, value) {
       case 'console_log': if (!consoleCapturing) startConsoleCapture(); return getConsoleLog(params.clear !== false, params.maxEntries || 100);
       case 'copy_to_clipboard': return nativeCopyToClipboard(params.text);
       case 'form_state': return getFormState(params.formRef, params.frameId);
-      case 'action_preview': return getActionPreview(params.ref);
+      case 'action_preview': return previewAction(params.ref);   // ★ 2026-10-01: was getActionPreview — a function that exists NOWHERE in the bundle, so action_preview threw a ReferenceError on this path while the relay path worked. Found by the dispatcher-unification audit; pin it in the test.
       // Pass the RAW ref — these readers resolve internally (70-capture).
       // Pre-resolving here made them re-resolve an Element via the string-keyed
       // ref map → always null → "Element not found" on this direct-WS path.
       case 'dropdown_options': return getDropdownOptions(params.ref);
       case 'tab_contents': return getTabContents(params.ref);
       case 'accordion_contents': return getAccordionContents(params.ref);
-      case 'page_state': return getPageState(params.frameId);
-      case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; var et=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; et+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; return { text: et }; }
+      case 'page_state': {
+        // ★ ONE implementation — the canonical getPageState() in 70-capture. ctx adds ONLY
+        // the relay path's routing identity (its sender tab/frame), which no other
+        // dispatcher can know. It is NOT a second copy of the reader: before this the relay
+        // carried a 977-char inline copy that had already drifted (stale wsVersion, narrower
+        // hasCaptcha/isLoading selectors) and the 2026-09-25 MAIN-world dialog fix landed in
+        // getPageState() only — which is exactly how two copies of one op end up disagreeing
+        // about pendingDialogs.
+        const ps = getPageState(params.frameId);
+        if (ctx.sender) {
+          ps.answerTabId = (ctx.sender.tab && ctx.sender.tab.id) || null;
+          ps.answerFrameId = ctx.sender.frameId || null;
+        }
+        return ps;
+      }
+      case 'extract_text': { const sel=params.selector||'body'; const ml=(params.maxLen!==undefined?params.maxLen:(params.max_len!==undefined?params.max_len:4000)); const off=params.offset||0; const el=document.querySelector(sel); const txt=el?fullText(el):''; let et=el?txt.slice(off, off+ml):'Element not found for selector: '+sel; et+=(off+ml < txt.length)?'\n...[TRUNCATED — call extract_text again with offset='+(off+ml)+' for the next window]':''; return et; }   // bare string, NOT {text}: the server's read handler tests `typeof raw.data === 'string'` to run goal-summarization, and the relay copy always returned a string
       case 'read_content': return readContent(params);
       case 'dump_markdown': return nativeDumpMarkdown(params);
       case 'resolve_ref': {
@@ -480,7 +547,7 @@ function resolveMainWorldDialog(id, action, value) {
       case 'screen_center': return screenCenter(params.ref || params.selector || '');
       case 'layout_relation': return layoutRelation(params.refA || '', params.refB || '');
       case 'get_events': return getEvents(params.since);
-      case 'ping': return { pong: true, ts: Date.now() };
+      case 'ping': return { pong: true, ts: Date.now(), url: location.href };   // union: the relay reported url, the direct path reported ts — now one shape
       case 'get_status': {
         // ★ 2026-10-01: this was a STATIC STUB — hubConnected:true, pageConnected:true,
         // hardcoded. It claimed a healthy bridge regardless of reality, and it carried none
@@ -584,16 +651,7 @@ function resolveMainWorldDialog(id, action, value) {
         }
         return await nativeUploadFromBase64(upEl, params.fileContent, params.fileName, params.mimeType);
       }
-      case 'read_clipboard': {
-        try {
-          const ta = document.createElement('textarea');
-          ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;';
-          document.body.appendChild(ta); ta.focus(); ta.select();
-          const ok = document.execCommand('paste');
-          ta.remove();
-          return { success: true, text: ok ? ta.value : '' };
-        } catch (e) { return { success: false, error: 'clipboard read failed: ' + (e.message || e) }; }
-      }
+      case 'read_clipboard': return await handleReadClipboard();   // ★ 2026-10-01: was an execCommand-only inline copy; handleReadClipboard tries navigator.clipboard.readText() FIRST then falls back, and is now the ONE implementation for both paths
       case 'reset_session': wsReady = true; return { success: true };
       default: return { error: 'Unknown content action: ' + msg.type };
     }
