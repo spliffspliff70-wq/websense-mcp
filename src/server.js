@@ -832,7 +832,11 @@ const PAGE_CENTRE_FUNC = 'function(){' +
   'var a=topRect();' +
   'var cx=a.x+a.w/2,cy=a.y+a.h/2;' +
   'var off=(cx<0||cy<0||cx>window.innerWidth||cy>window.innerHeight);' +
-  'if(SCROLLV&&off){el.scrollIntoView({block:"center"});}' +
+  // ★ AND THEN SCROLL THE TOP PAGE (2026-10-01). scrollIntoView on a FRAME's child scrolls the
+  // frame's own document; the IFRAME element stays where it is in the parent, so the button stayed
+  // at top-y 1727 and the trusted click landed on nothing. scrollBy on the TOP window moves the page
+  // for real. Measured: the frame click's y went 1727 (nothing) -> 881 (the page echoed its click).
+  'if(SCROLLV&&off){el.scrollIntoView({block:"center"});var q=topRect();var dy=q.y+q.h/2-window.innerHeight/2;if(Math.abs(dy)>8)window.scrollBy(0,dy);}' +
   'var t=(SCROLLV&&off)?topRect():a;' +
   'return {x:Math.round(t.x+t.w/2),y:Math.round(t.y+t.h/2),inFrame:t.inFrame,offViewport:off,scrolled:!!(SCROLLV&&off)};}';
 
@@ -853,8 +857,7 @@ function mainWorldValue(raw) {
 }
 async function pageCentre(sel, tabId, doScroll) {
   const raw = await callTool('main_world', { tabId: tabId, verify: false,
-    func: PAGE_CENTRE_FUNC.replace('SELV', JSON.stringify(String(sel)))
-                          .replace('SCROLLV', doScroll ? 'true' : 'false') });
+    func: PAGE_CENTRE_FUNC.replace(/SELV/g, JSON.stringify(String(sel))).replace(/SCROLLV/g, doScroll ? 'true' : 'false') });
   const p = mainWorldValue(raw);
   if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return null;
   return { x: p.x, y: p.y, w: 2, h: 2, fromPage: true, inFrame: !!p.inFrame,
