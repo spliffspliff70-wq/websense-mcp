@@ -676,6 +676,10 @@ function withDelta(name, handler) {
   };
 }
 
+// EVERY WRAPPED HANDLER, KEPT BY NAME (2026-10-01). The surface is being reduced to a few tools and
+// a facade must DISPATCH to the real handler, never re-implement it — one idea written twice is this
+// codebase's most expensive recurring bug.
+const TOOL_WRAPPED = new Map();
 function reg(server, name, def, handler) {
   const inputSchema = def.inputSchema || {};
   const merged0 = NO_FRAME.has(name)
@@ -691,11 +695,18 @@ function reg(server, name, def, handler) {
         + 'without spending a second call.'),
     }
     : merged0;
-  server['registerTool'](name, { ...def, inputSchema: merged }, safeHandler(withDelta(name, handler)));
+  const wrapped = safeHandler(withDelta(name, handler));
+  TOOL_WRAPPED.set(name, wrapped);
+  server['registerTool'](name, { ...def, inputSchema: merged }, wrapped);
 }
 
 // Wrap the SDK's tools/list handler: post-process the WIRE OUTPUT so every
 // client sees a slim schema. Registration + arg validation stay untouched.
+// ★ WHAT A MODEL MAY SEE (2026-10-01, Ali: "combine the tools as it makes sense ... the 14 debug
+// tools seem excessive cut it down and combine them into 2-3"). Everything stays registered and
+// CALLABLE — the repo's tests and harnesses use the old names — but this is the listed surface.
+const WIRE_SURFACE = new Set(['browse', 'find', 'act', 'page_slice', 'tabs', 'debug', 'websense_guide']);
+
 function installSchemaMinifier(server) {
   const low = server.server;
   if (!low || typeof low.setRequestHandler !== 'function') return;
@@ -704,6 +715,8 @@ function installSchemaMinifier(server) {
   low.setRequestHandler(ListToolsRequestSchema, async (request, extra) => {
     const result = await orig(request, extra);
     if (result && Array.isArray(result.tools)) {
+      // filter FIRST: an unlisted tool costs nothing on the wire and nothing to choose between
+      result.tools = result.tools.filter((t) => WIRE_SURFACE.has(t.name));
       for (const t of result.tools) {
         if (typeof t.description === 'string') t.description = clipDesc(t.description, DESC_CAP);
         if (t.inputSchema && typeof t.inputSchema === 'object') {
@@ -784,13 +797,80 @@ function sendKeysForWindows(key) {
 // implements — zero extension-side changes. Old one-tool-per-verb names are
 // gone; the mapping lives in websense_guide + README.
 
+// DISPATCH A TOOL BY NAME: the facades call the REAL handler — same args, same auto-diff, same
+// verdicts — so a combined tool cannot drift from the one it replaced.
+async function callTool(name, args) {
+  const fn = TOOL_WRAPPED.get(name);
+  if (!fn) return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'no such tool: ' + name }) }] };
+  return await fn(args);
+}
+
+function registerFacades(server) {
+  reg(server, 'act', {
+    description: 'DO something to the page: click, hover, rightclick, drag, type, key, form, upload, scroll, dialog. how="trusted" sends the input through the browser own pipeline so it is a real isTrusted event and default actions run. Not read: use find + page_slice.',
+    inputSchema: {
+      action: z.enum(['click', 'hover', 'rightclick', 'drag', 'type', 'key', 'form', 'upload', 'scroll', 'dialog']).describe('what to do'),
+      how: z.enum(['auto', 'trusted', 'os']).optional().describe('auto = normal path, trusted = browser input pipeline, os = OS-level input'),
+      ref: z.string().optional(), selector: z.string().optional(),
+      text: z.string().optional(), key: z.string().optional(), value: z.string().optional(),
+      filePath: z.string().optional(), fromRef: z.string().optional(), toRef: z.string().optional(),
+      x: z.number().optional(), y: z.number().optional(),
+      direction: z.string().optional(), amount: z.number().optional(),
+      modifiers: z.array(z.string()).optional(), tabId: z.number().optional(),
+    },
+  }, async (o) => {
+    const a = o.action;
+    const trusted = o.how === 'trusted';
+    const os = o.how === 'os';
+    const pass = (extra) => Object.assign({}, o, extra);
+    if (a === 'click') {
+      if (os) return await callTool('real_click', pass({}));
+      return await callTool(trusted ? 'trusted_click' : 'click', pass(trusted ? { selector: o.ref || o.selector } : {}));
+    }
+    if (a === 'hover' || a === 'rightclick' || a === 'drag') {
+      return await callTool('click', pass({ mode: a }));
+    }
+    if (a === 'type') {
+      if (os) return await callTool('real_paste', pass({}));
+      return await callTool(trusted ? 'trusted_key' : 'type_text', pass({}));
+    }
+    if (a === 'key') {
+      return await callTool(trusted ? 'trusted_key' : 'press_key', pass({}));
+    }
+    if (a === 'upload') return await callTool('form', pass({ action: 'upload' }));
+    if (a === 'form') return await callTool('form', pass({}));
+    if (a === 'scroll') return await callTool('scroll', pass({}));
+    if (a === 'dialog') return await callTool('dialog', pass({}));
+    return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'act: unknown action ' + a }) }] };
+  });
+
+  reg(server, 'debug', {
+    description: 'WebSense itself, and raw reads: op=status, session, logs, cookies, clipboard, screenshot, ax, evaluate, main_world, explore_page, reload, respawn, guide. Use when something is wrong or a page tool will not answer.',
+    inputSchema: {
+      op: z.enum(['status', 'session', 'logs', 'cookies', 'clipboard', 'screenshot', 'ax', 'evaluate', 'main_world', 'explore_page', 'reload', 'respawn', 'guide']).describe('what to inspect or maintain'),
+      kind: z.string().optional().describe('for logs: network | console'),
+      func: z.string().optional(), query: z.string().optional(),
+      action: z.string().optional(), url: z.string().optional(),
+      tabId: z.number().optional(),
+    },
+  }, async (o) => {
+    const map = { status: 'status', session: 'session', cookies: 'cookies', clipboard: 'clipboard',
+      screenshot: 'screenshot', ax: 'ax', evaluate: 'evaluate', main_world: 'main_world',
+      explore_page: 'explore_page', reload: 'extension_reload', respawn: 'respawn_offscreen', guide: 'websense_guide' };
+    if (o.op === 'logs') return await callTool(o.kind === 'console' ? 'console_log' : 'network_log', o);
+    const name = map[o.op];
+    return await callTool(name, o);
+  });
+}
+
 function registerAllTools(server) {
+  registerFacades(server);
 
   // ═══ 1. GUIDE ═══
   reg(server, 'websense_guide', {
-    description: 'START HERE. Full usage guide for the 35 consolidated WebSense tools: browse, find, snapshot map/slice, explore, read, click, trusted_click, trusted_key, type, form, scroll, tabs, wait, evaluate, main_world, ax, real input, status. Call once before using other tools.',
+    description: 'START HERE. The listed tools: browse, find, act, page_slice, tabs, debug, guide. Call once before using others.',
   }, async () => {
-    return textResult(`WebSense MCP — Guide (35 consolidated tools)
+    return textResult(`WebSense MCP — Guide (7 listed / 37 registered)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
@@ -805,10 +885,13 @@ A NAVIGATION IS THE STRONGEST CONFIRMATION AND IT IS NOT IN THE GROUPS: when cli
 
 FULL PAGE MAP vs A SLICE: browse / page_snapshot collect a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and return only a small INDEX (counts + the dimensions you can slice by). find and page_slice then fetch only what you ask for, at full fidelity. The inventory is scroll-stable: it does not churn the way a viewport-filtered scan does, because it is not a subset that changes as you scroll — which is also why the DIFF can tell viewport churn from real mutation. Elements carry a parent pointer, so the BRANCH an element sits in is data you can walk, not a diagram you have to render. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 
-THE 35 TOOLS — what each absorbed from the old 65-tool surface:
+THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
+  act              DO something: action=click|hover|rightclick|drag|type|key|form|upload|scroll|dialog. how="trusted" goes through the browser's own input pipeline (a real isTrusted event, default actions run); how="os" is OS-level input and needs the tab in front. This is the one to reach for.
+  debug            WebSense itself + raw reads: op=status|session|logs|cookies|clipboard|screenshot|ax|evaluate|main_world|explore_page|reload|respawn|guide. Reach for it when something is wrong.
   websense_guide   this guide
   browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + the vocabulary. Replaces navigate+page_snapshot+map read.
   find             TOOL 2 — search the stored inventory; each hit gives WHERE (region, position, branch chain resolved from parent pointers) and WHAT (the page's own role/name/attrs/state). Returns ALL matches.
+THE REMAINING 30 — registered and callable by name, but NOT listed, so a model does not have to choose between them. The listed ones (page_slice, tabs) also appear here:
   explore_page     quick look at a page's actions (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (you usually do NOT need this any more: every mutating op returns a grouped DIFF automatically; for a full page map use browse + find instead — explore_page is the quick look, not the map)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
   click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)

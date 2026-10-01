@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebSense dialog fixture — alert / confirm / prompt</title>
+<!--
+  benc/dialog_fixture.html — the ground truth for tools/dialog-check.mjs.
+
+  WHY IT IS BUILT THIS WAY
+  WebSense captures the PAGE's own alert/confirm/prompt by shadowing the three functions in the
+  MAIN world at document_start (extension/dialog-hook.js). Two consequences decide the shape of
+  this fixture:
+
+    1. confirm()/prompt() return a PROMISE under the hook, not a blocking boolean. So the page
+       handler here `await`s the call. That is the honest consumer form: with the native dialog it
+       still yields the boolean (await <bool> === <bool>), and with the hook it yields whatever the
+       hook resolved. A classic `if (confirm(...))` would be a LIE on this system — a Promise is
+       always truthy, so it would take the TRUE branch no matter what the agent answered, and a
+       test built on it would "pass" the accept half and could never fail.
+
+    2. alert() is SYNCHRONOUS: the hook records it and lets the page continue (setTimeout ... ,0
+       auto-answer), exactly like Chrome does to a background tab. Nothing here awaits alert.
+
+  The page keeps its OWN record in window.__obs and paints it into #rec/#branch. Every check in
+  dialog-check.mjs is read back from THIS state via a main_world read — never from a tool success
+  field, which is the tool grading its own homework.
+-->
+<style>
+  body { font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; margin: 24px; color: #e6e6e6; background: #16181d; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p.sub { color: #8b93a1; margin: 0 0 18px; }
+  .row { margin: 8px 0; }
+  button { font: inherit; padding: 6px 14px; margin-right: 10px; cursor: pointer;
+           color: #16181d; background: #c9d1d9; border: 1px solid #555; border-radius: 4px; }
+  button:hover { background: #fff; }
+  #branch { margin: 18px 0 6px; padding: 8px 12px; font-weight: bold; color: #7ee787;
+            border: 1px solid #30402f; background: #12180f; border-radius: 4px; }
+  #rec { white-space: pre-wrap; padding: 10px 12px; min-height: 90px;
+         border: 1px solid #2c313a; background: #0e1013; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>WebSense dialog fixture</h1>
+<p class="sub">Each button raises the page's OWN native dialog. The record below is what this page observed — it is the ground truth the checker reads.</p>
+
+<div class="row">
+  <button id="btn-alert"   onclick="doAlert()">alert()</button>
+  <button id="btn-confirm" onclick="doConfirm()">confirm()</button>
+  <button id="btn-prompt"  onclick="doPrompt()">prompt()</button>
+  <button id="btn-clear"   onclick="doClear()">clear record</button>
+</div>
+
+<div id="branch">confirm() branch: (not run)</div>
+<div id="rec">(nothing observed yet)</div>
+
+<script>
+// Raised messages are DISTINCTIVE on purpose so a check can assert the page heard exactly this
+// text and not some other dialog's.
+var MSG = {
+  alert:   'ALERT_MSG_1',
+  confirm: 'CONFIRM_MSG_1',
+  prompt:  'PROMPT_MSG_1'
+};
+var PROMPT_DEFAULT = 'prompt-default';
+
+// window.__obs is the page's own ledger. main_world reads THIS, so the tool cannot tell the
+// checker what happened — only the page can.
+window.__obs = { calls: [], returns: [] };
+
+function render() {
+  var lines = [];
+  for (var i = 0; i < window.__obs.calls.length; i++) {
+    lines.push('call  #' + (i + 1) + ' ' + window.__obs.calls[i]);
+  }
+  for (var j = 0; j < window.__obs.returns.length; j++) {
+    var r = window.__obs.returns[j];
+    lines.push('heard #' + (j + 1) + ' ' + r.kind + '() returned ' + JSON.stringify(r.value) +
+               ' (typeof ' + r.type + ')' + (r.branch ? '  ->  ' + r.branch + ' branch' : ''));
+  }
+  document.getElementById('rec').textContent = lines.length ? lines.join('\n') : '(nothing observed yet)';
+}
+
+function doAlert() {
+  window.__obs.calls.push('alert(' + JSON.stringify(MSG.alert) + ')');
+  render();
+  var ret = window.alert(MSG.alert);            // synchronous; the hook records + returns undefined
+  window.__obs.returns.push({ kind: 'alert', value: (ret === undefined ? 'undefined' : ret), type: typeof ret, branch: null });
+  render();
+}
+
+async function doConfirm() {
+  window.__obs.calls.push('confirm(' + JSON.stringify(MSG.confirm) + ')');
+  render();
+  var ret = await window.confirm(MSG.confirm);  // hook: resolves true on accept / false on dismiss
+  var isTrue = (ret === true);
+  window.__obs.returns.push({ kind: 'confirm', value: ret, type: typeof ret, branch: isTrue ? 'TRUE' : 'FALSE' });
+  document.getElementById('branch').textContent = 'confirm() branch: ' + (isTrue ? 'TRUE (took the true branch)' : 'FALSE (took the other branch)');
+  window.__obs.confirmBranch = isTrue ? 'TRUE' : 'FALSE';
+  render();
+}
+
+async function doPrompt() {
+  window.__obs.calls.push('prompt(' + JSON.stringify(MSG.prompt) + ', ' + JSON.stringify(PROMPT_DEFAULT) + ')');
+  render();
+  var ret = await window.prompt(MSG.prompt, PROMPT_DEFAULT); // hook: resolves the agent's text, or null on dismiss
+  window.__obs.returns.push({ kind: 'prompt', value: ret, type: typeof ret, branch: null });
+  window.__obs.promptValue = ret;
+  render();
+}
+
+function doClear() {
+  window.__obs = { calls: [], returns: [] };
+  document.getElementById('branch').textContent = 'confirm() branch: (not run)';
+  render();
+}
+
+// Exposed so the checker can read a single JSON blob in one main_world call.
+window.__obsDump = function () {
+  return {
+    obs: window.__obs,
+    branch: document.getElementById('branch').textContent,
+    recorded: document.getElementById('rec').textContent
+  };
+};
+
+render();
+</script>
+</body>
+</html>

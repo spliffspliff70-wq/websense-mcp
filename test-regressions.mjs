@@ -1656,11 +1656,19 @@ test('no shipped source carries a literal ...[truncated] marker', () => {
 test('docs: the guide states the TRUE tool count and lists every registered tool', () => {
   const regs = [...SRV_SRC.matchAll(/reg\(server, '([a-z_]+)'/g)].map((m) => m[1]);
   assert(regs.length >= 30, 'expected the full tool surface, got ' + regs.length);
-  assert(SRV_SRC.includes('Guide (' + regs.length + ' consolidated tools)'),
-    'the guide header must state the real count (' + regs.length + ')');
-  assert(SRV_SRC.includes('THE ' + regs.length + ' TOOLS'),
-    'the guide tool-list heading must state the real count');
-  const missing = regs.filter((n) => !new RegExp('^  ' + n + '\\s', 'm').test(SRV_SRC));
+  const surfM = SRV_SRC.match(/WIRE_SURFACE = new Set\(\[([^\]]+)\]/);
+  assert(surfM, 'WIRE_SURFACE must exist — it is what a model is allowed to see');
+  const surface = [...surfM[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  assert(surface.length <= 8, 'the LISTED surface must stay small, got ' + surface.length);
+  for (const s of surface) assert(regs.includes(s), 'listed but not registered: ' + s);
+  assert(SRV_SRC.includes('Guide (' + surface.length + ' listed / ' + regs.length + ' registered)'),
+    'the guide header must state BOTH numbers (' + surface.length + ' listed / ' + regs.length + ' registered)');
+  assert(SRV_SRC.includes('THE ' + surface.length + ' LISTED TOOLS'),
+    'and the body must lead with the LISTED surface');
+  assert(new RegExp('^THE REMAINING ' + (regs.length - surface.length) + ' ', 'm').test(SRV_SRC),
+    'and must account for the rest rather than hiding them');
+  const entryNames = (SRV_SRC.match(/^  [a-z_]+ {2,}/gm) || []).map((l) => l.trim().split(/ +/)[0]);
+  const missing = regs.filter((n) => !entryNames.includes(n));
   assert(missing.length === 0, 'registered but undocumented in the guide: ' + missing.join(', '));
 });
 

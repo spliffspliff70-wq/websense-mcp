@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebSense canvas coordinate-click fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
+  h1 { font-size: 20px; }
+  p.note { max-width: 760px; color: #475569; font-size: 13px; line-height: 1.45; }
+  #wrap { display: flex; gap: 20px; margin: 18px 0; }
+  .cell { }
+  canvas { display: block; width: 260px; height: 160px; border: 2px solid #334155; background: #fff; }
+  .cap { font: 12px ui-monospace, monospace; color: #475569; margin-top: 4px; }
+  #readout { font: 14px ui-monospace, monospace; font-weight: 700; padding: 10px 12px; margin: 12px 0;
+             background: #ecfdf5; border: 1px solid #10b981; border-radius: 6px; white-space: pre-wrap; }
+  #counter { font: 13px ui-monospace, monospace; color: #334155; }
+  #spacer { height: 220px; }
+  #offtarget { padding: 14px; margin-top: 10px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px;
+               font: 13px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<h1>canvas coordinate-click fixture</h1>
+<p class="note">Two canvases (2D and WebGL). Each records the coordinates it RECEIVES on click — the
+browser-computed offsetX/offsetY, the clientX/clientY the event carried, and the local point derived
+from clientX minus the canvas rect. Nothing here is inferred from a tool reply: the point of this page
+is that the PAGE writes down what it got, and a checker reads it back.</p>
+
+<div id="wrap">
+  <div class="cell">
+    <canvas id="c2d" width="260" height="160" data-testid="fx-c2d"></canvas>
+    <div class="cap">#c2d — 2D canvas</div>
+  </div>
+  <div class="cell">
+    <canvas id="cgl" width="260" height="160" data-testid="fx-cgl"></canvas>
+    <div class="cap">#cgl — WebGL canvas</div>
+  </div>
+</div>
+
+<div id="readout" data-canvas="none" data-local-x="" data-local-y="" data-client-x="" data-client-y="">last recorded click: NONE</div>
+<div id="counter">canvas clicks recorded: 0</div>
+
+<div id="spacer"></div>
+<div id="offtarget" data-testid="fx-offtarget">#offtarget — a plain div at the bottom. A click here must NOT be recorded as a canvas click.</div>
+
+<script>
+(function () {
+  var FX = { clicks: [], last: null, glOk: false, glErr: null, box: null, ready: false };
+  window.__FX = FX;
+
+  var c2d = document.getElementById('c2d');
+  var cgl = document.getElementById('cgl');
+  var readout = document.getElementById('readout');
+  var counter = document.getElementById('counter');
+
+  // ── record exactly what the page RECEIVED ────────────────────────────────────────
+  function record(which, cv, ev) {
+    var r = cv.getBoundingClientRect();
+    var localX = ev.clientX - r.left;   // derived, unambiguous
+    var localY = ev.clientY - r.top;
+    var entry = {
+      canvas: which,
+      type: ev.type,
+      // what the browser computed for this event, verbatim
+      offsetX: ev.offsetX, offsetY: ev.offsetY,
+      // what the event actually carried
+      clientX: ev.clientX, clientY: ev.clientY,
+      pageX: ev.pageX, pageY: ev.pageY,
+      // the same point as local canvas coordinates (what a real canvas app would use)
+      localX: Math.round(localX * 100) / 100,
+      localY: Math.round(localY * 100) / 100,
+      // event provenance — measured, never assumed
+      isTrusted: ev.isTrusted, detail: ev.detail, button: ev.button,
+      rectLeft: Math.round(r.left * 100) / 100, rectTop: Math.round(r.top * 100) / 100,
+      rectW: Math.round(r.width * 100) / 100, rectH: Math.round(r.height * 100) / 100,
+      inside: localX >= 0 && localY >= 0 && localX <= r.width && localY <= r.height,
+      t: Date.now()
+    };
+    FX.clicks.push(entry);
+    FX.last = entry;
+    render(entry);
+    return entry;
+  }
+
+  function render(e) {
+    var line = 'last recorded click: canvas=' + e.canvas +
+      '  local=(' + e.localX + ', ' + e.localY + ')' +
+      '  offset=(' + e.offsetX + ', ' + e.offsetY + ')' +
+      '  client=(' + e.clientX + ', ' + e.clientY + ')' +
+      '  isTrusted=' + e.isTrusted + ' detail=' + e.detail + ' inside=' + e.inside;
+    readout.textContent = line;
+    readout.setAttribute('data-canvas', e.canvas);
+    readout.setAttribute('data-local-x', e.localX);
+    readout.setAttribute('data-local-y', e.localY);
+    readout.setAttribute('data-client-x', e.clientX);
+    readout.setAttribute('data-client-y', e.clientY);
+    counter.textContent = 'canvas clicks recorded: ' + FX.clicks.length;
+    if (e.canvas === 'c2d') draw2d();
+  }
+
+  // ── 2D canvas: draw + mark the last received point ───────────────────────────────
+  var $2d = c2d.getContext('2d');
+  function draw2d() {
+    if (!$2d) return;
+    $2d.clearRect(0, 0, c2d.width, c2d.height);
+    $2d.fillStyle = '#e0f2fe'; $2d.fillRect(0, 0, c2d.width, c2d.height);
+    $2d.strokeStyle = '#7dd3fc';
+    for (var x = 0; x <= c2d.width; x += 20) { $2d.beginPath(); $2d.moveTo(x + 0.5, 0); $2d.lineTo(x + 0.5, c2d.height); $2d.stroke(); }
+    for (var y = 0; y <= c2d.height; y += 20) { $2d.beginPath(); $2d.moveTo(0, y + 0.5); $2d.lineTo(c2d.width, y + 0.5); $2d.stroke(); }
+    $2d.fillStyle = '#0369a1'; $2d.font = '12px ui-monospace, monospace';
+    $2d.fillText('2D canvas — origin of offsetX/offsetY is here', 8, 16);
+    var e = FX.last;
+    if (e && e.canvas === 'c2d') {
+      $2d.strokeStyle = '#dc2626'; $2d.lineWidth = 2;
+      $2d.beginPath(); $2d.moveTo(e.localX - 10, e.localY); $2d.lineTo(e.localX + 10, e.localY); $2d.stroke();
+      $2d.beginPath(); $2d.moveTo(e.localX, e.localY - 10); $2d.lineTo(e.localX, e.localY + 10); $2d.stroke();
+      $2d.fillStyle = '#dc2626';
+      $2d.fillText(e.localX + ',' + e.localY, e.localX + 8, e.localY - 6);
+    }
+  }
+
+  // ── WebGL canvas ─────────────────────────────────────────────────────────────────
+  (function initGL() {
+    var gl = null;
+    try { gl = cgl.getContext('webgl') || cgl.getContext('experimental-webgl'); }
+    catch (e) { FX.glErr = e.name + ': ' + e.message; }
+    window.__FX.glOk = !!gl;
+    if (!gl) { if (!FX.glErr) FX.glErr = 'getContext("webgl") returned null'; return; }
+    try {
+      gl.viewport(0, 0, cgl.width, cgl.height);
+      gl.clearColor(0.06, 0.30, 0.55, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    } catch (e) { FX.glErr = 'draw failed: ' + e.name; window.__FX.glOk = false; }
+  })();
+
+  // ── listeners: only the canvas element itself records ────────────────────────────
+  c2d.addEventListener('click', function (ev) { record('c2d', c2d, ev); });
+  cgl.addEventListener('click', function (ev) { record('cgl', cgl, ev); });
+
+  // ── page-side facts a checker can ask for, and a page-side reset ──────────────────
+  window.__rects = function () {
+    function box(cv) { var r = cv.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height, right: r.right, bottom: r.bottom }; }
+    function hit(cv) {
+      var r = cv.getBoundingClientRect();
+      var cx = Math.round(r.left + r.width / 2), cy = Math.round(r.top + r.height / 2);
+      var el = document.elementFromPoint(cx, cy);
+      return el ? { id: el.id || null, tag: el.tagName.toLowerCase() } : null;
+    }
+    FX.box = { c2d: box(c2d), cgl: box(cgl),
+      scrollX: window.scrollX, scrollY: window.scrollY,
+      innerW: window.innerWidth, innerH: window.innerHeight,
+      dpr: window.devicePixelRatio, hitCenter: { c2d: hit(c2d), cgl: hit(cgl) } };
+    return FX.box;
+  };
+  window.__state = function () {
+    return { last: FX.last, count: FX.clicks.length, glOk: FX.glOk, glErr: FX.glErr,
+      readoutText: readout.textContent, readoutCanvasAttr: readout.getAttribute('data-canvas') };
+  };
+  window.__resetFX = function () { FX.clicks = []; FX.last = null; render({ canvas: 'none', localX: '', localY: '', offsetX: '', offsetY: '', clientX: '', clientY: '', isTrusted: '', detail: '', inside: '' }); return true; };
+
+  draw2d();
+  FX.ready = true;
+  render({ canvas: 'none', localX: '', localY: '', offsetX: '', offsetY: '', clientX: '', clientY: '', isTrusted: '', detail: '', inside: '' });
+})();
+</script>
+</body>
+</html>

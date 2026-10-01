@@ -33,6 +33,7 @@ const stablePages = [
 // x.com is deliberately NOT in the nightly set: it needs a live logged-in session, and a stale
 // session would report failures that have nothing to do with the tool. Run it by hand.
 const BATTERIES = [
+  { name: 'surface-check',      args: ['tools/surface-check.mjs'],       fixture: true },
   { name: 'bloat-fix-check',    args: ['tools/bloat-fix-check.mjs'],    fixture: true },
   { name: 'keyboard-fix-check', args: ['tools/keyboard-fix-check.mjs'], fixture: true },
   { name: 'fixture-battery',    args: ['tools/fixture-battery.mjs'],    fixture: true },

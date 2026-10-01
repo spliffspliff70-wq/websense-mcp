@@ -32,6 +32,6 @@ if (full) {
     console.log(t.name.padEnd(18) + d.slice(0, 78));
   }
 } else {
-  const bad = ['trusted_click', 'trusted_key'].filter((n) => !tools.some((t) => t.name === n));
-  console.log(bad.length ? 'MISSING from the live server: ' + bad.join(', ') : 'trusted ops present: trusted_click, trusted_key');
+  const bad = ['act', 'debug'].filter((n) => !tools.some((t) => t.name === n));
+  console.log(bad.length ? 'MISSING from the live server: ' + bad.join(', ') : 'the facades are present: act, debug');
 }
