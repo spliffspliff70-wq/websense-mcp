@@ -350,7 +350,7 @@ export class HubServer {
   // needs SW-world DataTransfer; network_log capture hooks run on the relay
   // path). Routing them to a healthy direct content-script socket made them
   // fail exactly when the bridge was otherwise at its best.
-  static get SW_REQUIRED_OPS() { return new Set(['upload_file', 'network_log', 'doctor_sw', 'trusted_click', 'trusted_key']); }
+  static get SW_REQUIRED_OPS() { return new Set(['upload_file', 'network_log', 'doctor_sw', 'trusted_click', 'trusted_key', 'dialog_answer']); }
 
   // Route a command to the best client:
   //  - TAB ops (navigate/list_tabs/switch_tab/close_tab/list_frames/

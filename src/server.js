@@ -1928,7 +1928,12 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         return textResult({ success: true, sent: o.key || null, typed: o.value ? true : false });
       } catch (e) { return textResult({ success: false, error: String((e && e.message) || e) }); }
     }
-    return textResult(await getActiveHub().send({ type: 'handle_dialog', action: o.action || 'accept', index: (o.index === undefined ? null : o.index), value: (o.value === undefined ? null : o.value), tabId: o.tabId }));
+    const r1 = await getActiveHub().send({ type: 'handle_dialog', action: o.action || 'accept', index: (o.index === undefined ? null : o.index), value: (o.value === undefined ? null : o.value), tabId: o.tabId });
+    if (!relayFailure(unwrapRelay(r1))) return textResult(r1);
+    const dn = o.tabId || sessionTabOf();
+    const r2 = await getActiveHub().send({ type: 'dialog_answer', tabId: dn, accept: (o.action || 'accept') === 'accept', promptText: o.value });
+    if (!relayFailure(unwrapRelay(r2))) { r2.native = true; r2.note = 'answered the page real dialog through the browser (Page.handleJavaScriptDialog)'; return textResult(r2); }
+    return textResult(r1);
   });
 
   // ═══ 17. SESSION ═══
