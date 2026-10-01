@@ -1437,8 +1437,10 @@ test('effect: classifyEffect unwraps the relay envelope, and unverifiable never 
   // then recommended real_click for anything non-confirmed, which is the
   // focus-steal loop (async/download/_blank/focus actions all landed while the
   // verdict said "retry with OS input").
-  assert(/const box = \(result && typeof result === 'object' && result\.data/.test(SRV_SRC),
-    'classifyEffect must unwrap the {data:{…}} relay envelope before reading states');
+  assert(/function unwrapRelay\(result\) \{[\s\S]*?result\.data && typeof result\.data === 'object'/.test(SRV_SRC),
+    'unwrapRelay must unwrap the {data:{…}} relay envelope');
+  assert(/const box = unwrapRelay\(result\)/.test(SRV_SRC),
+    'classifyEffect must use unwrapRelay before reading before/afterState');
   assert(/result\.effect === 'suspected_noop'/.test(SRV_SRC),
     'OS-input escalation must be gated on a real measured no-op');
   assert(/recommended: 're_read'/.test(SRV_SRC),
@@ -2280,6 +2282,119 @@ test('find: every filter the handler applies must ALSO be declared in the schema
     assert(applied.includes(k), k + ' must be in the handler filter list');
     assert(new RegExp('^\\s*' + k + ':', 'm').test(schemaText), k + ' must be in the schema');
   }
+});
+
+test('slice: every key sliceSnapshot understands must be declared in EVERY tool that forwards to it', () => {
+  // ★ GENERALISED 2026-10-01. The `find` test above pins ONE tool, and the same defect class
+  // then shipped unnoticed in page_slice: `indices` was absent from its schema, so it was
+  // stripped before the handler saw it and page_slice{indices:[31]} returned 543 of 543 records
+  // — the WHOLE page — while the DIFF block tells the model that this exact call is how you pull
+  // the detail for an index it named. A filter the schema accepts and the handler ignores is
+  // worse than no filter: it answers confidently and wrongly, and here it also silently
+  // reintroduced the context bloat the index/diff split exists to prevent.
+  //
+  // So take the vocabulary from sliceSnapshot ITSELF and check every caller against it.
+  const snapSrc = readFileSync(new URL('./src/snapshot.js', import.meta.url), 'utf8');
+  const fn = snapSrc.match(/export function sliceSnapshot\(snap, filter = \{\}\) \{[\s\S]*?\n\}/);
+  assert(fn, 'sliceSnapshot must be findable in src/snapshot.js');
+  const keys = [...new Set([...fn[0].matchAll(/filter\.([a-zA-Z_]+)/g)].map((m) => m[1]))];
+  assert(keys.length >= 10, 'expected the full filter vocabulary, got: ' + keys.join(', '));
+
+  // every tool whose handler forwards to sliceSnapshot
+  const callers = [];
+  const re = /reg\(server, '([a-z_]+)', \{/g;
+  let m;
+  while ((m = re.exec(SRV_SRC))) callers.push({ name: m[1], at: m.index });
+  for (let i = 0; i < callers.length; i++) {
+    const end = i + 1 < callers.length ? callers[i + 1].at : SRV_SRC.length;
+    callers[i].text = SRV_SRC.slice(callers[i].at, end);
+  }
+  const forwarding = callers.filter((c) => c.text.includes('sliceSnapshot('));
+  assert(forwarding.length >= 2,
+    'expected at least find and page_slice to forward to sliceSnapshot, got: ' + forwarding.map((c) => c.name).join(', '));
+
+  for (const c of forwarding) {
+    const schema = c.text.match(/inputSchema: \{[\s\S]*?\n    \}/);
+    assert(schema, c.name + ' schema must be findable');
+    // find copies an explicit allow-list into its filter object; page_slice forwards its args
+    // wholesale, so for page_slice EVERY key must be declared.
+    const copies = c.text.match(/for \(const k of \[([^\]]+)\]\)/);
+    const allowed = new Set(copies ? copies[1].split(',').map((s) => s.trim().replace(/['"]/g, '')) : []);
+    const missing = keys.filter((k) => !allowed.has(k) && !new RegExp('^\\s*' + k + ':', 'm').test(schema[0]));
+    assert(missing.length === 0,
+      c.name + ' forwards to sliceSnapshot but its schema strips: ' + missing.join(', ')
+      + ' — the caller gets an unfiltered (whole-page) answer that looks filtered');
+  }
+});
+
+test('collector: a locator built from an id must be CSS-escaped', () => {
+  // ★ Found 2026-10-01 by simulating a task on bbc.com/news. React's useId() mints ids like
+  // ":R35tbdm:", and locatorOf returned '#' + id — which is NOT valid CSS (a colon starts a
+  // pseudo-class), so find/page_slice handed out a locator that could never be used and every
+  // act on that element failed with a selector error. A selector error reads as "the control is
+  // broken", not "the locator is broken", which is why it needs pinning rather than noticing.
+  assert(/CSS\.escape\(el\.id\)/.test(COLLECTOR), 'the id locator must go through CSS.escape');
+  assert(!/return '#' \+ el\.id;/.test(COLLECTOR), 'the unescaped id locator must be gone');
+  // ...but an attribute VALUE is not an identifier: inside a quoted attribute value CSS.escape
+  // over-escapes, and the backslash it emits does not survive transport (measured live: every
+  // backslash-bearing form failed to resolve while the plain form resolved and reached the
+  // guard). Only " and \ need escaping there.
+  assert(!/CSS\.escape\(at\[i\]\.value\)/.test(COLLECTOR),
+    'attribute values must be quote-escaped, never CSS.escaped — the emitted backslashes do not '
+    + 'survive the pipeline and the locator silently stops resolving');
+});
+
+test('cs: typing into a disabled/read-only control must SAY SO, not advise a re-read loop', () => {
+  // ★ Found 2026-10-01 simulating a task on bbc.com/news: the search input is disabled:1 until
+  // its menu opens, so typing "failed" — and the failure carried the blanket escalation
+  // "re_read the field and re-type", which loops forever on a control that is disabled BY
+  // DESIGN. setNativeValue happily assigns .value to a disabled input, so without an explicit
+  // state guard there is nothing in the read-back that reveals the cause.
+  const m = CS_SRC.match(/async function nativeType\(el, text, clearFirst\) \{[\s\S]*?\n  \}/);
+  assert(m, 'nativeType must be findable in the content script');
+  for (const g of ['el.disabled', 'el.readOnly', "getAttribute('aria-disabled')", "el.type === 'file'"]) {
+    assert(m[0].includes(g), 'nativeType must guard against ' + g);
+  }
+  assert(/reason: 'the target is disabled'/.test(m[0]), 'and it must name the reason');
+  assert(/hint:/.test(m[0]), 'and carry a usable next step instead of a re-read loop');
+});
+
+test('cs: a locator must not be rejected by a hand-rolled character whitelist', () => {
+  // ★ Found 2026-10-01, on x.com's file input. resolveSelectorRef had a character whitelist that
+  // omitted '/' — so input[accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime"]
+  // returned null BEFORE querySelector ever saw it, and the tool reported "Element not found" for
+  // an element that was sitting right there. Every href/src locator is in the same state, which is
+  // most links on the web. Letting the CSS parser decide is both simpler and correct: an invalid
+  // selector throws and is caught, which is what the whitelist was hand-rolling — minus the false
+  // negatives.
+  const m = CS_SRC.match(/function resolveSelectorRef\(ref\) \{[\s\S]*?\n  \}/);
+  assert(m, 'resolveSelectorRef must be findable');
+  // strip comment lines before matching, or the note recording the old form reads as the form
+  const code = m[0].split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert(!/\^\[\\/.test(code), 'the character whitelist must be gone (a locator containing / could never resolve)');
+  assert(/deepQuery\(ref\)/.test(code), 'the selector must still be tried');
+  assert(/catch \(_\) \{ return null; \}/.test(code), 'and the parser must be what rejects a bad one');
+});
+
+test('verdicts: read the action result from the PAYLOAD, never the relay envelope', () => {
+  // ★ A FALSE SUCCESS (found 2026-10-01 simulating a task on bbc.com/news). Hub replies are
+  // {type,id,success,data:{…}} and the TOP-LEVEL success means "a reply was delivered", not "the
+  // action worked". type_text judged from the envelope, so a refused type came back
+  // effect:'confirmed' while its own payload said {success:false, reason:'the target is disabled'}
+  // — and the auto-DIFF for the same call said mutated:false, "treat this action as NOT LANDED".
+  // Two signals disagreed and the optimistic one was wrong, which is the failure mode that
+  // matters most: the caller believes the text landed when it did not.
+  assert(/function unwrapRelay\(/.test(SRV_SRC), 'unwrapRelay must exist so handlers cannot miss it');
+  const ce = SRV_SRC.match(/function classifyEffect\(result\) \{[\s\S]*?\n\}/);
+  assert(ce && /unwrapRelay\(result\)/.test(ce[0]),
+    'classifyEffect must unwrap before reading before/afterState');
+  const ttStart = SRV_SRC.indexOf("reg(server, 'type_text'");
+  const ttNext = SRV_SRC.indexOf("reg(server, '", ttStart + 10);
+  const tt = SRV_SRC.slice(ttStart, ttNext > 0 ? ttNext : ttStart + 4000);
+  assert(ttStart > 0, 'the type_text handler must be findable');
+  assert(/unwrapRelay\(result\)/.test(tt), 'type_text must unwrap before judging success');
+  assert(!/const persisted = result && \(result\.valueSet/.test(tt),
+    'the verdict must not be computed from the envelope — that is the false success');
 });
 
 test('page ops: every tool that can act on a tab must DECLARE tabId in its schema', () => {

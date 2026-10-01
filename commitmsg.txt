@@ -1,45 +1,71 @@
-regions: group a collapse by identity, not by a contiguous run
+four bugs found by simulating real tasks on 7 live pages
 
-The grouping model was the real defect. It looked for the longest CONTIGUOUS
-periodic run — period p: rest[j] === rest[j-p] — and emitted one template per
-phase. A real feed has no periodic run, so the scan fragmented and paid a full
-template per phase boundary: on x.com/home the timeline's children are
-[A, B, A, A, A, A, A] (A = six posts, B = one post behind an extra wrapper), the
-best it could find was period 3 spanning 4, and it printed THREE full post
-templates to describe five items. 137 lines / 7,013 B for a feed in which every
-child is data-testid=cellInnerDiv.
+Ali: "restart and properly test, simulate a few tasks on a sample of 5-7
+different pages as you did before and fix issues". The sweep: browse -> find ->
+page_slice -> type -> scroll -> read the auto-DIFF, on bbc.com/news,
+books.toscrape, developer.mozilla.org, old.reddit.com, stripe.com/pricing,
+news.ycombinator.com and x.com/home. Every fix below was found by USING the
+tools, not reading them, and each is pinned by a test. 159 tests pass.
 
-A collapse now GROUPS BY IDENTITY (name + shape) across the whole child list.
-Order comes from first appearance. A feed does not need to be periodic to be a
-feed. Because a group's members share the key they share the name by
-construction, so the "collapsed run lists every distinct name" clause became
-vacuous — and nothing can be hidden by a collapse.
+★ 1. page_slice{indices:[i]} RETURNED THE WHOLE PAGE.
+`indices` was never declared in page_slice's schema, so it was stripped before
+the handler saw it — while the handler forwards its args straight to
+sliceSnapshot(), which has supported `indices` since the DIFF was built, and the
+DIFF block tells the model that this exact call is how you pull the detail for
+an index it named. Measured: page_slice{indices:[31]} returned 543 of 543
+records on books.toscrape. The documented follow-up silently undid the
+index/diff split. Fixed, and the guard is now GENERAL instead of one-tool: the
+new test takes the key set from sliceSnapshot itself and checks every tool that
+forwards to it (find was already covered; page_slice was not).
 
-FOUR RULES WERE TRIED AGAINST SIX REAL PAGES BEFORE THIS ONE, each recorded in
-the source and pinned by a test because each was wrong in a way only measurement
-caught:
-  (a) name + shape, contiguous scan   books ok, bbc ok,   x.com 137 lines
-  (b) name alone                      MERGED books' two div.page_inner boxes: 17 -> 3 lines
-  (c) name + same DOM parent          fixed books, broke bbc (193 vs 149): bbc wraps every
-                                      nav item in its own <li>
-  (d) name + parent-tag shape         books ok, x.com 61, but bbc 166 (worse than 150)
-  (e) SHIPPED: name + shape, grouped  every page equal or better
+★ 2. "Element not found" FOR AN ELEMENT THAT WAS RIGHT THERE — three causes.
+Found on bbc.com/news's search field and x.com's file input:
+  (a) locatorOf returned '#' + id. React's useId mints ids like ":R35tbdm:", and
+      a colon starts a pseudo-class, so the locator was invalid CSS.
+  (b) CSS.escape was then applied to attribute VALUES, which OVER-escapes inside
+      a quoted value, and the emitted backslashes do not survive this pipeline:
+      probed in-page, querySelector received '#:R35tbdm:' — escape eaten —
+      and threw "not a valid selector" while getElementById(':R35tbdm:') worked.
+  (c) resolveSelectorRef rejected any ref containing a character outside a
+      hand-rolled whitelist that OMITS '/' — so every href/src locator, and
+      x.com's input[accept="image/jpeg,image/png,..."], returned null before
+      querySelector ever ran.
+Now: a clean id is used exactly as before; an id needing escaping only wins when
+nothing better exists; attribute values are quote-escaped (only " and \), built
+with fromCharCode(92) because the collector is a template literal; and the
+whitelist is gone — the CSS parser is the judge, invalid selectors throw and are
+caught, which is what the whitelist was hand-rolling minus the false negatives.
+Verified live: input[id=":R35tbdm:"] resolves where every backslash-bearing form
+does not, and x.com's file input now resolves.
 
-Measured offline, one live capture each, before -> after:
-  x.com/home    137 lines / 7,013 B  ->  74 lines / 3,761 B
-  bbc.com/news  150 lines / 9,621 B  -> 105 lines / 5,823 B
-  stripe/pricing 125 lines / 7,057 B ->  97 lines / 5,622 B
-  books.toscrape 11 / 325  MDN 22 / 776  old.reddit 29 / 940  -- all unchanged
+★ 3. A STATIC PAGE REPORTED mutated:true FOREVER.
+The diff baseline was keyed by locator alone. On news.ycombinator.com all 30
+story rows carry the same locator (locatorOf walks at most 5 ancestors), so
+later entries overwrote earlier ones and 29 rows were compared against ONE
+arbitrary baseline record. Measured: every diff reported the same 29
+"content changed" entries (wasNameLen 6 vs nameLen 12-25) so a pure scroll came
+back mutated:true, and a second identical scroll reported the identical 29 —
+permanent, not a settle artefact. Cause confirmed by dumping the group.
+Now keyed by locator PLUS THE ORDINAL WITHIN IT (the k-th element carrying a
+locator matches the k-th baseline element carrying it): one-to-one, still stable
+when elements appear under a different locator. All 7 sample pages now report
+mutated:false, structure 0, content 0 on a pure scroll, with the scroll in the
+viewport group where it belongs. Previously 5 of 7 reported mutated:true.
 
-★ A CORRECTION, because I put a wrong number in the previous commit and in a
-test comment: I wrote that "7 of the x.com tweets sit behind an extra anonymous
-wrapper", using it to rule out the same-parent rule. Measured on the live
-timeline it is ONE of seven (two of nine in an earlier capture), and all seven
-sit under the single DOM parent #533 — they are true siblings. The wrong number
-had already been used to dismiss the rule that, corrected, turned out to matter.
+★ 4. A FALSE SUCCESS: a refused action reported as confirmed.
+Hub replies are {type,id,success,data:{…}} and the top-level success means "a
+reply was delivered", NEVER "the action worked". type_text judged from the
+envelope, so on bbc.com/news a type into a disabled input came back
+effect:'confirmed' while its own payload said {success:false, reason:'the target
+is disabled'} and the auto-DIFF for the same call said mutated:false — "treat
+this action as NOT LANDED". Two signals disagreed and the optimistic one was
+wrong. classifyEffect has known this since 2026-09-25; the fix is the same
+unwrap, now a single shared unwrapRelay() so the next handler cannot miss it.
 
-The live path needs one server restart to pick this up; it is NOT verified
-through the gateway yet, only by running the real regionTree over saved
-inventories.
+★ 5. GUIDANCE THAT LOOPS. A target that cannot accept text now names why and
+what to do instead of advising "re-read the field and re-type" — measured:
+bbc's search input is disabled until its menu opens, and x.com's is a file
+input. Both now answer enable_then_type / form{action:"upload"} respectively.
 
-154 tests pass.
+Also carried from this round, unchanged: the regions grouping (name + shape,
+grouped by identity) and the reverted name-only variant stay as they were.

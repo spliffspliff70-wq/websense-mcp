@@ -782,7 +782,8 @@ function resolveMainWorldDialog(id, action, value) {
   // directly before falling back to the locator chain.
   function resolveSelectorRef(ref) {
     if (typeof ref !== 'string') return null;
-    if (!/^[\[\]#\.>\+~,:*='"\w\-()%|\s]+$/.test(ref)) return null;
+    // ★ NO WHITELIST (2026-10-01): the old one omitted '/', so every href/src locator and x.com's
+    // file input returned null before querySelector ran. Full record: the cs: test for this.
     if (!(ref.startsWith('[') || ref.startsWith('#') || ref.startsWith('.') || ref.includes(' > ') || ref.includes('>') || ref.includes('~') || /^[a-zA-Z][\w-]*([\[.:])/.test(ref))) return null;
     try {
       // deepQuery: accept a shadow-hosted selector as a ref (Reddit's Post button,
@@ -2915,6 +2916,32 @@ function resolveMainWorldDialog(id, action, value) {
 
   async function nativeType(el, text, clearFirst) {
     if (!el) throw new Error('Element not found');
+    // ★ A DISABLED TARGET CANNOT BE TYPED INTO, AND THE OLD RESULT DID NOT SAY SO (found
+    // 2026-10-01 by simulating a task on bbc.com/news). The search input there is
+    // disabled:1 and off-viewport while its menu is collapsed. setNativeValue on a disabled
+    // input does assign .value, so the page never accepts it and the verified read-back fails —
+    // and the failure came back with the generic escalation "re_read the field and re-type",
+    // which LOOPS FOREVER on a control that is disabled by design. The element's own state is
+    // the answer here, so report it instead of guessing at the read-back.
+    if (el.disabled) {
+      return { success: false, effect: 'failed', reason: 'the target is disabled',
+               hint: 'activate it first (open the menu or dialog that enables it), then type' };
+    }
+    if (el.readOnly) {
+      return { success: false, effect: 'failed', reason: 'the target is read-only',
+               hint: 'this field cannot be typed into until the page makes it editable' };
+    }
+    if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') {
+      return { success: false, effect: 'failed', reason: 'the target is aria-disabled',
+               hint: 'activate it first, then type' };
+    }
+    // ★ THE SAME LESSON, ONE MORE CASE (2026-10-01): a FILE input cannot be typed into at all —
+    // found by the same sweep, on x.com's composer. Typing "fails" and the caller is told to
+    // re-read and re-type; the real answer is that this control takes a file, not text.
+    if (el.tagName === 'INPUT' && el.type === 'file') {
+      return { success: false, effect: 'failed', reason: 'the target is a file input',
+               hint: 'use form{action:"upload", ref, filePath} — text cannot be typed into a file input' };
+    }
     var cf = (typeof clearFirst !== 'undefined') ? clearFirst : true;
     nativeClick(el);
     if (cf!==false) { setNativeValue(el,''); el.dispatchEvent(new Event('input',{bubbles:true})); }
@@ -3966,7 +3993,7 @@ function resolveMainWorldDialog(id, action, value) {
       // v4.6.1. The build stamp is substituted here at build time and encodes BOTH the
       // version and the source hash, so reporting it is the only freshness claim that
       // cannot rot. Reported from one place so both dispatchers agree.
-      csBuild:'v4.6.1-76c9364e',
+      csBuild:'v4.6.1-8aaceaec',
     };
   }
 

@@ -67,17 +67,46 @@ export const COLLECTOR = `() => {
   // is O(elements x attributes) document scans, which is how a page like x.com turns
   // a locator into a multi-second stall.
   function locatorOf(el, attrCount) {
-    if (el.id) return '#' + el.id;
+    // ★ THE ID MUST BE ESCAPED, AND AN ESCAPED ID IS A LAST RESORT (found 2026-10-01 by
+    // simulating a task on bbc.com/news). React's useId() mints ids like ":R35tbdm:", and
+    // '#' + id is NOT valid CSS — a colon starts a pseudo-class — so find and page_slice handed
+    // out a locator that no act could ever resolve, and the failure reads as "the control is
+    // broken" rather than "the locator is broken".
+    // Escaping fixes the CSS, but a backslash does not survive this pipeline end to end: measured
+    // by running the page's own querySelector, the error was
+    //   "Failed to execute 'querySelector' on 'Document': '#:R35tbdm:' is not a valid selector"
+    // — the escapes had been consumed in transport — while getElementById(':R35tbdm:') worked and
+    // the element's own data-testid was reachable. So a CLEAN id is still the best locator and is
+    // used exactly as before; an id that needs escaping is only used when the element offers
+    // nothing better, and a unique attribute wins over it.
+    var cleanId = null;
+    if (el.id) { try { cleanId = CSS.escape(el.id); } catch (e) { cleanId = null; } }
+    if (cleanId && cleanId === el.id) return '#' + cleanId;
     var at = el.attributes;
     if (at && attrCount) {
       for (var i = 0; i < at.length; i++) {
         var an = at[i].name;
         if (an === 'style' || an === 'class' || an === 'data-websense-ref') continue;
         if (attrCount[an + '=' + at[i].value] === 1) {
-          try { return el.tagName.toLowerCase() + '[' + an + '="' + CSS.escape(at[i].value) + '"]'; } catch (e) {}
+          // ★ QUOTE-ESCAPE AN ATTRIBUTE VALUE, DO NOT CSS.escape IT (2026-10-01). Measured on
+          // bbc.com/news: CSS.escape is for IDENTIFIERS, and inside a quoted attribute value it
+          // over-escapes — for an id of ":R35tbdm:" it emitted input[id=":R35tbdm:"] with
+          // backslashes added, and a backslash does not survive this pipeline end to end, so the
+          // locator silently stopped resolving. The quoted form needs only a quote and a
+          // backslash escaped.
+          // ★ AND THE BACKSLASH IS BUILT, NOT WRITTEN, because this function is a TEMPLATE
+          // LITERAL shipped to the page: a literal \\ in here collapses to \ when the string is
+          // evaluated on the server and the page receives a syntactically broken regex (caught
+          // by the collector-compiles test). String.fromCharCode(92) sidesteps the escaping
+          // entirely. Verified live: input[id=":R35tbdm:"] resolves and reaches the
+          // disabled-target guard, where every backslash-bearing form does not.
+          var BS = String.fromCharCode(92);
+          var vv = String(at[i].value).split(BS).join(BS + BS).split('"').join(BS + '"');
+          try { return el.tagName.toLowerCase() + '[' + an + '="' + vv + '"]'; } catch (e) {}
         }
       }
     }
+    if (cleanId) return '#' + cleanId;      // escaped id, only now — still beats a 5-deep path
     var parts = [], node = el, depth = 0;
     while (node && node.nodeType === 1 && depth < 5) {
       var tag = node.tagName.toLowerCase();
@@ -85,7 +114,10 @@ export const COLLECTOR = `() => {
       var p = node.parentNode, idx = 1, sib = node;
       while (sib && sib.previousElementSibling) { sib = sib.previousElementSibling; idx++; }
       parts.unshift(tag + ':nth-of-type(' + idx + ')');
-      if (node.id) { parts[0] = '#' + node.id; break; }
+      if (node.id) {
+        try { parts[0] = '#' + CSS.escape(node.id); } catch (e) { parts[0] = '#' + node.id; }
+        break;
+      }
       node = p; depth++;
     }
     return parts.join(' > ');

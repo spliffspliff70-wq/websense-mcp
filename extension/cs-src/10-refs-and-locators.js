@@ -170,7 +170,8 @@
   // directly before falling back to the locator chain.
   function resolveSelectorRef(ref) {
     if (typeof ref !== 'string') return null;
-    if (!/^[\[\]#\.>\+~,:*='"\w\-()%|\s]+$/.test(ref)) return null;
+    // ★ NO WHITELIST (2026-10-01): the old one omitted '/', so every href/src locator and x.com's
+    // file input returned null before querySelector ran. Full record: the cs: test for this.
     if (!(ref.startsWith('[') || ref.startsWith('#') || ref.startsWith('.') || ref.includes(' > ') || ref.includes('>') || ref.includes('~') || /^[a-zA-Z][\w-]*([\[.:])/.test(ref))) return null;
     try {
       // deepQuery: accept a shadow-hosted selector as a ref (Reddit's Post button,

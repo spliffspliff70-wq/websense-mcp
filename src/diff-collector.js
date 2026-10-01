@@ -123,11 +123,36 @@ export const DIFF_COLLECTOR = `() => {
     return out;
   }
 
-  // Match by locator: stable across index shifts when elements are added/removed.
+  // ★ A LOCATOR IS NOT AN IDENTITY — IT IS A KIND OF PLACE (found 2026-10-01 by inspecting a
+  // real diff on news.ycombinator.com). The baseline was keyed by loc alone. On HN every one of
+  // the 30 story rows carries the locator
+  // 'td:nth-of-type(3) > span:nth-of-type(1) > span:nth-of-type(2) > a:nth-of-type(1) > span:nth-of-type(1)'
+  // because locatorOf walks at most 5 ancestors relative to the element, so later entries simply
+  // OVERWROTE earlier ones in the map and 29 of the 30 rows were compared against ONE arbitrary
+  // baseline record. Measured: every diff on that static page reported the same 29
+  // 'content changed' entries with wasNameLen 6 and nameLen 12-25, so mutated was permanently
+  // true on a page that had not changed at all — and a scroll looked like a page mutation.
+  //
+  // The key is the locator PLUS THE ORDINAL WITHIN IT: the k-th element carrying a locator
+  // matches the k-th baseline element carrying it. Still stable when elements appear or vanish
+  // under a DIFFERENT locator, and now one-to-one where it used to be lossy. The suffix is
+  // always a bare integer after the final '#', so it cannot collide with a locator that itself
+  // contains a '#'.
+  function keyed(list) {
+    var n = Object.create(null), out = new Array(list.length);
+    for (var k = 0; k < list.length; k++) {
+      var L = list[k].loc || ('@' + list[k].i);
+      var o = n[L] || 0; n[L] = o + 1;
+      out[k] = L + '#' + o;
+    }
+    return out;
+  }
+  var oldKeys = keyed(prev.els);
+  var newKeys = keyed(now.elements);
   var oldBy = Object.create(null);
-  for (var a = 0; a < prev.els.length; a++) oldBy[prev.els[a].loc] = prev.els[a];
+  for (var a = 0; a < prev.els.length; a++) oldBy[oldKeys[a]] = prev.els[a];
   var newBy = Object.create(null);
-  for (var b = 0; b < now.elements.length; b++) newBy[now.elements[b].loc] = now.elements[b];
+  for (var b = 0; b < now.elements.length; b++) newBy[newKeys[b]] = now.elements[b];
 
   var addedIdx = [];   // indices only — see ident() above
   var structure = { removed: [], changed: [] };
@@ -136,7 +161,7 @@ export const DIFF_COLLECTOR = `() => {
   var viewport = { moved: [] };
 
   for (var c = 0; c < now.elements.length; c++) {
-    var nr = now.elements[c], or = oldBy[nr.loc];
+    var nr = now.elements[c], or = oldBy[newKeys[c]];
     if (!or) {
       // Indices only for adds: on a hydrate this is thousands of elements and their attrs
       // are already stored. The caller slices the inventory for any index it wants.
@@ -196,7 +221,9 @@ export const DIFF_COLLECTOR = `() => {
   }
   for (var d = 0; d < prev.els.length; d++) {
     var pr = prev.els[d];
-    if (!newBy[pr.loc]) structure.removed.push(ident(pr));
+    // keyed the same way as the live pass, or a shared locator makes one survivor stand in for
+    // all of them and the removals are never reported
+    if (!newBy[oldKeys[d]]) structure.removed.push(ident(pr));
   }
 
   window[KEY] = { url: now.url, at: now.count, seq: (prev.seq + 1), els: now.elements, byLoc: null, sx: now.sx, sy: now.sy };

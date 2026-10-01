@@ -102,19 +102,26 @@ function textResult(data) {
 // clicks/keys are frequently ignored by React handlers; without this the agent
 // retries blindly. effect: confirmed = observable state change;
 // suspected_noop = before/after identical; unverifiable = no states to compare.
+// ★ THE RELAY ENVELOPE, IN ONE PLACE (2026-10-01). Hub replies are {type,id,success,data:{…}}.
+// The top-level `success` means "a reply was delivered", NEVER "the action worked" — so every
+// verdict must read the payload one level down.
+//   classifyEffect learned this on 2026-09-25 (before/afterState live under data; reading the
+//   top level made every relayed click look 'unverifiable' and trigger a needless real_click).
+//   type_text was written later and did NOT unwrap, and the cost was a FALSE SUCCESS: measured on
+//   bbc.com/news, the payload said {success:false, reason:'the target is disabled'} while the
+//   envelope said success:true, and the tool answered effect:'confirmed' for a type that never
+//   landed. The auto-DIFF for that same call said mutated:false — "treat this action as NOT
+//   LANDED" — so two signals disagreed and the optimistic one was wrong.
+// One helper, so the next handler cannot miss it.
+function unwrapRelay(result) {
+  return (result && typeof result === 'object' && result.data && typeof result.data === 'object')
+    ? result.data : result;
+}
+
 function classifyEffect(result) {
   if (!result || result.success === false) return 'failed';
-  // 2026-09-25 FIX: the RELAY path wraps payloads in {type,id,success,data:{…}}
-  // (hub round-trip via the offscreen), so beforeState/afterState live one level
-  // down. This function only ever looked at the top level, so on every relayed
-  // op it saw NO states and returned 'unverifiable' — which then triggered the
-  // automatic real_click escalation even for actions that demonstrably landed
-  // (measured: identical-state click → 'unverifiable' + real_click recommended,
-  // while a differing-state action ALSO reported unverifiable). Unwrap first,
-  // exactly like summarizeDelta does for the same envelope.
-  const box = (result && typeof result === 'object' && result.data && typeof result.data === 'object') ? result.data : result;
+  const box = unwrapRelay(result);
   const b = box.beforeState, a = box.afterState;
-  if (!b && !a) return 'unverifiable';
   if (b && a) {
     // URL change is the strongest signal
     if ((a.url || '') !== (b.url || '')) return 'confirmed';
@@ -969,10 +976,21 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       return textResult(result);
     }
     result = await getActiveHub().send({ type: 'type_text', ref: o.ref, text: o.text, clearFirst: o.clearFirst !== false, frameId: o.frameId, tabId: o.tabId });
-    const persisted = result && (result.valueSet === true || result.verified === true || result.success === true);
-    result.effect = (result && result.success === false) ? 'failed' : persisted ? 'confirmed' : 'unverifiable';
+    // ★ READ THE VERDICT FROM THE PAYLOAD, NOT THE ENVELOPE (2026-10-01) — see unwrapRelay.
+    // This line is where the false success came from: `result.success` is the RELAY's success
+    // (a reply arrived), so a refused type looked like a confirmed one.
+    const d = unwrapRelay(result);
+    const persisted = d && (d.valueSet === true || d.verified === true || d.success === true);
+    result.effect = (d && d.success === false) ? 'failed' : persisted ? 'confirmed' : 'unverifiable';
     if (result.effect !== 'confirmed') {
-      result.escalation = { recommended: 're_read', reason: 'value persistence not confirmed — re-explore the field and re-type with clearFirst:true before escalating to OS-level input' };
+      // ★ THE ELEMENT'S OWN STATE BEATS A GENERIC RE-READ (2026-10-01). When the action layer
+      // refused for a reason it knows (disabled / read-only / aria-disabled), answering with the
+      // blanket "re_read the field and re-type" sends the caller round a loop on a control that
+      // can never accept text. Measured on bbc.com/news, whose search input is disabled until its
+      // menu opens.
+      result.escalation = (d && d.reason)
+        ? { recommended: 'enable_then_type', reason: d.reason + (d.hint ? ' — ' + d.hint : '') }
+        : { recommended: 're_read', reason: 'value persistence not confirmed — re-explore the field and re-type with clearFirst:true before escalating to OS-level input' };
     }
     getSession().recordAction({ action: 'type_text', ref: o.ref, text: o.text }, result);
     return textResult(result);
@@ -1894,7 +1912,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   });
 
   reg(server, 'page_slice', {
-    description: 'Full-fidelity records from the stored page snapshot, filtered to ONE slice: tag / role / region / vp (true|false) / interactive / field / focusable / attr / query. Returns ALL matches by default — pass limit only if you actually want a cut, and truncatedByLimit will say so. This is how you load only the branch you need WITHOUT re-reading the page and without anything being cut out. Call page_snapshot first.',
+    description: 'Full-fidelity records from the stored page snapshot, filtered to ONE slice: indices / tag / role / region / vp (true|false) / interactive / field / focusable / attr / query. Returns ALL matches by default — pass limit only if you actually want a cut, and truncatedByLimit will say so. This is how you load only the branch you need WITHOUT re-reading the page and without anything being cut out. indices:[i] is the companion to a DIFF block, which names what changed by index and leaves the detail here. Call page_snapshot or browse first.',
     inputSchema: {
       tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       tag: z.string().optional().describe('Filter by tag, e.g. input'),
@@ -1909,6 +1927,17 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         z.object({ name: z.string(), value: z.string().optional() }),
       ]).optional().describe('Filter by ANY attribute the page wrote, e.g. attr:"data-testid" or attr:{name:"data-offset",value:"3"}'),
       query: z.string().optional().describe('Substring match over name / locator / tag / region / attribute names'),
+      // ★ DECLARED 2026-10-01 — IT WAS NOT, AND IT SILENTLY RETURNED THE WHOLE PAGE.
+      // The handler has always forwarded its args straight to sliceSnapshot(), which HAS
+      // supported `indices` since the DIFF was built: the DIFF names what changed by index and
+      // says the detail is "one page_slice{indices:[i]} away". But `indices` was absent from
+      // this schema, so it was stripped before the handler ever saw it and the call fell through
+      // to "no filter" — the exact opposite of the documented follow-up. Measured on
+      // books.toscrape: page_slice{indices:[31]} returned 543 of 543 records. The class of bug
+      // is not new (find{field:true} returned 103/103 for the same reason); what is new is a
+      // test that walks EVERY tool forwarding to sliceSnapshot instead of just the one that
+      // broke last time. See 'slice: every key sliceSnapshot understands must be declared'.
+      indices: z.array(z.number()).optional().describe('Fetch exact records by inventory index — this is how you pull the detail for indices a DIFF block named, WITHOUT re-reading the page'),
       limit: z.number().optional().describe('OPT-IN cap on returned records. Omit for ALL matches (no default, no clamp)'),
     },
   }, async (o) => {
