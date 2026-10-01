@@ -1751,7 +1751,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     const vp = box && box.viewport;
     if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
       return textResult({ success: false, effect: 'failed', error: 'trusted_click: could not resolve a clickable box for that element',
-        detail: JSON.stringify(box).slice(0, 240), escalation: { recommended: 're_read', reason: 'the element has no box (hidden, detached, or zero-sized) — re-read the page before clicking' } });
+        detail: JSON.stringify(box).slice(0, 240), escalation: { recommended: 're_read', reason: 'no box in the MAIN frame — hidden, detached, zero-sized, OR inside an IFRAME. The collector and the box resolver see only the main frame, so a control in a frame is not reachable this way; list frames with tabs{action:"frames"}' } });
     }
     const x = Math.round(vp.x + vp.w / 2), y = Math.round(vp.y + vp.h / 2);
     const before = await readPageState(tabId);

@@ -87,7 +87,7 @@ await call('main_world', { tabId, verify: false, func: '() => { window.__drag = 
 const d = await call('click', { tabId, mode: 'drag', fromRef: '#fp-drag-src', toRef: '#fp-drop', verify: false });
 await sleep(600);
 const dg = await call('main_world', { tabId, verify: false, func: '() => window.__dragDump()' });
-const evts = Array.isArray(dg.__raw) ? dg.__raw : (Array.isArray(dg) ? dg : (dg && dg.result ? dg.result : []));
+const evts = (dg && Array.isArray(dg.results) && dg.results[0] && Array.isArray(dg.results[0].result)) ? dg.results[0].result : (Array.isArray(dg) ? dg : []);
 const types = Array.isArray(evts) ? evts.map((e) => e.type + (e.isTrusted ? '(trusted)' : '(synthetic)')) : [];
 console.log('  click{mode:drag} returned: ' + JSON.stringify({ success: d.success, effect: d.effect, error: d.__error || d.error }).slice(0, 160));
 console.log('  events the page saw: ' + (types.length ? types.join(' > ') : '(none)'));

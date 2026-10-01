@@ -2442,6 +2442,20 @@ test('trusted_key: wired like the click, and it must SHARE the preparation', () 
     'the server side must give an Enter a LONGER navigation window (a real page load outlasts a short probe: measured — Wikipedia navigated and the verdict still said unverifiable) and a single probe to everything else, so typing a character costs nothing');
 });
 
+test('drag: the full sequence INCLUDING drop, and a frame must not be blamed on the element', () => {
+  // ★ I CLAIMED DRAG WAS A SILENT NO-OP. I WAS WRONG. Measured (2026-10-01): the page recorded
+  // dragstart > drag > dragenter > dragover > DROP > dragend with a DataTransfer, dropCount 1. My
+  // check had read dg.result instead of dg.results[0].result, so it saw nothing and I filed my own
+  // mistake as a finding about the tool. This pins it.
+  assert(/DragEvent\('dragstart'/.test(CS_SRC), 'dragstart must be dispatched');
+  assert(/DragEvent\('drop'/.test(CS_SRC), 'DROP must be dispatched — it is the one that matters');
+  assert(/DragEvent\('dragend'/.test(CS_SRC), 'and dragend');
+  assert(/dataTransfer: dt/.test(CS_SRC), 'carrying a real DataTransfer');
+  assert(/OR inside an IFRAME/.test(SRV_SRC), 'a failed box resolve must name the IFRAME possibility');
+  assert(!/has no box \(hidden, detached, or zero-sized\)/.test(SRV_SRC),
+    'and the old wording, which blamed the element, must be gone');
+});
+
 test('diff: the block is a SUMMARY and the rest lives in the cache', () => {
   // Ali: "The composer-close dif it's huge if that ends up in your context. Isn't it better to be
   // registered in cache and just show you specifically what changed?"
