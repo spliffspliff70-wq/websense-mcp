@@ -1831,7 +1831,13 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       const g = await getActiveHub().send({ type: 'geometry', ref: o.ref, selector: o.selector, tabId });
       box = unwrapRelay(g);
     } catch (e) { box = { error: String((e && e.message) || e) }; }
-    const vp = box && box.viewport;
+    let vp = box && box.viewport;
+    if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
+      const ent = getSnapshot(tabId);
+      const want = String(o.ref || o.selector || "");
+      const hit = ent && (ent.elements || []).find((r2) => r2.loc === want);
+      if (hit && hit.w > 0 && hit.h > 0) vp = { x: (hit.x + (hit.w >> 1)) - 1, y: (hit.y + (hit.h >> 1)) - 1, w: 2, h: 2, fromInventory: true };
+    }
     if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
       return textResult({ success: false, effect: 'failed', error: 'trusted_click: could not resolve a clickable box for that element',
         detail: JSON.stringify(box).slice(0, 240), escalation: { recommended: 're_read', reason: 'no box in the MAIN frame — hidden, detached, zero-sized, OR inside an IFRAME. The collector and the box resolver see only the main frame, so a control in a frame is not reachable this way; list frames with tabs{action:"frames"}' } });

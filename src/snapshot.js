@@ -77,19 +77,24 @@ export const COLLECTOR = `() => {
   // the region it lives in.
   var all = [];
   var domParent = new Map();   // element -> logical parent element (the host, for shadow children)
-  (function walkShadow(root, host) {
+  var offMap = new Map();      // element -> [dx,dy] into the TOP viewport (frame content only)
+  (function walkShadow(root, host, ox, oy) {
     var list;
     try { list = root.querySelectorAll('*'); } catch (e) { return; }
     for (var li = 0; li < list.length; li++) {
       var le = list[li];
       all.push(le);
       domParent.set(le, le.parentElement || host);
-      if (le.shadowRoot) walkShadow(le.shadowRoot, le);
+      if (ox || oy) offMap.set(le, [ox, oy]);
+      if (le.shadowRoot) walkShadow(le.shadowRoot, le, ox, oy);
       try {
-        if (le.contentDocument && le.contentDocument !== root) walkShadow(le.contentDocument, le);
+        if (le.contentDocument && le.contentDocument !== root) {
+          var fr = le.getBoundingClientRect();
+          walkShadow(le.contentDocument, le, ox + fr.left, oy + fr.top);
+        }
       } catch (e) {}
     }
-  })(document, null);
+  })(document, null, 0, 0);
   var total = all.length;
   function parentOf(el) {
     var pp = domParent.get(el);
@@ -302,7 +307,9 @@ export const COLLECTOR = `() => {
     var val = el.value;
     if (typeof val === 'string' && val) rec.value = val;
     if (inVp) rec.vp = 1;
-    if (r) { rec.x = Math.round(r.left); rec.y = Math.round(r.top); }
+    var fo = offMap.get(el);
+    if (r) { rec.x = Math.round(r.left + (fo ? fo[0] : 0)); rec.y = Math.round(r.top + (fo ? fo[1] : 0));
+             rec.w = Math.round(r.width); rec.h = Math.round(r.height); }
     out.push(rec);
   }
   return { url: location.href, title: document.title, total: total, truncated: truncated,

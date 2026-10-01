@@ -2386,8 +2386,8 @@ test('collector: the walk must descend into OPEN SHADOW ROOTS', () => {
   // fixture exists to catch exactly this and its own comment says a plain selector sees an
   // "empty" page. After the fix the same page yields 27 elements and all five controls, typing
   // into a shadow input was verified inside the shadow DOM, and both file inputs read files=1.
-  assert(/function walkShadow\(root, host\)/.test(COLLECTOR), 'the collector must walk shadow roots');
-  assert(/if \(le\.shadowRoot\) walkShadow\(le\.shadowRoot, le\)/.test(COLLECTOR), 'descending into each host open shadowRoot');
+  assert(/function walkShadow\(root, host, ox, oy\)/.test(COLLECTOR), 'the collector must walk shadow roots (now also frames, carrying a viewport offset)');
+  assert(/walkShadow\(le\.shadowRoot, le, ox, oy\)/.test(COLLECTOR), 'descending into each host open shadowRoot');
   assert(/le\.parentElement \|\| host/.test(COLLECTOR), 'a shadow child logical parent is its HOST (it has no parentElement)');
   assert(/function parentOf\(el\)/.test(COLLECTOR), 'and the branch pointer must resolve through it');
   assert(!/try \{ all = document\.querySelectorAll/.test(COLLECTOR), 'the light-DOM-only enumeration must be gone');
