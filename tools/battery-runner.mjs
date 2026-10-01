@@ -70,6 +70,20 @@ if (!/true/.test(healthOut)) {
   process.exit(1);
 }
 
+// ── DOES THE LIVE SERVER MATCH HEAD? (added 2026-10-01, after it nearly fooled me.)
+// Several `node src/server.js` starts in one session exited non-zero with only bash noise while an
+// OLDER instance kept serving the port — so "I restarted it" was not evidence that the process
+// answering had the new code. A battery run against a stale server reports confusing failures that
+// are not about the batteries. Ask the live process what it has:
+const toolsOut = String(spawnSync('node', [REPO + '/tools/tools-list.mjs'],
+  { cwd: REPO, encoding: 'utf8', timeout: 30000 }).stdout || '');
+const missing = toolsOut.split('\n').filter((l) => l.indexOf('MISSING from the live server') === 0);
+if (!/registered tools:/.test(toolsOut)) {
+  notes.push('could not read the live tool list (tools-list.mjs produced nothing) — continuing');
+} else if (missing.length) {
+  failures.push({ name: 'preflight', detail: 'the running server is NOT this build:\n    ' + missing.join('\n    ') });
+}
+
 // ── the fixture server (only the fixture batteries need it, and starting it is harmless)
 const probe = spawnSync('bash', ['-lc',
   'curl -s -m 4 -o /dev/null -w "%{http_code}" http://127.0.0.1:' + FIXTURE_PORT + '/bench/click_fingerprint.html'],
@@ -98,13 +112,19 @@ for (const b of selected) {
 }
 
 // ── report: nothing to say when everything passed
+// ★ SAY WHAT WAS ACTUALLY CHECKED (2026-10-01). Both messages used BATTERIES.length, so a
+// --only run of ONE battery announced "all 8 live batteries passed" — a watchdog claiming eight
+// times the coverage it had. A subset run now says so out loud.
+const scope = only
+  ? 'the ' + selected.length + ' SELECTED (--only) — the other ' + (BATTERIES.length - selected.length) + ' did NOT run'
+  : String(BATTERIES.length);
 if (failures.length === 0) {
-  if (notes.length) console.log('WebSense battery: all ' + BATTERIES.length + ' live batteries passed. ' + notes.join('; '));
+  if (notes.length) console.log('WebSense battery: ' + scope + ' passed. ' + notes.join('; '));
   process.exit(0);   // silent tick
 }
 
 const lines = [];
-lines.push('WebSense live batteries — ' + failures.length + ' of ' + BATTERIES.length + ' FAILED');
+lines.push('WebSense live batteries — ' + failures.length + ' of ' + scope + ' FAILED');
 for (const f of failures) {
   lines.push('');
   lines.push('✗ ' + f.name + '  (exit ' + f.status + ', ' + Math.round(f.ms / 1000) + 's)');
