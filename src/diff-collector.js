@@ -122,7 +122,26 @@ export const DIFF_COLLECTOR = `() => {
       continue;
     }
     // shape identical -> whatever moved is content, and geometry-only is viewport
-    if (!valSame || !nameSame) content.changed.push({ i: nr.i, loc: nr.loc, name: nr.name, value: nr.value, was: { name: or.name, value: or.value } });
+    if (!valSame || !nameSame) {
+      // ★ CONTENT CARRIES A READABLE PREVIEW + THE LENGTH, NOT THE WHOLE TEXT (measured
+      // 2026-10-01). This group was 227,703 of a 271,713-char diff (84%), because the
+      // derived name on a style tag is that tag's ENTIRE CSS SOURCE — and on a hydrating
+      // page hundreds of them change. The full text is already in the stored inventory, so shipping it
+      // here duplicated 227 KB for nothing.
+      // A FIELD VALUE is different: it is short and it IS the answer to "did my input land", so
+      // it stays exact. Text is previewed and its true length reported; the caller pulls
+      // the full text with find{indices:[i]} if it needs it.
+      var cc = { i: nr.i, loc: nr.loc };
+      if (!valSame) { cc.value = nr.value; cc.wasValue = or.value; }
+      if (!nameSame) {
+        var nm = nr.name == null ? '' : String(nr.name);
+        cc.name = nm.length > 120 ? nm.slice(0, 120) : nm;
+        cc.nameLen = nm.length;
+        cc.wasNameLen = (or.name == null ? '' : String(or.name)).length;
+        if (nm.length > 120) cc.namePreview = true;
+      }
+      content.changed.push(cc);
+    }
     else if (!gsame) viewport.moved.push({ i: nr.i, loc: nr.loc, was: { x: or.x, y: or.y, vp: or.vp }, now: { x: nr.x, y: nr.y, vp: nr.vp } });
   }
   for (var d = 0; d < prev.els.length; d++) {

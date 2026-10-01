@@ -2042,6 +2042,14 @@ test('diff: the auto-DIFF groups structure / content / viewport', () => {
     'adds must be recorded as INDICES so a large change stays an index');
   assert(/o2\.changed = fieldsDiffer\(nr, or\)/.test(code),
     'changes must name WHICH fields moved, not their values');
+  // ★ CONTENT MUST NOT SHIP WHOLE TEXT EITHER. name on a style tag is its entire CSS
+  // source; that group alone was 227,703 of a 271,713-char diff (84%). Preview + true
+  // length, with the full text fetchable from the inventory by index.
+  assert(/cc\.nameLen = nm\.length/.test(code), 'content must report the TRUE length of the text');
+  assert(/nm\.length > 120 \? nm\.slice\(0, 120\)/.test(code), 'content must ship a preview, not the blob');
+  assert(!/cc\.name = nr\.name;/.test(code), 'content must not ship the raw name');
+  assert(/cc\.value = nr\.value/.test(code) && /cc\.wasValue = or\.value/.test(code),
+    'a FIELD value stays exact — it is short and it is the answer to "did my input land"');
 });
 
 test('snapshot: elements carry a parent pointer, and branchChain walks it', () => {
