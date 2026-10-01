@@ -84,7 +84,7 @@ say(landed, 'a click reaches a control INSIDE a same-origin iframe', 'via ' + (h
 // ── 2. DRAG ─────────────────────────────────────────────────────────────────────────────────
 console.log('DRAG');
 await call('main_world', { tabId, verify: false, func: '() => { window.__drag = []; document.getElementById("fp-drag-state").textContent = "drop: none"; return 1; }' });
-const d = await call('click', { tabId, mode: 'drag', fromRef: '#fp-drag-src', toRef: '#fp-drop', verify: false });
+const d = await call('act', { tabId, action: 'drag', how: 'trusted', fromRef: '#fp-drag-src', toRef: '#fp-drop', verify: false });
 await sleep(600);
 const dg = await call('main_world', { tabId, verify: false, func: '() => window.__dragDump()' });
 const evts = (dg && Array.isArray(dg.results) && dg.results[0] && Array.isArray(dg.results[0].result)) ? dg.results[0].result : (Array.isArray(dg) ? dg : []);
