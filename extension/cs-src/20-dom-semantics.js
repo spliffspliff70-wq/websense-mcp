@@ -45,10 +45,20 @@
 
 
   // ═══ Interactive Element Detection ═══
-  const INTERACTIVE_TAGS = new Set(['a','button','input','select','textarea','details','summary','label','option','optgroup']);
-  const INTERACTIVE_ROLES = new Set(['button','link','menuitem','menuitemradio','menuitemcheckbox','radio','checkbox','tab','switch','option','combobox','searchbox','textbox','slider','spinbutton','treeitem']);
-  const INTERACTIVE_CURSORS = new Set(['pointer','move','text','grab','grabbing','cell','copy','alias','context-menu','crosshair','zoom-in','zoom-out']);
-
+  // ★ NO HARDCODED VOCABULARIES (2026-10-01, Ali: "any value or names should be
+  // dynamically parsed by the script"). Three declared tables lived here — a tag set,
+  // an ARIA widget-role set, and a 12-value cursor set — plus four hardcoded attribute
+  // names (aria-haspopup / data-toggle / data-bs-toggle / .dropdown-toggle, the last two
+  // being Bootstrap conventions). All of it is gone. Interactivity is now read off the
+  // element's own PLATFORM state and the page's own assertions:
+  //   el.tabIndex >= 0        THE key one: the browser's focusability computation, which
+  //                           already returns 0 for a, button, input, select, textarea,
+  //                           summary and anything with tabindex — i.e. the platform's
+  //                           own answer to "is this a control", no list required
+  //   isContentEditable       platform-editable
+  //   onclick / onkeydown     a handler the page attached
+  //   role / any aria-*       the page asserting a semantics (whatever it chose to write)
+  //   a non-default cursor    the page declaring "this is interactive" in CSS
   function isInteractive(el, pre) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
     // `pre` may carry visibility already computed by the caller's single geometry
@@ -57,22 +67,24 @@
     // in isInViewport) which is a large part of the ~5ms/element cost.
     if (pre && pre.vis !== undefined) { if (!pre.vis) return false; }
     else if (!isVisible(el)) return false;
-    const tag = el.tagName.toLowerCase();
     if (el.disabled) return false;
     if (el.getAttribute('aria-disabled') === 'true') return false;
     if (el.getAttribute('inert') !== null) return false;
     if (el.isContentEditable) return true;
-    if (el.getAttribute('contenteditable') === 'true') return true;
-    if (INTERACTIVE_TAGS.has(tag)) {
-      if (tag === 'input' && el.getAttribute('type') === 'hidden') return false;
-      return true;
+    try { if (el.tabIndex >= 0) return true; } catch (_) {}
+    try {
+      if (typeof el.onclick === 'function' || typeof el.onkeydown === 'function') return true;
+    } catch (_) {}
+    const at = el.attributes;
+    if (at) {
+      for (let i = 0; i < at.length; i++) {
+        const n = at[i].name;
+        if (n === 'role') return true;
+        if (n.length > 5 && n.lastIndexOf('aria-', 0) === 0) return true;
+      }
     }
-    const role = el.getAttribute('role') || '';
-    if (INTERACTIVE_ROLES.has(role)) return true;
     const style = cachedStyle(el);
-    if (style.cursor && INTERACTIVE_CURSORS.has(style.cursor)) return true;
-    if (el.getAttribute('aria-haspopup') || el.getAttribute('data-toggle') || el.getAttribute('data-bs-toggle') || el.classList.contains('dropdown-toggle')) return true;
-    if (el.tabIndex !== null && el.tabIndex >= 0) return true;
+    if (style.cursor && style.cursor !== 'auto' && style.cursor !== 'default') return true;
     return false;
   }
 
@@ -173,7 +185,10 @@
       if (f) { const btns = f.querySelectorAll('button[type="submit"], button:not([type])'); if (btns.length === 1 && btns[0] === el) return { type:'form_submit', subtype:'button', formRef: assignRef(f) }; }
       return { type:'action', subtype:'button' };
     }
-    if (INTERACTIVE_ROLES.has(role)) return { type:'action', subtype:role };
+    // ★ NO HARDCODED ROLE TABLE (2026-10-01): was INTERACTIVE_ROLES.has(role). If the
+    // PAGE wrote a role, it is asserting a semantics — report it verbatim. The subtype
+    // is the page's own word, so an unfamiliar role still classifies honestly.
+    if (role) return { type: 'action', subtype: role };
     if (style.cursor === 'pointer') return { type:'action', subtype:'clickable' };
     return { type:'unknown', subtype:tag };
   }

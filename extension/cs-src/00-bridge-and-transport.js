@@ -175,11 +175,16 @@
   // the old loop only broke once it had ACCEPTED N actions, so on a page with
   // few in-viewport interactives it never broke and walked everything. PROVEN:
   // maxActions=5 and maxActions=200 both cost 11.0s on the same 2,206-el page.
-  var DEFAULT_MAX_ACTIONS = 200;   // was: unbounded (0) on the explore_page path
-  var SCAN_CEILING = 8000;         // hard cap on ELEMENTS EXAMINED (bounds worst case)
-  var CURSOR_SWEEP_MAX_ELEMENTS = 1800; // above this, skip the cursor:pointer sweep
-  var AUTO_COMPACT_CANDIDATES = 400;    // auto-trim content extraction above this
-  var CONTENT_MAX_CHARS = 6000;    // default bodyText cap (was 8000, payload-heavy)
+  // ★ NO CAPS (2026-10-01, Ali: "I said remove all caps and filters and hardcoded
+  // values"). DEFAULT_MAX_ACTIONS (200), SCAN_CEILING (8000),
+  // CURSOR_SWEEP_MAX_ELEMENTS (1800) and CONTENT_MAX_CHARS (6000) are all REMOVED.
+  //
+  // The cap was never the real fix. Cost scaled with the DOCUMENT because the old loop
+  // did a getBoundingClientRect AND a getComputedStyle per element in document order —
+  // measured ~5ms/element (556 els = 0.44s, 2,206 = 11.0s, 11,006 = 90s timeout). What
+  // makes an UNCAPPED, UNFILTERED scan affordable is making it cheap PER ELEMENT:
+  // candidates are now found by a platform-state test with no style resolution, and
+  // geometry is read only for the elements that pass. Cap removed, cost addressed.
   var SETTLE_SKIP_IF_QUIET_MS = 150;    // skip waitForSettle if DOM has been quiet
   var SAG_CACHE_TTL_MS = 1500;          // reuse a SAG when DOM is provably unchanged
 
@@ -353,7 +358,11 @@
       // SW, which performs chrome.runtime.reload(). Fire-and-forget on purpose:
       // the SW dies mid-call, so awaiting its response would hang. 2026-09-11.
       case 'extension_reload': { setTimeout(function () { try { chrome.runtime.sendMessage({ type: 'TAB_CONTROL', action: 'extension_reload', payload: {} }); } catch (_) {} }, 100); return { success: true, message: 'extension_reload relayed to the service worker (reload in ~100ms)' }; }
-      case 'discover_actions': { const sag = await extractActionGraph({ includeContent: false, full: false, includeHidden: false, maxActions: params.maxActions || DEFAULT_MAX_ACTIONS, frameId: params.frameId }); return sag.actions; }
+      // ★ maxActions 0 = UNBOUNDED (2026-10-01, no caps). The cap used to be the load
+      // bearer here, but the cap was never what made this affordable — the per-element
+      // style/geometry reads were, and those are gone (candidates come from platform
+      // state with no style resolution). See the constants block.
+      case 'discover_actions': { const sag = await extractActionGraph({ includeContent: false, full: false, includeHidden: false, maxActions: params.maxActions || 0, frameId: params.frameId }); return sag.actions; }
       case 'click': { var b = getQuickState(); const cr = await nativeClick(await resolveRefHealed(params.ref)); return { success: true, ref: params.ref, ...(cr && typeof cr === 'object' ? cr : {}), beforeState: b, afterState: getQuickState() }; }
       case 'type_text': { var r = await nativeType(await resolveRefHealed(params.ref), params.text, params.clearFirst !== false); r.ref = params.ref; return r; }
       case 'select_option': { var s = nativeSelect(await resolveRefHealed(params.ref), params.value, params.clearAll); s.ref = params.ref; return s; }

@@ -4,16 +4,69 @@
  * Split out 2026-09-11 (was one 3,7xx-line file). The code below is copied
  * VERBATIM from the pre-split file; only this banner is added.
  */
-  const INTERACTIVE_SELECTOR = [
-    'a[href]', 'button', 'input', 'select', 'textarea', 'details', 'summary',
-    'label', 'option', 'optgroup',
-    '[role="button"]', '[role="link"]', '[role="menuitem"]', '[role="menuitemradio"]',
-    '[role="menuitemcheckbox"]', '[role="radio"]', '[role="checkbox"]', '[role="tab"]',
-    '[role="switch"]', '[role="option"]', '[role="combobox"]', '[role="searchbox"]',
-    '[role="textbox"]', '[role="slider"]', '[role="spinbutton"]', '[role="treeitem"]',
-    '[contenteditable=""]', '[contenteditable="true"]', '[tabindex]', '[onclick]',
-    '[aria-haspopup]', '[data-toggle]', '[data-bs-toggle]', '.dropdown-toggle'
-  ].join(',');
+  // ★ NO HARDCODED VOCABULARY (2026-10-01, Ali: "any value or names should be
+  // dynamically parsed by the script"). This was a 30-entry SELECTOR LIST — a declared
+  // vocabulary of what counts as a control, which silently missed every control it did
+  // not name (custom elements, anything carrying a role nobody thought to list).
+  // Candidates are now found by asking the PLATFORM, in one pass, with cheap property
+  // reads and ZERO style resolution:
+  //   el.tabIndex >= 0        the browser's own focusability computation
+  //   el.isContentEditable    platform-editable
+  //   onclick / onkeydown     a handler the page itself attached
+  //   role / any aria-* attr  the page asserting a semantics (whatever it chose)
+  function _isCandidateNode(el) {
+    if (!el || el.nodeType !== 1) return false;
+    try { if (el.tabIndex >= 0) return true; } catch (_) {}
+    try { if (el.isContentEditable) return true; } catch (_) {}
+    try {
+      if (typeof el.onclick === 'function' || typeof el.onkeydown === 'function') return true;
+    } catch (_) {}
+    const at = el.attributes;
+    if (at) {
+      for (let i = 0; i < at.length; i++) {
+        const n = at[i].name;
+        if (n === 'role' || n === 'contenteditable') return true;
+        if (n.length > 5 && n.lastIndexOf('aria-', 0) === 0) return true;
+      }
+    }
+    return false;
+  }
+
+  // ★ The page declares its OWN interactive cursors. Instead of resolving
+  // getComputedStyle for every element (the single most expensive thing in the old
+  // loop — measured ~5ms/element, which is what the caps were papering over), read the
+  // selectors out of the page's stylesheets. Same information, one pass over CSS text.
+  function _cursorSelectorText(rules, out, depth) {
+    if (!rules || depth > 6) return;
+    for (let i = 0; i < rules.length; i++) {
+      const r = rules[i];
+      if (r.cssRules) { _cursorSelectorText(r.cssRules, out, depth + 1); continue; }
+      let cur = '';
+      try { cur = (r.style && r.style.cursor) || ''; } catch (_) { cur = ''; }
+      if (!cur || cur === 'auto' || cur === 'default') continue;
+      if (r.selectorText) out.push(r.selectorText);
+    }
+  }
+
+  function _collectCursorCandidates(out, seen) {
+    const sels = [];
+    try {
+      for (let s = 0; s < document.styleSheets.length; s++) {
+        let rules = null;
+        try { rules = document.styleSheets[s].cssRules; } catch (_) { continue; }
+        _cursorSelectorText(rules, sels, 0);
+      }
+    } catch (_) {}
+    let hits = 0;
+    for (let i = 0; i < sels.length; i++) {
+      let found = null;
+      try { found = document.querySelectorAll(sels[i]); } catch (_) { continue; }
+      for (let j = 0; j < found.length; j++) {
+        if (!seen.has(found[j])) { seen.add(found[j]); out.push(found[j]); hits++; }
+      }
+    }
+    return { selectorsRead: sels.length, added: hits };
+  }
 
   var _domVersion = 0;
   var _lastMutationTs = Date.now();
@@ -41,16 +94,14 @@
     } catch (_) { _domObserver = null; }
   }
 
-  // Selector hits only — no full-subtree walk.
-  // 2026-09-11: the document-level `*` walk used to live IN here, so it ran twice
-  // per call (once for shadow-host discovery, once again just to count elements) —
-  // two full-DOM queries on every explore. The document-level walk now happens
-  // once in collectInteractiveCandidates and is reused for both purposes.
+  // Candidates by PLATFORM STATE — no selector list. One `*` walk with cheap property
+  // reads (no geometry, no computed style), so it is safe to run over everything.
   function _collectSelectorHits(root, out, seen) {
     try {
-      const hits = root.querySelectorAll(INTERACTIVE_SELECTOR);
+      const hits = root.querySelectorAll('*');
       for (let i = 0; i < hits.length; i++) {
-        if (!seen.has(hits[i])) { seen.add(hits[i]); out.push(hits[i]); }
+        const el = hits[i];
+        if (!seen.has(el) && _isCandidateNode(el)) { seen.add(el); out.push(el); }
       }
     } catch (_) {}
   }
@@ -82,35 +133,18 @@
     }
     const selectorHits = out.length;
 
-    let cursorSweepSkipped = false;
-    let cursorScanned = 0;
+    // ★ NO SKIP, NO CEILING. The old code skipped the cursor sweep above 1,800
+    // elements and bounded the loop at SCAN_CEILING — a cap on WORK that silently
+    // shrank the map on exactly the pages that most needed it. The sweep is now the
+    // page's own CSS (see _collectCursorCandidates), so it can run everywhere.
+    let cursor = { selectorsRead: 0, added: 0 };
     if (options.includeCursorSweep !== false) {
-      if (totalElements > CURSOR_SWEEP_MAX_ELEMENTS) {
-        // getComputedStyle per element is the single most expensive thing in the
-        // old loop. Above this size the cursor sweep costs more than it finds,
-        // and on such pages the old code simply timed out — so declining it is
-        // strictly better, and the result says so rather than hiding it.
-        cursorSweepSkipped = true;
-      } else {
-        try {
-          const all = document.querySelectorAll('*');
-          for (let i = 0; i < all.length && cursorScanned < SCAN_CEILING; i++) {
-            const el = all[i];
-            cursorScanned++;
-            if (seen.has(el)) continue;
-            let cur = '';
-            try { cur = cachedStyle(el).cursor || ''; } catch (_) { cur = ''; }
-            if (cur && INTERACTIVE_CURSORS.has(cur)) { seen.add(el); out.push(el); }
-          }
-        } catch (_) {}
-      }
+      cursor = _collectCursorCandidates(out, seen);
     }
 
-    let capped = false;
-    if (out.length > SCAN_CEILING) { out.length = SCAN_CEILING; capped = true; }
     return {
       nodes: out, totalElements: totalElements, selectorHits: selectorHits,
-      cursorScanned: cursorScanned, cursorSweepSkipped: cursorSweepSkipped, capped: capped,
+      cursorSelectorsRead: cursor.selectorsRead, cursorAdded: cursor.added,
     };
   }
 
@@ -275,21 +309,21 @@
     wsLog('EAG:settle skipped=' + (sinceMutation >= SETTLE_SKIP_IF_QUIET_MS) +
           ' sinceMutation=' + sinceMutation + 'ms');
 
-    // ── 2. Candidates: selector prefilter instead of walking every node ─────
+    // ── 2. Candidates: PLATFORM STATE, not a selector list (2026-10-01) ─────
     const cand = collectInteractiveCandidates(options);
     const tCand = Date.now();
     wsLog('EAG:candidates=' + cand.nodes.length + ' selectorHits=' + cand.selectorHits +
           ' totalEls=' + cand.totalElements +
-          (cand.cursorSweepSkipped ? ' CURSOR_SWEEP_SKIPPED' : ''));
+          ' cursorSelectorsRead=' + cand.cursorSelectorsRead + ' cursorAdded=' + cand.cursorAdded);
 
     // ── 3. Cheap attribute pass (property reads only — never forces layout) ──
     const pass1 = [];
-    for (let i = 0; i < cand.nodes.length && pass1.length < SCAN_CEILING; i++) {
+    for (let i = 0; i < cand.nodes.length; i++) {
       const el = cand.nodes[i];
       if (el.disabled) continue;
       if (el.getAttribute('aria-disabled') === 'true') continue;
       if (el.getAttribute('inert') !== null) continue;
-      if (el.tagName === 'INPUT' && el.getAttribute('type') === 'hidden') continue;
+      if (el.type === 'hidden') continue;   // platform IDL, not a tag/name vocabulary
       pass1.push(el);
     }
 
@@ -331,10 +365,11 @@
     // (~0.02ms/element) — which is why an IntersectionObserver rewrite was
     // measured and REJECTED as not worth the async complexity.
     const tGeo = Date.now();
-    const maxActions = options.maxActions > 0 ? options.maxActions : DEFAULT_MAX_ACTIONS;
+    // ★ NO CAP (2026-10-01): 0 = unbounded, and the guard below must respect that.
+    const maxActions = options.maxActions > 0 ? options.maxActions : 0;
     const actions = [];
     for (let i = 0; i < geo.length; i++) {
-      if (actions.length >= maxActions) break;
+      if (maxActions > 0 && actions.length >= maxActions) break;
       const el = geo[i].el;
       if (!isInteractive(el, geo[i])) continue;
       try {
@@ -372,13 +407,12 @@
 
     const truncated = geo.length > actions.length;
 
-    // Trim content extraction on big pages unless the caller asked for more —
-    // the other half of the payload problem (explore_page on x.com returned
-    // 1,006,657 bytes ≈ 275k tokens, unusable as agent context).
+    // ★ NO CONTENT CAP (2026-10-01). This used to trim content extraction above 400
+    // candidates to CONTENT_MAX_CHARS (6000) unless the caller opted out — i.e. the
+    // tool silently decided how much of the page the model was allowed to read. That is
+    // the same class as the LABEL_MAX=40 delta bug: a length threshold destroying
+    // meaning. Content length is now the caller's decision alone.
     const opt2 = Object.assign({}, options);
-    if (actions.length >= AUTO_COMPACT_CANDIDATES && options.contentMaxLen === undefined) {
-      opt2.contentMaxLen = CONTENT_MAX_CHARS;
-    }
 
     const sag = _buildSAG(actions, opt2);
     sag.truncated = truncated;
@@ -387,8 +421,8 @@
     sag.candidatesExamined = pass1.length;
     sag.candidatesFound = cand.nodes.length;
     sag.totalElements = cand.totalElements;
-    if (cand.cursorSweepSkipped) sag.cursorSweepSkipped = true;
-    if (cand.capped) sag.candidateCeilingHit = true;
+    sag.cursorSelectorsRead = cand.cursorSelectorsRead;
+    sag.cursorAdded = cand.cursorAdded;
     sag.scanMs = tAct - scanStart;
     // Split attribution (2026-09-11). `scanMs` alone was misleading: it conflated
     // candidate collection, geometry and the per-action semantic work, and only the
@@ -457,7 +491,7 @@
       if (f) { const btns = f.querySelectorAll('button[type="submit"], button:not([type])'); if (btns.length === 1 && btns[0] === el) return { type: 'form_submit', subtype: 'button', formRef: assignRef(f) }; }
       return { type: 'action', subtype: 'button' };
     }
-    if (INTERACTIVE_ROLES.has(role)) return { type: 'action', subtype: role };
+    if (role) return { type: 'action', subtype: role };   // page's own word — no table
     if (style.cursor === 'pointer') return { type: 'action', subtype: 'clickable' };
     return { type: 'unknown', subtype: tag };
   }
@@ -470,7 +504,7 @@
       // Bounded default here too (2026-09-11) — the legacy sync path had the same
       // `|| 0` unbounded default, so a caller reaching it could still walk a
       // whole page. Consistency matters more than the micro-difference.
-      const maxActions = options.maxActions > 0 ? options.maxActions : DEFAULT_MAX_ACTIONS;
+      const maxActions = options.maxActions > 0 ? options.maxActions : 0;   // 0 = UNBOUNDED (no caps)
       for (const el of allElements) {
         if (maxActions > 0 && actions.length >= maxActions) break;
         step = 'isInteractive';

@@ -528,25 +528,38 @@ import { COLLECTOR } from './src/snapshot.js';
 // client that is live on strict-CSP sites) it fell through a switch and did
 // nothing — while still reporting reloadSent:true.
 
-test('cs: default action cap is BOUNDED (an unbounded default is the 90s bug)', () => {
-  assert(/var DEFAULT_MAX_ACTIONS = \d+;/.test(CS_SRC), 'DEFAULT_MAX_ACTIONS is defined numerically');
-  const m = CS_SRC.match(/var DEFAULT_MAX_ACTIONS = (\d+);/);
-  assert(Number(m[1]) > 0, 'default cap must be > 0 (0 = unbounded = the regression)');
-  assert(CS_SRC.includes('options.maxActions > 0 ? options.maxActions : DEFAULT_MAX_ACTIONS'),
-    'the extraction path actually falls back to the bounded default');
-  // The old code was `options.maxActions || 0` — that is the unbounded form.
-  assert(!/const maxActions = options\.maxActions \|\| 0;/.test(CS_SRC),
-    'the unbounded `maxActions || 0` default must not come back');
+// ★ REWRITTEN 2026-10-01 (Ali: "I said remove all caps and filters and hardcoded
+// values"). These two tests previously asserted the OPPOSITE — that a default action
+// cap existed and that work was bounded by an elements-scanned ceiling. That policy is
+// gone. The caps were never what made a scan affordable: the per-element
+// getBoundingClientRect + getComputedStyle were (~5ms/element — 556 els = 0.44s,
+// 2,206 = 11.0s, 11,006 = 90s timeout). Cost is now addressed PER ELEMENT (candidates
+// from platform state with no style resolution; geometry only for the elements that
+// pass), so an uncapped, unfiltered scan is affordable and can run to completion.
+
+test('cs: NO CAPS — the scan is unbounded by design', () => {
+  // Strip comments: the fix's own comments NAME the removed constants, so a raw
+  // `includes` match passes on prose. (This trap has now bitten five times today.)
+  const CS_CODE = CS_SRC.replace(/\/\/[^\n]*/g, '');
+  for (const gone of ['DEFAULT_MAX_ACTIONS', 'SCAN_CEILING', 'CURSOR_SWEEP_MAX_ELEMENTS',
+                      'CONTENT_MAX_CHARS', 'AUTO_COMPACT_CANDIDATES', 'INTERACTIVE_CURSORS',
+                      'INTERACTIVE_SELECTOR', 'INTERACTIVE_TAGS', 'INTERACTIVE_ROLES',
+                      'cursorSweepSkipped', 'candidateCeilingHit']) {
+    assert(!CS_CODE.includes(gone), gone + ' must be gone — no caps, no filters, no vocabulary');
+  }
+  assert(/maxActions = options\.maxActions > 0 \? options\.maxActions : 0;/.test(CS_CODE),
+    'maxActions must default to 0 (unbounded)');
+  assert(/maxActions > 0 && actions\.length >= maxActions/.test(CS_CODE),
+    'the break must be guarded, so 0 really does mean unbounded');
 });
 
-test('cs: work is bounded by an elements-SCANNED ceiling, not only returned actions', () => {
-  assert(/var SCAN_CEILING = \d+;/.test(CS_SRC), 'SCAN_CEILING defined');
-  assert(CS_SRC.includes('pass1.length < SCAN_CEILING'), 'attribute pass respects the ceiling');
-  assert(CS_SRC.includes('cursorScanned < SCAN_CEILING'), 'cursor sweep respects the ceiling');
-});
-
-test('cs: candidates come from a SELECTOR, not a walk of every node', () => {
-  assert(CS_SRC.includes('INTERACTIVE_SELECTOR'), 'selector list exists');
+test('cs: candidates come from PLATFORM STATE, not a selector list', () => {
+  assert(CS_SRC.includes('function _isCandidateNode'), 'derived candidate test present');
+  assert(CS_SRC.includes('el.tabIndex >= 0'), 'focusability comes from the browser, not a tag list');
+  assert(CS_SRC.includes('isContentEditable'), 'platform-editable counts');
+  assert(CS_SRC.includes("n.lastIndexOf('aria-', 0) === 0"), 'any aria-* the page wrote counts');
+  assert(CS_SRC.includes('_collectCursorCandidates'), 'cursor candidates come from the page own CSS');
+  assert(CS_SRC.includes('styleSheets'), 'and are read from the stylesheets, not per-element style');
   assert(CS_SRC.includes('collectInteractiveCandidates'), 'collector is wired in');
   assert(CS_SRC.includes('_collectSelectorHits'), 'shadow-root-aware collection present');
 });
@@ -650,12 +663,18 @@ test('cs: a real state change can recover after give-up', () => {
 // 2026-09-11b — cost attribution + single-DOM-query invariants
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('cs: _collectSelectorHits does NOT walk the whole subtree (no double DOM query)', () => {
+test('cs: _collectSelectorHits tests candidates by PLATFORM STATE (no selector list)', () => {
+  // Rewritten 2026-10-01. This test used to forbid a `*` walk in here, because the walk
+  // was needed only to COUNT elements and a selector list could find candidates without
+  // it. The selector list is gone (it was a declared vocabulary that missed unnamed
+  // controls), so the walk IS the mechanism now — and it is affordable because
+  // _isCandidateNode does cheap property reads and never resolves style or geometry.
   const m = CS_SRC.match(/function _collectSelectorHits\([\s\S]*?\n  \}/);
   assert(m, '_collectSelectorHits exists');
-  assert(!m[0].includes("querySelectorAll('*')"),
-    '_collectSelectorHits must not do a `*` walk — the document-level walk runs once in ' +
-    'collectInteractiveCandidates and is reused for the element count (it used to run twice)');
+  assert(m[0].includes("querySelectorAll('*')"), 'it walks the subtree');
+  assert(m[0].includes('_isCandidateNode'), 'and keeps only elements the platform calls candidates');
+  assert(!m[0].includes('getComputedStyle'), 'with no style resolution per element');
+  assert(!m[0].includes('getBoundingClientRect'), 'and no geometry per element');
 });
 
 test('cs: shadow-host recursion still exists via _collectShadowHits (nested shadow roots)', () => {
@@ -675,11 +694,16 @@ test('cs: explore cost is attributed (candidates/geometry/action split)', () => 
   assert(CS_SRC.includes('sag.scanMs = tAct - scanStart'), 'scanMs is the true total');
 });
 
-test('cs: the action loop (semantic work) is the bounded term via maxActions', () => {
-  const m = CS_SRC.match(/const tGeo = Date\.now\(\);[\s\S]{0,400}?const actions = \[\]/);
+test('cs: the action loop is UNBOUNDED (maxActions defaults to 0)', () => {
+  // Rewritten 2026-10-01. This test used to require DEFAULT_MAX_ACTIONS in the loop.
+  // The loop is now unbounded unless the caller names a limit, and the break is
+  // guarded so 0 cannot mean "stop at zero".
+  const m = CS_SRC.match(/const tGeo = Date\.now\(\);[\s\S]{0,500}?const actions = \[\]/);
   assert(m, 'geometry mark precedes the action loop');
-  assert(m[0].includes('DEFAULT_MAX_ACTIONS'),
-    'the action loop is capped by DEFAULT_MAX_ACTIONS (measured ~0.65ms/accepted action)');
+  assert(!/DEFAULT_MAX_ACTIONS/.test(m[0]),
+    'the action loop must not carry a default cap — maxActions 0 means unbounded');
+  assert(/options\.maxActions > 0 \? options\.maxActions : 0/.test(m[0]),
+    'the loop takes the caller value and defaults to 0');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
