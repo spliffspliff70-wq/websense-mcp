@@ -2105,6 +2105,22 @@ test('snapshot: elements carry a parent pointer, and branchChain walks it', () =
   assert.strictEqual(chain[0].ariaLabel, 'Composer', 'and the accessible name');
   assert.strictEqual(chain[1].i, 2, 'then the next meaningful one up');
   assert.strictEqual(chain[1].hook, 'data-testid="primaryColumn"', 'with its page hook');
+  // ★ THE ATTRIBUTE NAME IS IDENTITY; ITS VALUE IS NOT ALWAYS. Live, x.com's
+  // data-at-shortcutkeys is ~1.5 KB of JSON and one ancestor inflated every find result by
+  // that much. A short value IS the identity and is kept; a long one is reported by length.
+  assert(/v\.length <= 40 \? \(k \+ '="' \+ v \+ '"'\)/.test(code),
+    'a short hook value is kept — it is the identity');
+  assert(/\[value ' \+ v\.length \+ ' chars\]/.test(code),
+    'a long hook value must be reported by LENGTH, not shipped whole');
+  const bigHook = { elements: [
+    { i: 0, tag: 'div', loc: 'div:nth-of-type(1)', region: 'body', p: undefined,
+      attrs: { 'data-at-shortcutkeys': 'x'.repeat(1500) } },
+    { i: 1, tag: 'span', loc: 'span:nth-of-type(1)', region: 'body', attrs: {}, p: 0 },
+  ] };
+  const hc = branchChain(bigHook, bigHook.elements[1], 5);
+  assert.strictEqual(hc.length, 1, 'the hook-holding ancestor is meaningful');
+  assert(hc[0].hook.length < 60, 'and its 1500-char value must NOT be shipped: ' + hc[0].hook.length);
+  assert(/1500 chars/.test(hc[0].hook), 'the true length is reported instead');
   // depth bounds the number of MEANINGFUL ancestors, not raw hops
   assert.strictEqual(branchChain(snap, snap.elements[5], 1).length, 1, 'depth must bound the walk');
   // a root has no branch

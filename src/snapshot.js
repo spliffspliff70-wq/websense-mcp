@@ -352,7 +352,17 @@ export function branchChain(snap, rec, depth = 5) {
     const named = a['aria-label'] || a['aria-labelledby'] || '';
     let hook = '';
     for (const k in a) {
-      if (k.length > 5 && k.lastIndexOf('data-', 0) === 0) { hook = k + '="' + a[k] + '"'; break; }
+      if (k.length > 5 && k.lastIndexOf('data-', 0) === 0) {
+        // ★ THE ATTRIBUTE NAME IS IDENTITY; ITS VALUE IS NOT ALWAYS (measured 2026-10-01).
+        // This carried the raw value, and x.com's data-at-shortcutkeys is ~1.5 KB of JSON —
+        // one ancestor inflated every find result by that much. A value is included only
+        // when it is short enough to BE a name; otherwise the name and the true length are
+        // reported, which is exact and costs nothing. (Same rule as the diff's content
+        // preview: the long text is in the inventory if it is ever genuinely needed.)
+        const v = String(a[k]);
+        hook = v.length <= 40 ? (k + '="' + v + '"') : (k + ' [value ' + v.length + ' chars]');
+        break;
+      }
     }
     const id = (pr.loc && pr.loc.charAt(0) === '#') ? pr.loc.slice(1) : '';
     const entry = {
