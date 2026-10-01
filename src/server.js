@@ -452,7 +452,12 @@ function dropSelfEvident(node) {
 // the delta payload itself is a few hundred bytes). Callers who don't want it pass
 // verify:false to skip the diff for that call.
 const DELTA_OPS = new Set(['click', 'type_text', 'form', 'press_key',
-  'real_click', 'real_paste', 'main_world', 'evaluate', 'dialog']);
+  'real_click', 'real_paste', 'main_world', 'evaluate', 'dialog',
+  // scroll is a PAGE INTERACTION too (Ali, 2026-10-01: "dif at each page interaction").
+  // It is also the case that most needed the grouping: a scroll changes the
+  // interactive+in-viewport subset, which the OLD diff reported as mutation. The DIFF
+  // now puts that churn in its own `viewport` group and leaves mutated false.
+  'scroll']);
 
 // Turn an incremental scan result into the compact verdict we hand back.
 // CRITICAL: a first call on a tab has no baseline, so the content script ESCALATES and
@@ -529,7 +534,14 @@ function summarizeDelta(res) {
 // (scroll/layout churn — NOT a mutation). Unchanged elements are counted, not shipped.
 async function runAutoDiff(tabId) {
   const r = await getActiveHub().send({ type: 'main_world_exec', tabId, func: DIFF_COLLECTOR, args: [] });
-  const payload = (r && r.result !== undefined) ? r.result : r;
+  // main_world_exec answers with a per-frame envelope ({success, results:[{frameId, result}]}).
+  // Unwrap frame 0 — reading only r.result silently shipped the ENVELOPE as the diff
+  // (found live: the block contained {"success":true,"results":[...]} instead of the groups).
+  const payload = (r && r.results && r.results[0] && r.results[0].result !== undefined) ? r.results[0].result
+    : (r && r.result !== undefined) ? r.result
+    : (r && r.data && Array.isArray(r.data.results) && r.data.results[0] && r.data.results[0].result !== undefined) ? r.data.results[0].result
+    : (r && r.data && r.data.result !== undefined) ? r.data.result
+    : r;
   if (typeof payload === 'string') { try { return JSON.parse(payload); } catch (_) { return { mutated: null, reason: 'diff returned non-JSON' }; } }
   return payload && typeof payload === 'object' ? payload : { mutated: null, reason: 'diff returned nothing' };
 }
