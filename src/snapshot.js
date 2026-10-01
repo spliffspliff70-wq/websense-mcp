@@ -325,22 +325,50 @@ export function isInteractiveRec(e) {
 // (2026-10-01). This is why no mermaid diagram is needed: "where is this and which branch
 // does it belong to" is a bounded walk up the stored records, not a rendered picture —
 // so it costs bytes, not tokens, and cannot drift from the inventory it describes.
+//
+// ★ AND IT SKIPS THE ANONYMOUS (measured 2026-10-01). The first version took the N nearest
+// ancestors, and on x.com that produced five identical entries of
+// "div:nth-of-type(1) > div:nth-of-type(1) > ..." — which tells a reader NOTHING and cannot
+// answer Ali's actual question ("this New is New-tweet, that New is News"). A human reads
+// the nearest ancestors that CARRY MEANING and ignores the layout wrappers, so that is what
+// this does: it walks up until it has collected `depth` ancestors that say something —
+// a role, an accessible name, an id, or any data-* attribute (metadata by definition) — and
+// silently steps over bare divs and spans.
+// If the page labels NOTHING on the whole path, it returns the nearest ancestors rather
+// than an empty chain, so the branch is never blank — it just honestly reports that the
+// page gave it nothing to go on.
 export function branchChain(snap, rec, depth = 5) {
   const els = (snap && snap.elements) || [];
   const chain = [];
-  let cur = rec, n = 0;
-  while (cur && n < depth) {
+  const anonymous = [];
+  let cur = rec, wanted = 0, hops = 0;
+  while (cur && hops < 500) {
     const p = cur.p;
     if (p == null || !els[p]) break;
     const pr = els[p];
-    const role = (pr.attrs && pr.attrs.role) || '';
-    chain.push({
+    hops++;
+    const a = pr.attrs || {};
+    const role = a.role || '';
+    const named = a['aria-label'] || a['aria-labelledby'] || '';
+    let hook = '';
+    for (const k in a) {
+      if (k.length > 5 && k.lastIndexOf('data-', 0) === 0) { hook = k + '="' + a[k] + '"'; break; }
+    }
+    const id = (pr.loc && pr.loc.charAt(0) === '#') ? pr.loc.slice(1) : '';
+    const entry = {
       i: pr.i, tag: pr.tag, loc: pr.loc, region: pr.region,
       role: role || undefined, name: pr.name || undefined,
-    });
-    cur = pr; n++;
+      id: id || undefined, hook: hook || undefined,
+      ariaLabel: named || undefined,
+    };
+    const meaningful = !!(role || named || hook || id || (pr.name && pr.name.length < 80));
+    if (meaningful) { chain.push(entry); wanted++; }
+    else anonymous.push(entry);
+    if (wanted >= depth) break;
+    cur = pr;
   }
-  return chain;
+  if (chain.length) return chain;
+  return anonymous.slice(0, depth);   // the page labelled nothing — say so honestly
 }
 
 // ── SLICE: full-fidelity records for one dimension. ──

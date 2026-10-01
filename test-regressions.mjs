@@ -2083,20 +2083,40 @@ test('snapshot: elements carry a parent pointer, and branchChain walks it', () =
   const code = S.replace(/\/\/[^\n]*/g, '');
   assert(/rec\.p = idxOf\.get\(pn\)/.test(code), 'records must carry a parent index');
   assert(/var idxOf = new Map\(\)/.test(code), 'the element->index map must be built');
-  // Behavioural: give branchChain a synthetic 3-deep chain and walk it.
+  // Behavioural: a chain with MEANINGFUL and ANONYMOUS ancestors interleaved. The walk must
+  // keep the ones that say something and skip the layout wrappers — because on x.com the
+  // nearest ancestors are five identical anonymous divs, which cannot answer "is this the
+  // New of the composer or the New of the news feed?".
   const snap = { elements: [
-    { i: 0, tag: 'body', loc: 'body', region: 'body', attrs: {} },
-    { i: 1, tag: 'div', loc: 'div', region: 'role:dialog', attrs: { role: 'dialog' }, p: 0, name: 'Composer' },
-    { i: 2, tag: 'button', loc: 'button', region: 'role:dialog', attrs: { role: 'button' }, p: 1, name: 'Post' },
+    { i: 0, tag: 'body', loc: 'body', region: 'body', attrs: {} },                                  // anonymous
+    { i: 1, tag: 'div', loc: 'div:nth-of-type(1)', region: 'body', attrs: { class: 'x' } },          // anonymous
+    { i: 2, tag: 'div', loc: 'div[data-testid="primaryColumn"]', region: 'body',
+      attrs: { 'data-testid': 'primaryColumn' }, p: 1 },                                             // meaningful (hook)
+    { i: 3, tag: 'div', loc: 'div:nth-of-type(2)', region: 'role:dialog', attrs: {}, p: 2 },         // anonymous
+    { i: 4, tag: 'div', loc: 'div[role="dialog"]', region: 'role:dialog',
+      attrs: { role: 'dialog', 'aria-label': 'Composer' }, p: 3 },                                   // meaningful (role + name)
+    { i: 5, tag: 'button', loc: 'button[aria-label="Post"]', region: 'role:dialog',
+      attrs: { 'aria-label': 'Post', role: 'button' }, p: 4, name: 'Post' },                          // the hit itself
   ] };
-  const chain = branchChain(snap, snap.elements[2], 5);
-  assert.strictEqual(chain.length, 2, 'the walk must reach both ancestors');
-  assert.strictEqual(chain[0].i, 1, 'nearest ancestor first');
-  assert.strictEqual(chain[0].role, 'dialog', 'the branch carries the ancestor role');
-  assert.strictEqual(chain[1].i, 0, 'then the next ancestor up');
-  // A depth limit must bound it, and a root must yield an empty chain rather than loop.
-  assert.strictEqual(branchChain(snap, snap.elements[2], 1).length, 1, 'depth must bound the walk');
+  const chain = branchChain(snap, snap.elements[5], 5);
+  assert.strictEqual(chain.length, 2, 'only the MEANINGFUL ancestors are kept (2 of 4)');
+  assert.strictEqual(chain[0].i, 4, 'nearest meaningful ancestor first');
+  assert.strictEqual(chain[0].role, 'dialog', 'and it carries the role');
+  assert.strictEqual(chain[0].ariaLabel, 'Composer', 'and the accessible name');
+  assert.strictEqual(chain[1].i, 2, 'then the next meaningful one up');
+  assert.strictEqual(chain[1].hook, 'data-testid="primaryColumn"', 'with its page hook');
+  // depth bounds the number of MEANINGFUL ancestors, not raw hops
+  assert.strictEqual(branchChain(snap, snap.elements[5], 1).length, 1, 'depth must bound the walk');
+  // a root has no branch
   assert.strictEqual(branchChain(snap, snap.elements[0], 5).length, 0, 'a root has no branch');
+  // if the page labels NOTHING on the path, the branch is the nearest ancestors rather than
+  // an empty chain — blank would read as "no context", which would be a quiet lie.
+  const bare = { elements: [
+    { i: 0, tag: 'div', loc: 'div:nth-of-type(1)', region: 'body', attrs: {} },
+    { i: 1, tag: 'span', loc: 'span:nth-of-type(1)', region: 'body', attrs: {}, p: 0 },
+  ] };
+  const bareChain = branchChain(bare, bare.elements[1], 5);
+  assert.strictEqual(bareChain.length, 1, 'an unlabelled page still returns the nearest ancestor');
 });
 
 test('collectors: NO BACKTICKS inside the template-literal collector bodies', () => {
