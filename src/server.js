@@ -971,6 +971,28 @@ A NAVIGATION IS THE STRONGEST CONFIRMATION AND IT IS NOT IN THE GROUPS: when cli
 
 FULL PAGE MAP vs A SLICE: browse / page_snapshot collect a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and return only a small INDEX (counts + the dimensions you can slice by). find and page_slice then fetch only what you ask for, at full fidelity. The inventory is scroll-stable: it does not churn the way a viewport-filtered scan does, because it is not a subset that changes as you scroll — which is also why the DIFF can tell viewport churn from real mutation. Elements carry a parent pointer, so the BRANCH an element sits in is data you can walk, not a diagram you have to render. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 
+v2.0 — THE LOOP (four steps, in this order):
+  1. browse {url}             opens or binds the tab, collects a LOSSLESS inventory of every element
+                              (nothing filtered, capped or truncated) and returns the index + a region
+                              outline. The full records stay server-side, addressable by index.
+  2. find {query|region|...}   locates the control. Every hit answers WHERE (region + branch chain) and
+                              WHAT (role/name/attrs/state) — so you can tell five things called "New" apart.
+  3. act {action, ref, ...}    does it: click, hover, rightclick, drag, type, key, form, upload, scroll,
+                              dialog. Add how:"trusted" when the page checks isTrusted, reads
+                              detail/coordinates, or a default action must be produced the way the
+                              browser produces it. Works in a BACKGROUND tab — no focus steal.
+  4. READ THE DIFF that arrives with the reply. It says whether the page actually mutated, lists what
+                              changed, and ends with FULL DIFF: <handle>. If the summary is not enough,
+                              page_slice{diff:"<handle>", part:"structure|content|visual|viewport"} returns any part.
+  measured, not assumed: the DIFF is cached because it used to be 379 KB for one action; the summary is
+  what changed and the handle is the rest. "mutated" comes from structure+content ONLY, so scroll or
+  layout churn can never make an action look landed.
+  HONEST LIMITS — read before you plan: a trusted DRAG does not COMPLETE (it produces trusted
+  dragstart/dragenter/dragover but no drop; the plain drag mode fires the whole sequence but its events
+  are NOT trusted, so a page checking isTrusted ignores them). Trusted clicks/keys are the browser's own
+  input but are NOT proven byte-identical to an OS click. Same-origin iframes ARE readable and clickable;
+  cross-origin frames are not. Canvas/WebGL: use act{action:"click", x, y}.
+
 THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
   act              DO something: action=click|hover|rightclick|drag|type|key|form|upload|scroll|dialog. how="trusted" goes through the browser's own input pipeline (a real isTrusted event, default actions run); how="os" is OS-level input and needs the tab in front. This is the one to reach for.
   debug            WebSense itself + raw reads: op=status|session|logs|cookies|clipboard|screenshot|ax|evaluate|main_world|explore_page|reload|respawn|guide. Reach for it when something is wrong.

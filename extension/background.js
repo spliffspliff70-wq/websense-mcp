@@ -495,6 +495,21 @@ try {
   }
 } catch (_) {}
 
+// ═══ TEMP DRAG LAB — experiment harness (REMOVE BEFORE SHIPPING) ═══
+// Records Input.dragIntercepted so we can tell whether the browser EVER handed a drag to the
+// client. Collection + the drag_lab op exist only to run the drop experiments.
+const __dragIntercepted = [];
+try {
+  if (chrome.debugger && chrome.debugger.onEvent) {
+    chrome.debugger.onEvent.addListener(function (source, method, params) {
+      if (method === 'Input.dragIntercepted') {
+        __dragIntercepted.push({ tabId: source && source.tabId, at: Date.now(), data: params && params.data });
+        if (__dragIntercepted.length > 40) __dragIntercepted.shift();
+      }
+    });
+  }
+} catch (_) {}
+
 // ★ ONE PREPARATION FOR EVERY TRUSTED-INPUT OP (2026-10-01).
 // Attach, keep-alive, and the two emulation calls that make a BACKGROUND renderer behave as
 // focused and active. Both are needed by every trusted op, and a second copy of this is a second
@@ -730,6 +745,12 @@ async function handleTabControl(action, payload) {
       const s = payload.from, t = payload.to;
       if (!s || !t) return { error: 'trusted_drag: from and to {x,y} required' };
       const prep = await __dbgPrepare(tG);
+      // ★ INTERCEPT **BEFORE** THE DRAG STARTS (2026-10-01). The protocol is: setInterceptDrags makes
+      // the browser hand the drag to the client INSTEAD of running it default — so it must be enabled
+      // before the trusted mouse press begins the drag. With it enabled afterwards the drag had
+      // already completed inside the browser and every dispatchDragEvent was ignored. This is the
+      // fourth experiment on the same drop.
+      try { await chrome.debugger.sendCommand({ tabId: tG }, 'Input.setInterceptDrags', { enabled: true }); } catch (e) {}
       const cmd = (type, o) => chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchMouseEvent', Object.assign({ type: type, button: 'left' }, o));
       await cmd('mouseMoved', { x: s.x, y: s.y, buttons: 0 });
       await cmd('mousePressed', { x: s.x, y: s.y, buttons: 1, clickCount: 1 });
@@ -753,6 +774,28 @@ async function handleTabControl(action, payload) {
         dropped = true;
       } catch (e) { dropped = String((e && e.message) || e); }
       return { success: true, mode: 'trusted', via: 'mousePressed>6x mouseMoved>mouseReleased', dropped: dropped, from: s, to: t, emulation: prep.emulation };
+    }
+    case 'drag_lab': {
+      // TEMP harness (REMOVE BEFORE SHIPPING): run a raw list of CDP commands against a tab and
+      // return each command's result/error plus any Input.dragIntercepted seen during the run.
+      const tL = parseInt(payload.tabId, 10);
+      if (!tL) return { error: 'drag_lab: tabId required' };
+      const prep = await __dbgPrepare(tL);
+      __dragIntercepted.length = 0;
+      const out = [];
+      const cmds = Array.isArray(payload.cmds) ? payload.cmds : [];
+      for (let i = 0; i < cmds.length; i++) {
+        const c = cmds[i];
+        const t0 = Date.now();
+        try {
+          const r = await chrome.debugger.sendCommand({ tabId: tL }, c.cdp, c.params || {});
+          out.push({ i, cdp: c.cdp, ok: true, ms: Date.now() - t0, r: r === undefined ? null : r });
+        } catch (e) {
+          out.push({ i, cdp: c.cdp, ok: false, ms: Date.now() - t0, error: String((e && e.message) || e) });
+        }
+        if (c.wait) await new Promise((r) => setTimeout(r, c.wait));
+      }
+      return { success: true, emulation: prep.emulation, cmds: out, dragIntercepted: __dragIntercepted.slice() };
     }
     case 'capture_visible_tab': {
       // Phase 4 (2026-08-15): browser_screenshot tool. chrome.tabs.captureVisibleTab
