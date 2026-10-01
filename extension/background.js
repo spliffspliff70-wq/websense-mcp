@@ -724,6 +724,22 @@ async function handleTabControl(action, payload) {
         if (!ok && prep && prep.attached) { try { await chrome.debugger.detach({ tabId: tKey }); } catch (_) {} }
       }
     }
+    case 'trusted_drag': {
+      const tG = parseInt(payload.tabId, 10);
+      if (!tG) return { error: 'trusted_drag: tabId required' };
+      const s = payload.from, t = payload.to;
+      if (!s || !t) return { error: 'trusted_drag: from and to {x,y} required' };
+      const prep = await __dbgPrepare(tG);
+      const cmd = (type, o) => chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchMouseEvent', Object.assign({ type: type, button: 'left' }, o));
+      await cmd('mouseMoved', { x: s.x, y: s.y, buttons: 0 });
+      await cmd('mousePressed', { x: s.x, y: s.y, buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= 6; i++) {
+        await cmd('mouseMoved', { x: Math.round(s.x + (t.x - s.x) * i / 6), y: Math.round(s.y + (t.y - s.y) * i / 6), buttons: 1 });
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await cmd('mouseReleased', { x: t.x, y: t.y, buttons: 0, clickCount: 1 });
+      return { success: true, mode: 'trusted', via: 'mousePressed>6x mouseMoved>mouseReleased', from: s, to: t, emulation: prep.emulation };
+    }
     case 'capture_visible_tab': {
       // Phase 4 (2026-08-15): browser_screenshot tool. chrome.tabs.captureVisibleTab
       // is a chrome.tabs API — no CDP, no webdriver flag, no bot-detection surface.

@@ -32,4 +32,10 @@ console.log('4. page state after     ->', after.replace(/\s+/g, ' ').slice(0, 80
 console.log('5. the click LANDED (page says so):', changed);
 const st = await call('debug', { op: 'status' });
 console.log('6. debug{op:status}     ->', st.replace(/\s+/g, ' ').slice(0, 110));
-console.log(changed && /"url"/.test(st) ? '\nSURFACE CHECK: PASS' : '\nSURFACE CHECK: FAIL');
+await call('debug', { op: 'main_world', tabId: T, func: '() => { window.__drag.length = 0; return 1; }', verify: false });
+const dg = await call('act', { action: 'drag', how: 'trusted', fromRef: '#fp-drag-src', toRef: '#fp-drop', tabId: T, verify: false });
+console.log('7. act{drag,trusted}    ->', dg.replace(/\s+/g, ' ').slice(0, 140));
+const rec = await call('debug', { op: 'main_world', tabId: T, func: '() => window.__drag.map(function(e){return e.type + (e.isTrusted ? ":T" : ":s");})', verify: false });
+console.log('8. page recorded        ->', rec.replace(/\s+/g, ' ').slice(0, 190));
+const td = /:T/.test(rec) && /drop/.test(rec);
+console.log(changed && /"url"/.test(st) && td ? '\nSURFACE CHECK: PASS' : '\nSURFACE CHECK: FAIL');

@@ -799,6 +799,30 @@ function sendKeysForWindows(key) {
 
 // DISPATCH A TOOL BY NAME: the facades call the REAL handler — same args, same auto-diff, same
 // verdicts — so a combined tool cannot drift from the one it replaced.
+// ★ ONE FRAME-AWARE RESOLVER (2026-10-01, Ali: "for the click and for the drag use the click you
+// used on x.com for the + Add button"). It finds the element ANYWHERE, including inside same-origin
+// iframes (document.querySelector does NOT descend into frames — that is why the frame click kept
+// failing), scrolls it into view (a rect below the fold receives no browser input at all), and
+// converts the rect into TOP-viewport coordinates by walking up through frameElement.
+const PAGE_CENTRE_FUNC = 'function(){' +
+  'var SEL=' + 'SELV' + ';' +
+  'function find(s,d){var e=d.querySelector(s);if(e)return e;var fs=d.querySelectorAll("iframe");' +
+  'for(var i=0;i<fs.length;i++){try{if(fs[i].contentDocument){var r=find(s,fs[i].contentDocument);if(r)return r;}}catch(x){}}return null;}' +
+  'var el=find(SEL,document);if(!el)return null;' +
+  'el.scrollIntoView({block:"center"});' +
+  'var r=el.getBoundingClientRect();var x=r.left+r.width/2,y=r.top+r.height/2,inFrame=false;' +
+  'var w=el.ownerDocument.defaultView;' +
+  'while(w&&w!==window){try{var fe=w.frameElement,f2=fe.getBoundingClientRect();x+=f2.left;y+=f2.top;inFrame=true;w=w.parent;}catch(x2){break;}}' +
+  'return {x:Math.round(x),y:Math.round(y),inFrame:inFrame};}';
+async function pageCentre(sel, tabId, doScroll) {
+  const raw = await callTool('main_world', { tabId: tabId, verify: false,
+    func: PAGE_CENTRE_FUNC.replace('SELV', JSON.stringify(String(sel))).replace('el.scrollIntoView({block:"center"});', doScroll ? 'el.scrollIntoView({block:"center"});' : '') });
+  const txt = ((raw && raw.content && raw.content[0] && raw.content[0].text) || '');
+  const m = txt.match(/x[^-\d]{0,10}(-?\d+)[\s\S]{0,90}?y[^-\d]{0,10}(-?\d+)/);
+  if (!m) return null;
+  return { x: Number(m[1]), y: Number(m[2]), w: 2, h: 2, fromPage: true, inFrame: /inFrame[^:]{0,4}true/.test(txt) };
+}
+
 async function callTool(name, args) {
   const fn = TOOL_WRAPPED.get(name);
   if (!fn) return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'no such tool: ' + name }) }] };
@@ -826,6 +850,27 @@ function registerFacades(server) {
     if (a === 'click') {
       if (os) return await callTool('real_click', pass({}));
       return await callTool(trusted ? 'trusted_click' : 'click', pass(trusted ? { selector: o.ref || o.selector } : {}));
+    }
+    if (a === 'drag' && trusted) {
+      const tb = o.tabId || sessionTabOf();
+      // ★ SCROLL IT INTO VIEW FIRST (2026-10-01). A rect below the fold is a coordinate the
+      // browser's input pipeline CANNOT deliver to: the fixture's drag pair sits at y~2086 and the
+      // trusted drag produced ZERO events. One page-side call both scrolls the target into view and
+      // returns its live centre, so the coordinate is guaranteed deliverable.
+      const centre = async (sel, scroll) => {
+        if (!sel) return null;
+        const raw = await callTool('main_world', { tabId: tb, verify: false,
+          func: 'function(){var e=document.querySelector(' + JSON.stringify(String(sel)) + ');if(!e)return null;' + (scroll ? 'e.scrollIntoView({block:"center"});' : '') + 'var r=e.getBoundingClientRect();return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};}' });
+        const txt = ((raw && raw.content && raw.content[0] && raw.content[0].text) || '');
+        // The value can come back as a JSON STRING, so its quotes are escaped backslash-quote and a
+        // pattern expecting a bare quote never matches. This one does not care about the quoting.
+        const m2 = txt.match(/x[^-\d]{0,10}(-?\d+)[\s\S]{0,60}?y[^-\d]{0,10}(-?\d+)/);
+        return m2 ? { x: Number(m2[1]), y: Number(m2[2]) } : null;
+      };
+      const A = await centre(o.fromRef, true), B = await centre(o.toRef, false);
+      if (!A || !B) return { content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'act drag(trusted): could not resolve both boxes', from: A, to: B }) }] };
+      const dr = await getActiveHub().send({ type: 'trusted_drag', tabId: tb, from: A, to: B });
+      return { content: [{ type: 'text', text: JSON.stringify(unwrapRelay(dr)) }] };
     }
     if (a === 'hover' || a === 'rightclick' || a === 'drag') {
       return await callTool('click', pass({ mode: a }));
@@ -1804,8 +1849,6 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   });
 
   // ═══ 15b. TRUSTED CLICK — input that the browser itself produced (2026-10-01) ═══
-  // Ali: "verify and register exactly how a human click is registered in the website code and
-  // simulate it in code background and implement when you find something that works 1:1 identical".
   // The synthetic click dispatches events; a dispatched event is untrusted, so no default action
   // runs and the fields a real input carries are absent. This op routes through
   // Input.dispatchMouseEvent instead — the same pipeline a real mouse uses — with no OS focus and
@@ -1827,11 +1870,18 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     // collect, and a stale coordinate clicks whatever is there now — the one failure mode a
     // coordinate click cannot recover from or detect.
     let box = null;
+    let vpResolved = null;
     try {
-      const g = await getActiveHub().send({ type: 'geometry', ref: o.ref, selector: o.selector, tabId });
-      box = unwrapRelay(g);
+      // ★ SCROLL IT IN AND RESOLVE IT IN THE PAGE (2026-10-01). Same defect the trusted drag had: a
+      // rect BELOW THE FOLD cannot receive browser input — measured on the fixture, a drag pair at
+      // y=2086 produced ZERO events and the same pair at y=1095 produced the full trusted sequence.
+      // This path also reaches SAME-ORIGIN FRAME content, which the content-script geometry op cannot
+      // (it runs in the main frame only).
+      vpResolved = (o.ref || o.selector) ? await pageCentre(o.ref || o.selector, tabId, true) : null;
+      const g = vpResolved ? null : await getActiveHub().send({ type: 'geometry', ref: o.ref, selector: o.selector, tabId });
+      const box = vpResolved ? null : unwrapRelay(g);
     } catch (e) { box = { error: String((e && e.message) || e) }; }
-    let vp = box && box.viewport;
+    let vp = vpResolved || (box && box.viewport);
     if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
       const ent = getSnapshot(tabId);
       const want = String(o.ref || o.selector || "");
