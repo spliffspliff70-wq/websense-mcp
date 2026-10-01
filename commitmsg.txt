@@ -1,74 +1,21 @@
-real tasks with an outside oracle: 4/4, and four more bugs they exposed
+diff: say when a diff was taken across a navigation, and teach the guide the new verdicts
 
-Ali: "Ok go for it continue until you are confident."
+Follow-on to the navigation fix. The result payload learned to say "confirmed, the page
+navigated" — but the DIFF block, which is the thing a caller reads first, still printed
+mutated:false for a replaced document. Now it appends, only when the handler actually proved a
+navigation:
 
-★ THE INSTRUMENT. The earlier sweep typed "sweep" into a text box, which proves machinery,
-not that a TASK completes — and the auto-DIFF, which I had been using as the oracle for
-"did it land", is itself tool output and was PROVEN to lie earlier today (phantom
-mutations on a static page; effect:'confirmed' for a refused type). So
-tools/task-battery.mjs runs real multi-step tasks and scores every one against PAGE TRUTH
-read through main_world (the page's own JS: location, title, DOM values), printing the
-tool's claim beside the oracle's reading. Disagreement is the finding.
-  S1 wikipedia: type a query, press Enter, land on the article
-  S2 hacker news: click a nav link whose destination was read off the page first
-  S3 books.toscrape: two steps — catalogue page 1, then next
-  S4 wikipedia portal: change a real <select> (exercises form{action:"select"})
-RESULT: 4/4, each confirmed by the page itself.
+  THE PAGE NAVIGATED (<from> -> <to>) — this baseline belongs to the document that was
+  replaced, so structure/content/visual above are NOT meaningful. The navigation itself is the
+  confirmation. In particular, mutated:false here does NOT mean nothing happened.
 
-★ v1 OF THE BATTERY SCORED 1/4 AND THREE OF THE FOUR FAULTS WERE THE INSTRUMENT: it reported
-only the last step's claim (so a failure gave no idea which step broke), it clicked into a
-category that has a single page (so "no next link" was TRUE), and it printed a missing diff
-as zero changes (conflating NO-DIFF with "nothing changed"). The instrument is now itself a
-thing to be debugged, and its findings only count after that.
+Verified end to end on HN's "newest" link: effect:"confirmed", navigation recorded
+(polls:3 — the commit lands after the op returns), and the DIFF line carries the note above.
 
-★ BUG 7 — A NAVIGATION WAS REPORTED AS A NO-OP, i.e. the caller retried a click that worked.
-Clicking HN's "newest" and books' "next" BOTH navigated while the tool answered
-effect:'suspected_noop' + mutated:false — and suspected_noop's escalation tells the caller to
-re-read and then consider OS-level input. The before/afterState pair cannot see it: it is
-captured around a click that RETURNS IMMEDIATELY, so both snapshots are the pre-navigation
-document and are identical by construction.
-FIXED with confirmNavigation(): compare the tab URL after the op against the click-time URL.
-It took three attempts, each caught by measurement rather than reasoning:
-  (a) read result.beforeState off the ENVELOPE, where it never exists ({type,id,success,data,…})
-      — the probe silently never ran;
-  (b) read the payload correctly but probed ONCE, immediately — the navigation commits after
-      the op returns, so the first read still showed the old URL (measured: it appears on the
-      THIRD read, ~440ms in), so it now polls;
-  (c) press_key has no beforeState at all, so for Enter/Space the "before" URL is read first.
-Same check now also covers press_key, because Enter SUBMITS FORMS.
+THE GUIDE WAS UPDATED IN PLACE, not in a changelog: the DID IT LAND paragraph now states that a
+navigation is the strongest confirmation, that it is not in the groups, and that a synthetic
+Enter runs no default action so press_key now submits the form and reports defaultAction. The
+test suite caught that MODEL_PROMPT.md had drifted from the live guide — it is GENERATED, so
+tools/export-guide.mjs was run rather than hand-edited.
 
-★ BUG 8 — AN UNTRUSTED Enter RUNS NO DEFAULT ACTION, so "type a query, press Enter" did
-nothing at all. Probed in-page: the key WAS delivered to the right element
-({key:'Enter', trusted:false, target:'searchInput'}) and the page still did not move, because
-synthetic events never trigger form submission. The tool now runs the default action a real
-Enter would run (form.requestSubmit()), only when it is unambiguous — the page did not claim
-the key, no modifier is held, the target is a text-like INPUT (not a textarea), and the input
-is in a form — and it REPORTS it (defaultAction + defaultPrevented) instead of doing it
-invisibly.
-★ AND MY FIRST FIX OF THIS LANDED ON A FUNCTION NOTHING CALLS. nativePressKey had ZERO
-callers; both dispatchers call nativePressKeyEnhanced. The fix changed nothing, and the TEST
-I wrote to pin it passed anyway because it asserted on that same dead symbol. The dead copy is
-deleted, the fix is on the called one, and the test now RESOLVES the symbol the dispatchers
-call. A negative check (delete the call, expect the suite to fail) is what exposed the second
-hollow test: it had been matching the human-readable message 'form.requestSubmit() — …' rather
-than the call.
-
-★ BUG 9 — THE SAME ENVELOPE MISTAKE, FIVE TIMES IN ONE FILE. Hub replies are
-{type,id,success,data:{…}}. Reading a field off the top level returns undefined forever:
-  type_text's verdict        -> called a REFUSED type 'confirmed' (fixed earlier today)
-  the click navigation probe -> never fired (bug 7a)
-  auto-climb's changed test  -> `changed` came from an undefined URL, so it ALWAYS said false
-  withEffect                 -> set before/afterState on the envelope, then classifyEffect
-                                unwrapped past them and answered 'unverifiable' every time
-  wait{urlContains}          -> read last.url off the envelope, so the condition could never match
-FIXED by giving page state exactly one reader, readPageState(), and a test that keeps the
-count of direct page_state sends at two (the accessor, and the status diagnostic that forwards
-the reply verbatim and reads nothing off it).
-
-★ STILL OPEN, stated rather than implied: the auto-DIFF block itself still prints
-mutated:false after a navigation, because its baseline belongs to the document that was
-replaced — the RESULT now says confirmed and names the navigation, so the caller has the
-signal, but the diff line is still wrong on that case. And nothing here has tested upload,
-shadow DOM, iframes, drag-drop or cross-tab orchestration; the sample still has none of those.
-
-162 tests pass.
+163 tests pass.

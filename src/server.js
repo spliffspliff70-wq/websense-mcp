@@ -638,9 +638,23 @@ function withDelta(name, handler) {
     // never discarded — the next READ refreshes it (see ensureSnapshot).
     try { markSnapshotDirty((args && args.tabId) || sessionTabOf()); } catch (_) {}
     const line = 'DIFF (auto, after ' + name + '): ' + JSON.stringify(delta);
+    // ★ A DIFF ACROSS A NAVIGATION IS MEANINGLESS, AND SAYING NOTHING CHANGED IS THE WRONG ANSWER
+    // (2026-10-01). The baseline belongs to the document that was just replaced, so a click that
+    // NAVIGATED came back mutated:false — "nothing changed" for a whole new page. Measured with an
+    // outside oracle on HN's "newest" and books.toscrape's "next". The result payload now carries
+    // the navigation the handler proved; say it here too, because this block is what a caller
+    // reads first.
+    let navNote = '';
     try {
-      if (res && Array.isArray(res.content)) res.content.push({ type: 'text', text: line });
-      else return { content: [{ type: 'text', text: line }] };
+      const firstText = res && Array.isArray(res.content) && res.content[0] && res.content[0].text;
+      const payload = firstText ? JSON.parse(firstText) : null;
+      const nav = payload && payload.navigation;
+      if (nav) navNote = '\nTHE PAGE NAVIGATED (' + nav.from + ' -> ' + nav.to + ') — this baseline belongs to the document that was replaced, so structure/content/visual above are NOT meaningful. The navigation itself is the confirmation.'
+        + (delta && delta.mutated === false ? ' In particular, mutated:false here does NOT mean nothing happened.' : '');
+    } catch (_) { /* an unparseable payload just gets the plain line */ }
+    try {
+      if (res && Array.isArray(res.content)) res.content.push({ type: 'text', text: line + navNote });
+      else return { content: [{ type: 'text', text: line + navNote }] };
     } catch (_) { /* never let the flag break a result */ }
     return res;
   };
@@ -771,6 +785,7 @@ DID IT LAND? Every mutating op (click, type_text, form, press_key, real_click, r
   content   — the SAME element's value/text changed and its shape did not. The page answered you.
   viewport  — ONLY vp/x/y differ. This is scroll/layout churn and is NOT a mutation. It used to be reported as one (a scroll measured changedRatio 1.038, "12 added / 40 removed") because the old diff compared the interactive+in-viewport subset, which changes as you scroll.
 mutated is true when structure or content moved. The baseline for any page is the first collection after that page loaded, and it is held BY THE PAGE, so navigating gives you a fresh one automatically. Pass verify:false to skip the diff on a call you don't need checked.
+A NAVIGATION IS THE STRONGEST CONFIRMATION AND IT IS NOT IN THE GROUPS: when click or press_key (Enter/Space) replaces the document, the result carries effect:"confirmed" plus a navigation {from,to} — and the DIFF line says so explicitly, because a diff taken across a navigation compares two different documents and its groups are meaningless. Measured: clicking HN's "newest" and books.toscrape's "next" both navigated while the old code answered suspected_noop + mutated:false, i.e. it told you a click that worked had done nothing. Also: an untrusted synthetic Enter runs NO default action, so press_key Enter on a form field now calls form.requestSubmit() for you and reports defaultAction when it does.
 
 FULL PAGE MAP vs A SLICE: browse / page_snapshot collect a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and return only a small INDEX (counts + the dimensions you can slice by). find and page_slice then fetch only what you ask for, at full fidelity. The inventory is scroll-stable: it does not churn the way a viewport-filtered scan does, because it is not a subset that changes as you scroll — which is also why the DIFF can tell viewport churn from real mutation. Elements carry a parent pointer, so the BRANCH an element sits in is data you can walk, not a diagram you have to render. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 

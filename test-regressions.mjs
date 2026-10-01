@@ -2359,6 +2359,20 @@ test('cs: typing into a disabled/read-only control must SAY SO, not advise a re-
   assert(/hint:/.test(m[0]), 'and carry a usable next step instead of a re-read loop');
 });
 
+test('diff: a diff taken across a NAVIGATION must say so', () => {
+  // ★ A click that navigated came back mutated:false — "nothing changed" for a whole new document
+  // — because the baseline belongs to the document that was replaced. Measured with an outside
+  // oracle on HN's "newest" and books.toscrape's "next". Wrong in the most misleading direction,
+  // so the line now names the navigation and denies the misreading.
+  const at = SRV_SRC.indexOf('function withDelta(');
+  const w = SRV_SRC.slice(at, at + 2400);
+  assert(at > 0, 'withDelta must be findable');
+  assert(/THE PAGE NAVIGATED/.test(w), 'the DIFF line must name a navigation when the result proved one');
+  assert(/mutated:false here does NOT mean nothing happened/.test(w),
+    'and must explicitly deny that mutated:false means nothing happened');
+  assert(/payload\.navigation/.test(w), 'it must read the navigation the handler proved');
+});
+
 test('page state: ONE unwrapping reader — the envelope hid the URL three times', () => {
   // type_text's verdict, the click navigation probe, and auto-climb's "did the OS click change
   // anything" check each read a URL straight off a hub reply and got `undefined` every time
