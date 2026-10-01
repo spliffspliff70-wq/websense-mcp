@@ -403,6 +403,22 @@ export function regionTree(snap, opts = {}) {
   const els = (snap && snap.elements) || [];
   const maxDepth = opts.depth || Infinity;   // no cap — a depth limit is a truncation
 
+  // ★ WHOSE WORDS, DECIDED FROM THE PAGE (2026-10-01). Measured across the sample: pages that
+  // name their containers with ids/roles/hooks need nothing from their classes — x.com's outline
+  // was 242 lines of which 187 were CSS-in-JS hashes (.css-g5y9jx, .css-146c3p1), and MDN's went
+  // from 7 useful lines to ~50. But a page that names its layout ONLY with classes has no map at
+  // all without them (books.toscrape: div.page > article.product_pod, one line of nothing).
+  //
+  // So the choice is per-page and derived from the page: run with its structural words first,
+  // and consult classes only when that produced no structure whatsoever — not even one container
+  // holding another. This is NOT a filter: the classes are in the inventory and in page_slice
+  // either way, and nothing is dropped from the record. It decides what the MAP is made of.
+  if (opts.className === undefined && opts.classFallback !== false) {
+    const plain = regionTree(snap, { ...opts, className: false, classFallback: false });
+    if (plain.regions > 1) return plain;
+    return regionTree(snap, { ...opts, className: true, classFallback: false });
+  }
+
   // ── ADMISSIBILITY: a name must identify a PLACE ───────────────────────────────────
   // ★ MEASURED 2026-10-01. The page's own words are the only vocabulary we use — but a
   // page REUSES words, and the same word in many different places names a component,
@@ -479,7 +495,7 @@ export function regionTree(snap, opts = {}) {
     t.n++;
     t.vals.add(v);
   };
-  const wantClass = opts.className !== false;   // the page's class IS the page's own word
+  const wantClass = !!opts.className;   // decided per-page above, not fixed here
   for (let i = 0, N = Number.isFinite(spread) ? els.length : 0; i < N; i++) {
     const e = els[i], a = e.attrs;
     if (!a) continue;
@@ -635,14 +651,30 @@ export function regionTree(snap, opts = {}) {
     while (p != null && hops < 400) { if (isRegion[p]) { regionChild[p].push(i); break; } p = els[p].p; hops++; }
   }
 
-  // shape of a region for the repetition test: tag + its OWN name KIND (not the value, because
-  // per-instance values differ) + the tag sequence of its region children.
-  // ★ A REPEAT IS THE SAME THING AGAIN, so the comparison carries the element's own NAME —
-  // not merely the KIND of name it has. Comparing kinds alone made two differently-named
-  // siblings (x.com's primaryColumn beside sidebarColumn) look like one repeated thing, and
-  // the collapse then printed one of them with a count and HID THE OTHER ENTIRELY.
-  const shapeOf = (i) =>
-    els[i].tag + '|' + nameOf(els[i], i) + '|' + regionChild[i].map((c) => els[c].tag).join(',');
+  // shape of a region for the repetition test — see the note below.
+  // ★ A REPEAT IS THE SAME SHAPE AGAIN — compared as the WHOLE SUBTREE's tag structure,
+  // recursively, and NOT by name. Both halves of that were forced by live pages (2026-10-01):
+  //   - old.reddit's 25 posts are div[data-fullname=t3_…]; the VALUE differs per post, so any
+  //     name-sensitive comparison refuses to collapse the listing (~175 lines of posts);
+  //   - x.com's primaryColumn beside sidebarColumn have different names AND different subtrees,
+  //     so a structure-only comparison correctly refuses to merge them — an earlier version
+  //     merged them on their name KIND and printed one with a count, HIDING the other entirely.
+  // Where the collapsed members carry different names the line says so, rather than implying
+  // they are identical.
+  const shapeCache = new Array(els.length);
+  const shapeOf = (i) => {
+    if (shapeCache[i] !== undefined) return shapeCache[i];
+    const a = els[i].attrs || {};
+    const kinds = [];
+    if (a.role) kinds.push('role');
+    else if (a['aria-label']) kinds.push('aria');
+    else if (a.id) kinds.push('id');
+    else if (a.class) kinds.push('class');
+    else kinds.push('data');
+    const s = els[i].tag + '|' + kinds.join(',') + '|' + regionChild[i].map((c) => els[c].tag).join(',');
+    shapeCache[i] = s;
+    return s;
+  };
 
   const lines = [];
   const seenRep = [];
@@ -663,18 +695,20 @@ export function regionTree(snap, opts = {}) {
       cur = only;
     }
     lines.push(ind + chain + ' :: ' + names.filter(Boolean).join('  /  '));
+    // ★ A REPEAT MUST MATCH BY NAME AT THE SAME PHASE, not merely by shape. The shape says the
+    // subtree looks the same; the name says it IS the same thing. Merging on shape alone hid
+    // x.com's rail: primaryColumn and sidebarColumn are two DIFFERENT places that happen to have
+    // one region child each, so they matched, and the collapse printed the feed with a count and
+    // never showed the rail at all. The old `>= 3` rule masked this by refusing to collapse a
+    // pair — but that number was load-bearing for the wrong reason, and it also blocked real
+    // runs. Comparing phase-aligned names fixes the cause: identical names still collapse at any
+    // length, an alternating run still collapses (each phase keeps its own name), and two
+    // differently-named places never merge.
     const rc = regionChild[cur];
-    // ★ DYNAMIC REPETITION — the LONGEST run, period or not (2026-10-01, after Ali:
-    // "How we choose to organize them must also always be dynamic"). The old version only
-    // compared ADJACENT identical shapes, which misses the most common real pattern: a run
-    // that ALTERNATES (A,B,A,B …) because the page interleaves two kinds of thing. bbc.com's
-    // nav is div>div>a / div>button / div>div>a / … so its 9 menu items cost 15 lines while
-    // the page's own repetition sat there unread. The period is DERIVED from the data — every
-    // period is tried, and whichever explains the longest run wins — not chosen by us.
-    const shapes = rc.map((c) => shapeOf(c));
+    const keys = rc.map((c, idx) => shapeOf(c) + '\u0000' + nameOf(els[c], c));
     let k = 0;
     while (k < rc.length) {
-      const rest = shapes.slice(k);
+      const rest = keys.slice(k);
       let bestSpan = 1, bestP = 1;
       for (let p = 1; p * 2 <= rest.length; p++) {
         let j = p;
@@ -683,7 +717,19 @@ export function regionTree(snap, opts = {}) {
       }
       if (bestSpan > bestP) {   // the run is longer than ONE period — no x3 style threshold
         for (let m = 0; m < bestP; m++) emit(rc[k + m], d + 1);
-        lines.push('  '.repeat(d + 1) + '^ the block above REPEATS x' + bestSpan);
+        // ★ A COLLAPSE MUST NOT HIDE A NAME (Ali, 2026-10-01: nothing may limit the data taken
+        // from the page). The members of a run share a SHAPE, but they do not necessarily share
+        // a NAME — old.reddit's 25 posts are div[data-fullname=t3_…] with an id each, and x.com's
+        // primaryColumn sits beside sidebarColumn as two DIFFERENT places of one shape. Printing
+        // only the first name and a count hid the rail entirely on the live feed. So the run
+        // carries every DISTINCT name it holds.
+        const distinct = [];
+        for (let m = 0; m < bestSpan; m++) {
+          const nm = nameOf(els[rc[k + m]], rc[k + m]);
+          if (distinct.indexOf(nm) < 0) distinct.push(nm);
+        }
+        lines.push('  '.repeat(d + 1) + '^ the block above REPEATS x' + bestSpan
+          + (distinct.length === 1 ? '' : ' — ' + distinct.join(' , ')));
         seenRep.push(bestSpan);
         k += bestSpan;
       } else {
