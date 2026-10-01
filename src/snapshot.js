@@ -27,17 +27,27 @@
 
 // ── The collector. Runs IN the page. Must be self-contained (no outer-scope refs). ──
 export const COLLECTOR = `() => {
-  var MAX = 20000;
+  // ★ NO CAP (2026-10-01, Ali: "Agreed no capping no filtering implement and test").
+  // This used to be MAX = 20000 with an early break. Removed: the
+  // inventory is meant to be LOSSLESS, and a cap on it is exactly the silent cut the
+  // snapshot exists to avoid. The cost of removing it is server memory, not
+  // correctness — and the index now carries 'dropped' (must be 0) so a future cut
+  // cannot hide.
   var out = [];
   var all;
   try { all = document.querySelectorAll('*'); } catch (e) { all = []; }
   var total = all.length;
   var truncated = false;
+  var nonRenderable = 0;   // counted, NOT dropped — see the no-filter note below
   var vw = window.innerWidth, vh = window.innerHeight;
 
   function short(s, n) {
-    s = (s == null ? '' : String(s)).replace(/\\s+/g, ' ').trim();
-    return s.length > n ? s.slice(0, n) : s;
+    // n is retained for call-site compatibility but NO LONGER TRUNCATES.
+    // ★ NO FILTER: name/href/value/region-heading were cut at 90/120/80/50 chars,
+    // which is the same mistake as the LABEL_MAX=40 delta bug — it destroys meaning
+    // mid-string and makes a stored record unreadable. The snapshot is stored
+    // server-side and never shipped whole; only slices leave. Store it raw.
+    return (s == null ? '' : String(s)).replace(/\\s+/g, ' ').trim();
   }
 
   // A usable CSS locator: prefer stable identity, else an nth-of-type chain.
@@ -106,10 +116,14 @@ export const COLLECTOR = `() => {
   }
 
   for (var i = 0; i < all.length; i++) {
-    if (out.length >= MAX) { truncated = true; break; }
+    // ★ NO CAP: the early-break on MAX that used to sit here is gone.
     var el = all[i];
     var t = (el.tagName || '').toLowerCase();
-    if (t === 'script' || t === 'style' || t === 'meta' || t === 'link' || t === 'head' || t === 'title' || t === 'base') continue;
+    // ★ NO FILTER: this used to skip script/style/meta/link/head/title/base with a
+    // continue. That made elements (2719) disagree with domTotal (2774) while truncated
+    // still read FALSE — a silent 55-element cut the index could not report, which is
+    // worse than the cut. Every element is recorded now; slice them out by tag.
+    if (t === 'script' || t === 'style' || t === 'meta' || t === 'link' || t === 'head' || t === 'title' || t === 'base') nonRenderable++;
     var r = null;
     try { r = el.getBoundingClientRect(); } catch (e) { r = null; }
     var inVp = !!(r && r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0
@@ -132,7 +146,7 @@ export const COLLECTOR = `() => {
     out.push(rec);
   }
   return { url: location.href, title: document.title, total: total, truncated: truncated,
-           vw: vw, vh: vh, count: out.length, elements: out };
+           nonRenderable: nonRenderable, vw: vw, vh: vh, count: out.length, elements: out };
 }`;
 
 // ── Server-side snapshot store: one entry per tab, TTL + LRU bounded. ──
@@ -187,13 +201,22 @@ export function buildIndex(snap) {
       interactive++;
     }
   }
-  const top = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
+  const top = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]);
+  const byTagAll = top(byTag), byRoleAll = top(byRole);
   return {
     url: snap.url, title: snap.title,
     elements: els.length, domTotal: snap.total, truncated: !!snap.truncated,
+    // ★ COMPLETENESS PROOF (2026-10-01, no capping / no filtering). `dropped` must be
+    // 0. Before this, a tag filter cut 55 elements and `truncated` still read false, so
+    // the index could not tell you the map was incomplete — a silent loss is worse than
+    // a declared one. `nonRenderable` counts script/style/meta/link/head/title/base,
+    // which are RECORDED (not dropped) and sliceable by tag.
+    dropped: Math.max(0, Number(snap.total || 0) - els.length),
+    nonRenderable: Number(snap.nonRenderable || 0),
     interactive, inViewport, offViewport, named: withName,
-    topTags: top(byTag, 12),
-    topRoles: top(byRole, 10),
+    // FULL lists, no top-N cut — the caller slices what it wants.
+    topTags: byTagAll, topRoles: byRoleAll,
+    tagCount: byTagAll.length, roleCount: byRoleAll.length,
     // Addressable dimensions — the keys a slice can be taken by.
     addressableBy: ['tag', 'role', 'region', 'vp', 'interactive', 'query'],
   };
@@ -204,7 +227,13 @@ export function sliceSnapshot(snap, filter = {}) {
   const els = (snap && snap.elements) || [];
   const INTERACTIVE = new Set(['a', 'button', 'input', 'select', 'textarea', 'summary', 'details', 'option']);
   const q = filter.query ? String(filter.query).toLowerCase() : null;
-  const limit = Math.min(Number(filter.limit) || 200, 2000);
+  // ★ NO CAP (2026-10-01): this was `Math.min(Number(filter.limit) || 200, 2000)` — a
+  // DEFAULT of 200 with a hard ceiling of 2000, so asking for everything silently got
+  // you 2000. A slice now returns ALL matches unless the caller explicitly passes
+  // `limit`, which is then honoured exactly (no clamp) and reported via
+  // truncatedByLimit. Nothing is cut without the caller asking for the cut.
+  const hasLimit = filter.limit != null && filter.limit !== '';
+  const limit = hasLimit ? Number(filter.limit) : Infinity;
   const out = [];
   let matched = 0;
   for (const e of els) {
@@ -222,5 +251,5 @@ export function sliceSnapshot(snap, filter = {}) {
     matched++;
     if (out.length < limit) out.push(e);
   }
-  return { matched, returned: out.length, truncatedByLimit: matched > out.length, elements: out };
+  return { matched, returned: out.length, truncatedByLimit: matched > out.length, total: els.length, elements: out };
 }

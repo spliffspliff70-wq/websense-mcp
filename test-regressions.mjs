@@ -11,6 +11,7 @@ import { summarizeRead } from './src/summarize.js';
 import { uploadVerdict } from './src/upload.js';
 import { SessionManager } from './src/session.js';
 import { diffScan, identityKey, disambiguate, fieldChanges } from './src/incr.js';
+import { buildIndex, sliceSnapshot } from './src/snapshot.js';
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -1837,6 +1838,84 @@ test('visibility: opacity is NOT a visibility criterion (x.com "+" regression)',
   // and the rule must reject the three real hiding mechanisms
   assert(/display === 'none'/.test(code) && /visibility === 'hidden'/.test(code),
     'display:none and visibility:hidden must still be rejected');
+});
+
+test('no capping / no filtering: the snapshot inventory is complete by construction', () => {
+  // 2026-10-01 (Ali: "Agreed no capping no filtering implement and test"). Four real
+  // cuts were removed from src/snapshot.js. Pin all four so none can return.
+  const S = readFileSync(new URL('./src/snapshot.js', import.meta.url), 'utf8');
+
+  // 1. No element cap in the collector.
+  const collector = S.match(/export const COLLECTOR = `([\s\S]*?)`;/);
+  assert(collector, 'COLLECTOR must be a template literal');
+  const body = collector[1];
+  // Strip comments FIRST. The fix's own comments name the removed cap ("used to be
+  // MAX = 20000"), so a raw text match fails on prose — the third time this trap bit.
+  const code = body.replace(/\/\/[^\n]*/g, '');
+  assert(!/MAX\s*=\s*\d+/.test(code), 'the collector must not carry an element MAX cap');
+  assert(!/out\.length\s*>=\s*MAX/.test(code), 'the collector must not break early on a cap');
+  assert(!/t === 'script'[\s\S]{0,120}continue;/.test(body),
+    'script/style/meta/link/head/title/base must NOT be skipped — they are recorded');
+  assert(/nonRenderable\+\+/.test(body),
+    'non-renderable tags must be COUNTED (nonRenderable), not dropped');
+  // 3. No field truncation — short() must normalise whitespace only.
+  const shortFn = body.match(/function short\(s, n\) \{[\s\S]*?\n  \}/);
+  assert(shortFn, 'short() must exist');
+  assert(!/\.slice\(0,\s*n\)/.test(shortFn[0]),
+    'short() must not truncate — a stored record cut mid-string is unreadable (cf. LABEL_MAX=40)');
+  // 4. The slice returns everything unless the caller asks for a limit; no clamp.
+  // Again: strip comments, because the fix's comment quotes the removed clamp.
+  const S_code = S.replace(/\/\/[^\n]*/g, '');
+  assert(/hasLimit/.test(S_code), 'slice must treat limit as opt-in');
+  assert(!/Math\.min\(Number\(filter\.limit\)/.test(S_code),
+    'the slice limit must not be defaulted to 200 nor clamped to 2000');
+  // 5. Completeness must be REPORTED, so a future cut cannot hide.
+  assert(/dropped:/.test(S), 'the index must report dropped (must be 0)');
+  // 6. The full group lists, not a top-N cut.
+  assert(!/slice\(0,\s*n\)/.test(S.match(/const top = [\s\S]*?\n/)[0]),
+    'topTags/topRoles must not be cut to a top-N');
+});
+
+test('no capping / no filtering: BEHAVIOUR — a slice returns everything by default', () => {
+  // The static test proves the old cap is gone from the source; this proves the
+  // behaviour actually changed. 250 elements is chosen because the OLD default slice
+  // limit was 200, so this exact size would previously have come back short.
+  const els = [];
+  for (let i = 0; i < 250; i++) {
+    els.push({ i, tag: i % 3 === 0 ? 'div' : 'a', loc: '#e' + i, region: 'body', vp: 1, name: 'n' + i });
+  }
+  const snap = { url: 'x', title: 't', total: 250, elements: els, nonRenderable: 4 };
+
+  // 1. Completeness is reported and it is exact.
+  const idx = buildIndex(snap);
+  assert.strictEqual(idx.elements, 250, 'all 250 must be in the index');
+  assert.strictEqual(idx.domTotal, 250, 'domTotal must be reported');
+  assert.strictEqual(idx.dropped, 0, 'dropped must be 0 — nothing was cut');
+  assert.strictEqual(idx.nonRenderable, 4, 'non-renderable elements are counted, not dropped');
+
+  // 2. A bare slice returns ALL matches (the old code capped this at 200).
+  const all = sliceSnapshot(snap, {});
+  assert.strictEqual(all.matched, 250, 'all 250 must match');
+  assert.strictEqual(all.returned, 250, 'a bare slice must return all 250, not 200');
+  assert.strictEqual(all.truncatedByLimit, false, 'nothing was truncated');
+  assert.strictEqual(all.elements.length, 250, 'the elements array must hold all 250');
+
+  // 3. An explicit limit is honoured EXACTLY (no clamp) and self-reported.
+  const lim = sliceSnapshot(snap, { limit: 5 });
+  assert.strictEqual(lim.returned, 5, 'an explicit limit of 5 returns 5');
+  assert.strictEqual(lim.truncatedByLimit, true, 'an explicit limit reports that it truncated');
+  const big = sliceSnapshot(snap, { limit: 5000 });
+  assert.strictEqual(big.returned, 250, 'a limit above the size must not pad or clamp');
+
+  // 4. A tag slice is complete for that tag.
+  const divs = sliceSnapshot(snap, { tag: 'div' });
+  assert.strictEqual(divs.returned, divs.matched, 'a tag slice returns every match');
+  assert(divs.returned > 0, 'the tag slice must find the divs');
+
+  // 5. dropped goes non-zero ONLY when the inventory really is short — so the field
+  //    can actually detect a future cut rather than always reading 0.
+  const short = buildIndex({ url: 'x', title: 't', total: 250, elements: els.slice(0, 200) });
+  assert.strictEqual(short.dropped, 50, 'dropped must expose a short inventory (50 missing)');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
