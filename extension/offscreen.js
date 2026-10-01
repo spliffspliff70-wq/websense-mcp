@@ -243,7 +243,6 @@ async function handleTabOperation(message) {
     case 'download_state': { return await sendTabControl('download_state', {}); }
     case 'download_op': { return await sendTabControl('download_op', message); }
     case 'cookie_op': { return await sendTabControl('cookie_op', message); }
-    case 'dialog_answer': { return await sendTabControl('dialog_answer', message); }
     case 'trusted_click': {
       // ★ RELAY TO THE SW (2026-10-01). chrome.debugger does not exist in an offscreen document,
       // and the SW is not itself a WS client — so an op that needs it must be FORWARDED here. The

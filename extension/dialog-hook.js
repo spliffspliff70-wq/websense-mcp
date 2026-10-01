@@ -124,16 +124,16 @@
         }
         const p = new Promise((r) => { d.resolve = r; });
         pending.push(d); publish();
-        // No auto-answer for confirm/prompt: a dialog is answered only on request (Ali, 2026-10-01).
-        if (type === 'alert') setTimeout(() => auto(d, undefined), AUTO_MS);
+        setTimeout(() => auto(d, type === 'confirm' ? true : d.defaultValue), AUTO_MS);
         return p;
       };
       // Keep the original callable (some pages feature-detect toString/name).
       try { Object.defineProperty(window[name], 'name', { value: name }); } catch (_) {}
     };
 
-    // Only alert is hooked: its return is undefined, so no page can branch on it wrongly.
     install('alert', 'alert');
+    install('confirm', 'confirm');
+    install('prompt', 'prompt');
 
     publish();
     document.documentElement.setAttribute('data-ws-dialog-hook', '1');

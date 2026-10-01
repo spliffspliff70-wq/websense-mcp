@@ -724,23 +724,6 @@ async function handleTabControl(action, payload) {
         if (!ok && prep && prep.attached) { try { await chrome.debugger.detach({ tabId: tKey }); } catch (_) {} }
       }
     }
-    case 'dialog_answer': {
-      const tD = parseInt(payload.tabId, 10);
-      if (!tD) return { error: 'dialog_answer: tabId required' };
-      const prep = await __dbgPrepare(tD);
-      try {
-        await chrome.debugger.sendCommand({ tabId: tD }, 'Page.enable', {});
-      } catch (_) {}
-      try {
-        await chrome.debugger.sendCommand({ tabId: tD }, 'Page.handleJavaScriptDialog', {
-          accept: payload.accept !== false,
-          promptText: payload.promptText === undefined ? undefined : String(payload.promptText),
-        });
-        return { success: true, via: 'Page.handleJavaScriptDialog', accept: payload.accept !== false, emulation: prep.emulation };
-      } catch (e) {
-        return { error: 'dialog_answer failed: ' + String((e && e.message) || e) };
-      }
-    }
     case 'capture_visible_tab': {
       // Phase 4 (2026-08-15): browser_screenshot tool. chrome.tabs.captureVisibleTab
       // is a chrome.tabs API — no CDP, no webdriver flag, no bot-detection surface.
