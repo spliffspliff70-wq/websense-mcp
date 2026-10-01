@@ -78,9 +78,13 @@ const clk = await call('trusted_click', { selector: '#fp-grow', tabId });
 const raw = clk.__all || '';
 const di = raw.indexOf('DIFF (auto, after ');
 ok(di > 0, 'the click produced an auto-DIFF');
-const dm = raw.slice(di).match(/^DIFF \(auto, after [^)]+\):\s*([\s\S]*)$/);
+const dm = raw.slice(di).match(/^DIFF \(auto, after [^)]+\):\s*([^\n]+)/);
 let d = null;
-try { d = JSON.parse(dm[1]); } catch (e) { console.log('  FAIL could not parse the diff: ' + e.message.slice(0, 60)); }
+// ★ THE BLOCK HAS TWO LINES NOW (2026-10-01): the summary, then the FULL DIFF handle. The first
+// version captured across both with [\s\S]* and could not parse — and then still reported "passed",
+// because an unparseable diff fell through to the default verdict. An unparseable diff is a
+// FAILURE: it means the block changed shape under the checker.
+try { d = JSON.parse(dm[1]); } catch (e) { console.log('  FAIL the DIFF line is not JSON: ' + String(e.message).slice(0, 70)); ok(false, 'the diff must parse'); }
 if (d) {
   const vp = d.viewport || {};
   console.log('  diff bytes            : ' + raw.length);
@@ -91,9 +95,23 @@ if (d) {
     for (const s of vp.shifts.slice(0, 3)) {
       console.log('    dx=' + s.dx + ' dy=' + s.dy + ' count=' + s.count + ' indices=' + (s.i ? s.i.length : 0));
     }
-    const withIdx = vp.shifts.filter((s) => Array.isArray(s.i) && s.i.length === s.count);
-    ok(withIdx.length === vp.shifts.length,
-      'every shift carries the indices of ALL ' + vp.moved + ' elements that moved — nothing hidden');
+    // ★ THE INVARIANT IS NOW: THE BLOCK IS A SUMMARY, AND THE DETAIL IS RETRIEVABLE (2026-10-01,
+    // Ali: "registered in cache and just show you specifically what changed"). The index lists left
+    // the block on purpose — so the honest check is not "the indices are here", it is "the indices
+    // are HERE OR IN THE CACHE, and the block tells you where".
+    const handle = (raw.match(/FULL DIFF: (\S+)/) || [])[1];
+    ok(!!handle, 'the block must name the FULL DIFF handle holding the rest');
+    if (handle) {
+      const full = await call('page_slice', { diff: handle, part: 'viewport' });
+      const v = full && full.content;
+      const total = v && v.shifts ? v.shifts.reduce((n, s) => n + (s.i ? s.i.length : 0), 0) : 0;
+      ok(total === vp.moved,
+        'the cached diff must still carry ALL ' + vp.moved + ' indices (found ' + total + ') — a summary that loses the detail is a cut, not a summary');
+      const c = await call('page_slice', { diff: handle, part: 'content' });
+      ok(!!(c && c.content), 'and any other part is one more call away (content was readable)');
+    }
+    ok(vp.shifts.every((s) => !Array.isArray(s.i)),
+      'the block itself must NOT carry the index lists (that is what was 39.9 KB on x.com)');
     ok(vp.shifts.length < vp.moved,
       'distinct movements (' + vp.shifts.length + ') are fewer than the elements moved (' + vp.moved + ') — that is the collapse');
     ok(JSON.stringify(vp).length < 20000,

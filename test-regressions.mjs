@@ -2442,6 +2442,20 @@ test('trusted_key: wired like the click, and it must SHARE the preparation', () 
     'the server side must give an Enter a LONGER navigation window (a real page load outlasts a short probe: measured — Wikipedia navigated and the verdict still said unverifiable) and a single probe to everything else, so typing a character costs nothing');
 });
 
+test('diff: the block is a SUMMARY and the rest lives in the cache', () => {
+  // Ali: "The composer-close dif it's huge if that ends up in your context. Isn't it better to be
+  // registered in cache and just show you specifically what changed?"
+  assert(/from '\.\/diff-cache\.js'/.test(SRV_SRC), 'the server must import the diff cache');
+  assert(/const handle = cacheDiff\(/.test(SRV_SRC), 'every auto-diff is cached under a handle');
+  assert(/summariseDelta\(delta\)/.test(SRV_SRC), 'the block carries the SUMMARY, not the delta');
+  assert(/FULL DIFF: /.test(SRV_SRC), 'and names the handle so the rest is fetchable');
+  assert(/if \(o\.diff\) \{[\s\S]{0,600}getDiff\(o\.diff\)/.test(SRV_SRC), 'page_slice serves a cached part');
+  const DC = readFileSync(new URL('./src/diff-cache.js', import.meta.url), 'utf8');
+  assert(/if \(delta\.content\) out\.content = delta\.content;/.test(DC),
+    'CONTENT passes through whole — it is the answer to whether the action landed, already small');
+  assert(/dy: s\.dy, count: s\.count \}\)\)/.test(DC), 'the viewport shifts drop the index arrays');
+});
+
 test('browse: the reply must include the tabId (a caller sharing Chrome has nothing else to pass)', () => {
   // ★ Found 2026-10-01 by attempting a cross-tab isolation test: browse answered with an opaque
   // `handle` and no tabId, so the test could not name the two tabs it had opened, and a caller

@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { cacheDiff, getDiff, summariseDelta } from './diff-cache.js';
 import * as z from 'zod';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { COLLECTOR, putSnapshot, getSnapshot, sliceSnapshot, snapshotStats, branchChain, markSnapshotDirty, regionTree } from './snapshot.js';
@@ -650,7 +651,9 @@ function withDelta(name, handler) {
     // The action ran, so the server's copy of this page may no longer match it. Marked,
     // never discarded — the next READ refreshes it (see ensureSnapshot).
     try { markSnapshotDirty((args && args.tabId) || sessionTabOf()); } catch (_) {}
-    const line = 'DIFF (auto, after ' + name + '): ' + JSON.stringify(delta);
+    const handle = cacheDiff((args && args.tabId) || sessionTabOf(), delta);
+    const line = 'DIFF (auto, after ' + name + '): ' + JSON.stringify(summariseDelta(delta))
+      + '\nFULL DIFF: ' + handle + ' — read any part with page_slice{diff:"' + handle + '", part:...}';
     // ★ A DIFF ACROSS A NAVIGATION IS MEANINGLESS, AND SAYING NOTHING CHANGED IS THE WRONG ANSWER
     // (2026-10-01). The baseline belongs to the document that was just replaced, so a click that
     // NAVIGATED came back mutated:false — "nothing changed" for a whole new page. Measured with an
@@ -2171,6 +2174,8 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         z.object({ name: z.string(), value: z.string().optional() }),
       ]).optional().describe('Filter by ANY attribute the page wrote, e.g. attr:"data-testid" or attr:{name:"data-offset",value:"3"}'),
       query: z.string().optional().describe('Substring match over name / locator / tag / region / attribute names'),
+      diff: z.string().optional().describe('A FULL DIFF handle from a DIFF block (e.g. diff:328034470:m1a2) — returns that part of the CACHED diff instead of reading the page'),
+      part: z.enum(['structure', 'content', 'visual', 'viewport', 'all']).optional().describe('Which part of a cached diff (default all)'),
       // ★ DECLARED 2026-10-01 — IT WAS NOT, AND IT SILENTLY RETURNED THE WHOLE PAGE.
       // The handler has always forwarded its args straight to sliceSnapshot(), which HAS
       // supported `indices` since the DIFF was built: the DIFF names what changed by index and
@@ -2185,6 +2190,14 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       limit: z.number().optional().describe('OPT-IN cap on returned records. Omit for ALL matches (no default, no clamp)'),
     },
   }, async (o) => {
+    // A CACHED-DIFF READ SHORT-CIRCUITS THE PAGE (2026-10-01): the caller asks about a PAST diff, not
+    // the current page, so no snapshot is needed and nothing can go stale.
+    if (o.diff) {
+      const full = getDiff(o.diff);
+      if (!full) return textResult({ success: false, error: 'no cached diff for ' + o.diff + ' (the cache holds the last 25)' });
+      if (!o.part || o.part === 'all') return textResult({ success: true, diff: o.diff, part: 'all', content: full });
+      return textResult({ success: true, diff: o.diff, part: o.part, content: full[o.part] });
+    }
     const tabId = o.tabId || sessionTabOf();
     // ★ SELF-HEALING READ (2026-10-01): a slice never fails on staleness either. If the page
     // has moved on since the last collect, refresh and serve the current page.
