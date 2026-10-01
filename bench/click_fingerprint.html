@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebSense click fingerprint fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; }
+  .row { margin: 14px 0; }
+  #btn { padding: 12px 22px; font-size: 15px; background: #dbeafe; border: 1px solid #60a5fa; border-radius: 6px; }
+  #btn:hover { background: #bfdbfe; }
+  #chk { width: 18px; height: 18px; }
+  #lnk, #inp { font-size: 15px; }
+  #count { font-weight: 700; }
+  #log { font: 12px ui-monospace, monospace; white-space: pre-wrap; color: #334155; }
+</style>
+</head>
+<body>
+<h1>click fingerprint fixture</h1>
+<p>Attaches a capture-phase listener for every mouse/pointer/focus event and records the FULL
+property set of each one, plus the side state a site can read at that moment. The question this
+answers is not "did the click work" but "what exactly does the page see", so a synthetic click can
+be compared field by field against a genuinely trusted one.</p>
+
+<div class="row"><button id="btn" data-testid="fp-btn">click target</button>
+  <span id="count">0</span></div>
+<div class="row"><input type="checkbox" id="chk" data-testid="fp-chk"> checkbox (default action toggles it)</div>
+<div class="row"><a id="lnk" href="#navigated" data-testid="fp-lnk">link (default action changes the hash)</a></div>
+<div class="row"><input id="inp" type="text" data-testid="fp-inp" placeholder="input (default action focuses)"></div>
+<div id="log"></div>
+
+<script>
+window.__rec = [];
+window.__count = 0;
+
+const EVENTS = ['pointerover','pointerenter','pointermove','pointerdown','pointerup','pointerout','pointerleave',
+                'pointercancel','gotpointercapture','lostpointercapture','mouseover','mouseenter','mousemove',
+                'mousedown','mouseup','click','auxclick','dblclick','contextmenu','focus','blur','focusin',
+                'focusout','change','input','beforeinput','keydown','keyup'];
+
+function snap(ev) {
+  const t = ev.target;
+  const el = (t && t.nodeType === 1) ? t : null;
+  let hover = null, active = null, bg = null, cur = null;
+  try { if (el) { hover = el.matches(':hover'); active = el.matches(':active');
+    const cs = getComputedStyle(el); bg = cs.backgroundColor; cur = cs.cursor; } } catch (e) {}
+  const r = {
+    // identity
+    type: ev.type, isTrusted: ev.isTrusted, detail: ev.detail,
+    // mouse button state — what a site reads to tell a click from a hover
+    button: ev.button, buttons: (typeof ev.buttons === 'number' ? ev.buttons : null),
+    // coordinates: viewport, screen, document, target-local
+    clientX: ev.clientX, clientY: ev.clientY, screenX: ev.screenX, screenY: ev.screenY,
+    pageX: ev.pageX, pageY: ev.pageY, offsetX: ev.offsetX, offsetY: ev.offsetY,
+    movementX: ev.movementX, movementY: ev.movementY,
+    // pointer identity
+    pointerId: ev.pointerId, pointerType: ev.pointerType, isPrimary: ev.isPrimary,
+    pressure: ev.pressure, width: ev.width, height: ev.height, tiltX: ev.tiltX, tiltY: ev.tiltY, twist: ev.twist,
+    // modifiers + time
+    mods: [ev.ctrlKey, ev.shiftKey, ev.altKey, ev.metaKey].join(','), timeStamp: Math.round(ev.timeStamp),
+    // delivery
+    target: el ? (el.tagName.toLowerCase() + (el.id ? '#' + el.id : '')) : String(t && t.nodeName),
+    pathDepth: (ev.composedPath ? ev.composedPath().length : -1),
+    defaultPrevented: ev.defaultPrevented, cancelable: ev.cancelable, bubbles: ev.bubbles, composed: ev.composed,
+    // SIDE STATE at this instant — the part that is NOT in the event object
+    activeElement: (document.activeElement && document.activeElement.id) || (document.activeElement && document.activeElement.tagName) || null,
+    targetHover: hover, targetActive: active, targetBg: bg, cursor: cur,
+    // has the default action already run by now?
+    counted: window.__count, chk: document.getElementById('chk').checked, hash: location.hash
+  };
+  return r;
+}
+
+for (const type of EVENTS) {
+  window.addEventListener(type, (ev) => {
+    if (window.__rec.length < 400) window.__rec.push(snap(ev));
+  }, true);
+}
+document.getElementById('btn').addEventListener('click', () => {
+  window.__count++; document.getElementById('count').textContent = String(window.__count);
+});
+window.__reset = () => { window.__rec = []; window.__count = 0;
+  document.getElementById('count').textContent = '0';
+  document.getElementById('chk').checked = false;
+  document.getElementById('inp').blur(); document.getElementById('btn').blur();
+  location.hash = ''; };
+window.__dump = () => window.__rec;
+</script>
+</body>
+</html>

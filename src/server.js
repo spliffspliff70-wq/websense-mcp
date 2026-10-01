@@ -113,6 +113,19 @@ function textResult(data) {
 //   landed. The auto-DIFF for that same call said mutated:false — "treat this action as NOT
 //   LANDED" — so two signals disagreed and the optimistic one was wrong.
 // One helper, so the next handler cannot miss it.
+// ★ AN ERROR CAN RIDE INSIDE A SUCCESSFUL ENVELOPE (2026-10-01). Hub replies are
+// {type,id,success,data:{…}}, and a relay that does not recognise an op answers
+// {data:{error:'Unknown action type: X'}} with success:true at the top — so a handler that only
+// tests `success === false` reads that as a performed action. Measured: the first trusted_click
+// reported effect:'unverifiable' and the page saw nothing at all. One reader, so a refusal cannot
+// be mistaken for a result.
+function relayFailure(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.success === false) return String(payload.error || payload.message || 'the relay reported failure');
+  if (payload.error) return String(payload.error);
+  return null;
+}
+
 function unwrapRelay(result) {
   return (result && typeof result === 'object' && result.data && typeof result.data === 'object')
     ? result.data : result;
@@ -502,7 +515,7 @@ function dropSelfEvident(node) {
 // COST NOTE: this is NOT free — it adds one hub round-trip per mutating op (~20-60ms, and
 // the delta payload itself is a few hundred bytes). Callers who don't want it pass
 // verify:false to skip the diff for that call.
-const DELTA_OPS = new Set(['click', 'type_text', 'form', 'press_key',
+const DELTA_OPS = new Set(['click', 'type_text', 'form', 'press_key', 'trusted_click',
   'real_click', 'real_paste', 'main_world', 'evaluate', 'dialog',
   // scroll is a PAGE INTERACTION too (Ali, 2026-10-01: "dif at each page interaction").
   // It is also the case that most needed the grouping: a scroll changes the
@@ -772,9 +785,9 @@ function registerAllTools(server) {
 
   // ═══ 1. GUIDE ═══
   reg(server, 'websense_guide', {
-    description: 'START HERE. Full usage guide for the 33 consolidated WebSense tools: browse, find, snapshot map/slice, explore, read, click, type, form, scroll, tabs, wait, evaluate, main_world, ax, real input, status. Call once before using other tools.',
+    description: 'START HERE. Full usage guide for the 34 consolidated WebSense tools: browse, find, snapshot map/slice, explore, read, click, trusted_click, type, form, scroll, tabs, wait, evaluate, main_world, ax, real input, status. Call once before using other tools.',
   }, async () => {
-    return textResult(`WebSense MCP — Guide (33 consolidated tools)
+    return textResult(`WebSense MCP — Guide (34 consolidated tools)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
@@ -789,13 +802,45 @@ A NAVIGATION IS THE STRONGEST CONFIRMATION AND IT IS NOT IN THE GROUPS: when cli
 
 FULL PAGE MAP vs A SLICE: browse / page_snapshot collect a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and return only a small INDEX (counts + the dimensions you can slice by). find and page_slice then fetch only what you ask for, at full fidelity. The inventory is scroll-stable: it does not churn the way a viewport-filtered scan does, because it is not a subset that changes as you scroll — which is also why the DIFF can tell viewport churn from real mutation. Elements carry a parent pointer, so the BRANCH an element sits in is data you can walk, not a diagram you have to render. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 
-THE 33 TOOLS — what each absorbed from the old 65-tool surface:
+THE 34 TOOLS — what each absorbed from the old 65-tool surface:
   websense_guide   this guide
   browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + the vocabulary. Replaces navigate+page_snapshot+map read.
   find             TOOL 2 — search the stored inventory; each hit gives WHERE (region, position, branch chain resolved from parent pointers) and WHAT (the page's own role/name/attrs/state). Returns ALL matches.
   explore_page     quick look at a page's actions (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (you usually do NOT need this any more: every mutating op returns a grouped DIFF automatically; for a full page map use browse + find instead — explore_page is the quick look, not the map)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
   click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)
+  trusted_click    click through the BROWSER'S OWN input pipeline (chrome.debugger + Input.dispatchMouseEvent) instead of dispatching an event. The page receives exactly what a real mouse produces — click isTrusted:true, detail:1, the real clientX/Y, and the move that precedes the press applies :hover and feeds mousemove — and default actions run the way the browser runs them. Still background: no OS focus, no window activation, no bring-to-front. Measured on bench/click_fingerprint.html across a button, a checkbox, a link and an input: every one reports isTrusted=true/detail=1/real coordinates, and every one's default action fires. Reach for it when a page checks isTrusted, reads detail/coordinates/buttons, is a canvas or a custom control, or when click reports success and the page ignores it. Pass ref — it resolves the element box itself.
+
+CLICK FIDELITY — measured on bench/click_fingerprint.html, field by field, so you know which to reach for:
+  Both paths RUN DEFAULT ACTIONS. That was worth measuring: click finishes with
+  HTMLElement.click(), which performs activation behaviour, so it DOES toggle a checkbox, follow a
+  link and focus an input. (I had written the opposite here before measuring — it was wrong.)
+  What click cannot do is produce a TRUSTED event, and that is the whole difference:
+                              click (dispatchEvent)        trusted_click (browser input pipeline)
+    click.isTrusted           false                        true
+    click.detail              0                            1
+    click.clientX / clientY   0 / 0                        the real point (e.g. 83, 147)
+    pointermove/mousemove     absent — no move before press present, as a mouse does
+    events a real click has   adds pointerenter/mouseenter  exactly the browser's own sequence
+                              (visible to capture listeners)
+  So: use click for the great majority of React/Vue apps, which listen for the event and never
+  inspect its trust. Reach for trusted_click when the page checks isTrusted, reads
+  detail/coordinates/buttons, is a canvas or a custom control, or behaves differently between a
+  real event and a dispatched one — and when a default action matters and you want it produced the
+  way the browser produces it.
+  COST: measured ~140-990ms per call (chrome.debugger attach is ~2-3ms and is REUSED for 25s, so a
+  burst pays it once; the rest is the page's own handling). While attached Chrome shows its
+  "debugging this browser" infobar. No OS focus, no window activation, no bring-to-front — the tab
+  stays in the background and YOUR active tab is never touched.
+  HOW IT REACHES A BACKGROUND TAB AT ALL: the browser drops input into a renderer that reports
+  itself hidden. Measured: without the two emulation calls below, mouseMoved took 5,080ms and the
+  PRESS WAS DROPPED ENTIRELY — no pointerdown/mousedown/click reached the page. trusted_click
+  therefore sends Emulation.setFocusEmulationEnabled(true) and Page.setWebLifecycleState('active')
+  first, which make a background renderer behave as a focused, active page. Same click afterwards:
+  151ms and a full trusted sequence.
+  Real OS input (real_click) remains the last rung: it is a genuine OS event, needs the window
+  visible and foregrounded, and is the only path that survives a page which rejects programmatic
+  input outright.
   type_text        fill one input (React-safe native setter) — or fields:[{ref,text},...] for batch (old type_many). Batch fills are SEQUENTIAL with a persistence check per field, so a 50-field batch takes ~50s; it reports filled/failed from the verified result, not from whether the write was dispatched. Password/OTP values are never echoed back.
   form             action:"state" (form_state) | "select" (ref,value) | "toggle" | "upload" (ref,filePath)
   reveal           pre-extract hidden content without opening it: kind:"dropdown" (ref = the trigger → its options) | "tabs" (ref optional → tab panels) | "accordion" (ref optional → details/summary). Works with E# or CSS refs.
@@ -1668,6 +1713,58 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     const pre = watching ? await readPageState(o.tabId || sessionTabOf()) : null;
     const result = await getActiveHub().send({ type: 'press_key', key: o.key, ref: o.ref, modifiers: o.modifiers || [], frameId: o.frameId, tabId: o.tabId });
     if (watching) await confirmNavigation(result, o.tabId || sessionTabOf(), 2, pre && pre.url);
+    return textResult(result);
+  });
+
+  // ═══ 15b. TRUSTED CLICK — input that the browser itself produced (2026-10-01) ═══
+  // Ali: "verify and register exactly how a human click is registered in the website code and
+  // simulate it in code background and implement when you find something that works 1:1 identical".
+  // The synthetic click dispatches events; a dispatched event is untrusted, so no default action
+  // runs and the fields a real input carries are absent. This op routes through
+  // Input.dispatchMouseEvent instead — the same pipeline a real mouse uses — with no OS focus and
+  // no window activation, so it stays a background tool.
+  reg(server, 'trusted_click', {
+    description: 'Click through the browser\'s OWN input pipeline (chrome.debugger + Input.dispatchMouseEvent) rather than dispatching a synthetic event. The page receives what a real mouse produces: isTrusted:true, buttons/clickCount/pointerId/pressure present, :hover applied by the move that precedes the press, and DEFAULT ACTIONS RUN (navigation, focus, checkbox toggle). Needs no OS focus and no window activation, so it stays a background tool. Use it when click reports success but the page ignored it, when the site only reacts to trusted input, or when a default action must actually run. Pass ref (or selector): it resolves the element box itself, so never pass coordinates.',
+    inputSchema: {
+      ref: z.string().optional().describe('Element ref/locator to click'),
+      selector: z.string().optional().describe('CSS selector alternative to ref'),
+      button: z.enum(['left', 'right', 'middle']).optional().describe('Mouse button (default left)'),
+      clickCount: z.number().optional().describe('Click count; 2 for a double click (this is what reaches the page as event.detail)'),
+      tabId: z.number().optional().describe('Target tab; omit to use your bound tab'),
+    },
+  }, async (o) => {
+    const tabId = o.tabId || sessionTabOf();
+    if (!tabId) return textResult({ success: false, error: 'trusted_click: no tab — pass tabId or browse first' });
+    if (!o.ref && !o.selector) return textResult({ success: false, error: 'trusted_click: pass ref or selector' });
+    // ★ RESOLVE THE BOX NOW, not from the stored snapshot: layout may have moved since the
+    // collect, and a stale coordinate clicks whatever is there now — the one failure mode a
+    // coordinate click cannot recover from or detect.
+    let box = null;
+    try {
+      const g = await getActiveHub().send({ type: 'geometry', ref: o.ref, selector: o.selector, tabId });
+      box = unwrapRelay(g);
+    } catch (e) { box = { error: String((e && e.message) || e) }; }
+    const vp = box && box.viewport;
+    if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
+      return textResult({ success: false, effect: 'failed', error: 'trusted_click: could not resolve a clickable box for that element',
+        detail: JSON.stringify(box).slice(0, 240), escalation: { recommended: 're_read', reason: 'the element has no box (hidden, detached, or zero-sized) — re-read the page before clicking' } });
+    }
+    const x = Math.round(vp.x + vp.w / 2), y = Math.round(vp.y + vp.h / 2);
+    const before = await readPageState(tabId);
+    const result = await getActiveHub().send({ type: 'trusted_click', tabId, x, y, button: o.button || 'left', clickCount: o.clickCount || 1 });
+    const rr = unwrapRelay(result);
+    const refuse = relayFailure(rr);
+    if (refuse) {
+      result.effect = 'failed';
+      result.escalation = { recommended: 're_read', reason: refuse };
+    } else {
+      // The input was injected; whether it LANDED is decided below by the page itself.
+      result.effect = 'unverifiable';
+      result.clicked = { x, y, box: vp, via: 'Input.dispatchMouseEvent (trusted)', button: o.button || 'left', clickCount: o.clickCount || 1 };
+    }
+    // ★ A TRUSTED click is precisely the one that CAN navigate, so it gets the same probe as
+    // click — the strongest evidence available, and it needs no OS focus either.
+    if (result.effect !== 'confirmed') await confirmNavigation(result, tabId, 3, before && before.url);
     return textResult(result);
   });
 

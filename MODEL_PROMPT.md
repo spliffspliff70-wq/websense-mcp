@@ -24,7 +24,7 @@ node tools/export-guide.mjs        # rewrites the fenced block below
 ---
 
 ```
-WebSense MCP — Guide (33 consolidated tools)
+WebSense MCP — Guide (34 consolidated tools)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
@@ -39,13 +39,45 @@ A NAVIGATION IS THE STRONGEST CONFIRMATION AND IT IS NOT IN THE GROUPS: when cli
 
 FULL PAGE MAP vs A SLICE: browse / page_snapshot collect a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and return only a small INDEX (counts + the dimensions you can slice by). find and page_slice then fetch only what you ask for, at full fidelity. The inventory is scroll-stable: it does not churn the way a viewport-filtered scan does, because it is not a subset that changes as you scroll — which is also why the DIFF can tell viewport churn from real mutation. Elements carry a parent pointer, so the BRANCH an element sits in is data you can walk, not a diagram you have to render. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 
-THE 33 TOOLS — what each absorbed from the old 65-tool surface:
+THE 34 TOOLS — what each absorbed from the old 65-tool surface:
   websense_guide   this guide
   browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + the vocabulary. Replaces navigate+page_snapshot+map read.
   find             TOOL 2 — search the stored inventory; each hit gives WHERE (region, position, branch chain resolved from parent pointers) and WHAT (the page's own role/name/attrs/state). Returns ALL matches.
   explore_page     quick look at a page's actions (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (you usually do NOT need this any more: every mutating op returns a grouped DIFF automatically; for a full page map use browse + find instead — explore_page is the quick look, not the map)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
   click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)
+  trusted_click    click through the BROWSER'S OWN input pipeline (chrome.debugger + Input.dispatchMouseEvent) instead of dispatching an event. The page receives exactly what a real mouse produces — click isTrusted:true, detail:1, the real clientX/Y, and the move that precedes the press applies :hover and feeds mousemove — and default actions run the way the browser runs them. Still background: no OS focus, no window activation, no bring-to-front. Measured on bench/click_fingerprint.html across a button, a checkbox, a link and an input: every one reports isTrusted=true/detail=1/real coordinates, and every one's default action fires. Reach for it when a page checks isTrusted, reads detail/coordinates/buttons, is a canvas or a custom control, or when click reports success and the page ignores it. Pass ref — it resolves the element box itself.
+
+CLICK FIDELITY — measured on bench/click_fingerprint.html, field by field, so you know which to reach for:
+  Both paths RUN DEFAULT ACTIONS. That was worth measuring: click finishes with
+  HTMLElement.click(), which performs activation behaviour, so it DOES toggle a checkbox, follow a
+  link and focus an input. (I had written the opposite here before measuring — it was wrong.)
+  What click cannot do is produce a TRUSTED event, and that is the whole difference:
+                              click (dispatchEvent)        trusted_click (browser input pipeline)
+    click.isTrusted           false                        true
+    click.detail              0                            1
+    click.clientX / clientY   0 / 0                        the real point (e.g. 83, 147)
+    pointermove/mousemove     absent — no move before press present, as a mouse does
+    events a real click has   adds pointerenter/mouseenter  exactly the browser's own sequence
+                              (visible to capture listeners)
+  So: use click for the great majority of React/Vue apps, which listen for the event and never
+  inspect its trust. Reach for trusted_click when the page checks isTrusted, reads
+  detail/coordinates/buttons, is a canvas or a custom control, or behaves differently between a
+  real event and a dispatched one — and when a default action matters and you want it produced the
+  way the browser produces it.
+  COST: measured ~140-990ms per call (chrome.debugger attach is ~2-3ms and is REUSED for 25s, so a
+  burst pays it once; the rest is the page's own handling). While attached Chrome shows its
+  "debugging this browser" infobar. No OS focus, no window activation, no bring-to-front — the tab
+  stays in the background and YOUR active tab is never touched.
+  HOW IT REACHES A BACKGROUND TAB AT ALL: the browser drops input into a renderer that reports
+  itself hidden. Measured: without the two emulation calls below, mouseMoved took 5,080ms and the
+  PRESS WAS DROPPED ENTIRELY — no pointerdown/mousedown/click reached the page. trusted_click
+  therefore sends Emulation.setFocusEmulationEnabled(true) and Page.setWebLifecycleState('active')
+  first, which make a background renderer behave as a focused, active page. Same click afterwards:
+  151ms and a full trusted sequence.
+  Real OS input (real_click) remains the last rung: it is a genuine OS event, needs the window
+  visible and foregrounded, and is the only path that survives a page which rejects programmatic
+  input outright.
   type_text        fill one input (React-safe native setter) — or fields:[{ref,text},...] for batch (old type_many). Batch fills are SEQUENTIAL with a persistence check per field, so a 50-field batch takes ~50s; it reports filled/failed from the verified result, not from whether the write was dispatched. Password/OTP values are never echoed back.
   form             action:"state" (form_state) | "select" (ref,value) | "toggle" | "upload" (ref,filePath)
   reveal           pre-extract hidden content without opening it: kind:"dropdown" (ref = the trigger → its options) | "tabs" (ref optional → tab panels) | "accordion" (ref optional → details/summary). Works with E# or CSS refs.

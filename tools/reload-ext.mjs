@@ -15,3 +15,12 @@ async function call(name, args) {
   try { return JSON.parse(b.text); } catch { return { __raw: String(b.text).slice(0, 200) }; }
 }
 console.log('reload ->', JSON.stringify(await call('extension_reload', {})).slice(0, 260));
+
+// ★ THE OFFSCREEN DOCUMENT DOES NOT RELOAD WITH THE EXTENSION (2026-09-25, re-confirmed 2026-10-01):
+// it survives an extension reload, so a change to offscreen.js is NOT live until it is respawned.
+// Both happen here, because forgetting the respawn looks exactly like "my change did nothing".
+if (!process.argv.includes('--no-respawn')) {
+  await new Promise((r) => setTimeout(r, 1500));
+  console.log('respawn ->', JSON.stringify(await call('respawn_offscreen', {})).slice(0, 200));
+}
+

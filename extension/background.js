@@ -469,6 +469,32 @@ chrome.runtime.onConnect.addListener(function(port) {
   return false;
 });
 
+// ★ KEEP THE DEBUGGER ATTACHED BRIEFLY (2026-10-01). chrome.debugger.attach is the expensive part
+// of a trusted click — measured 5,019ms end to end for one click at a cold attach, essentially all
+// of it the attach itself. Attaching per call would make trusted input unusable in any loop, so an
+// attachment is REUSED for 25s of inactivity and then detached on a timer: the infobar does not
+// linger, the tab is left clean, and a burst of clicks pays the attach once.
+const __dbgAttached = new Map();   // tabId -> { timer }
+function __dbgKeepAlive(tabId) {
+  const prev = __dbgAttached.get(tabId);
+  if (prev && prev.timer) clearTimeout(prev.timer);
+  const timer = setTimeout(function () {
+    __dbgAttached.delete(tabId);
+    try { chrome.debugger.detach({ tabId: tabId }, function () {}); } catch (_) {}
+  }, 25000);
+  __dbgAttached.set(tabId, { timer: timer });
+}
+try {
+  if (chrome.debugger && chrome.debugger.onDetach) {
+    chrome.debugger.onDetach.addListener(function (source) {
+      const id = source && source.tabId;
+      const rec = id != null ? __dbgAttached.get(id) : null;
+      if (rec && rec.timer) clearTimeout(rec.timer);
+      if (id != null) __dbgAttached.delete(id);
+    });
+  }
+} catch (_) {}
+
 async function handleTabControl(action, payload) {
   switch (action) {
     case 'main_world_exec': {
@@ -510,6 +536,99 @@ async function handleTabControl(action, payload) {
         return { success: true, results: out };
       } catch (e) {
         return { error: 'main_world_exec failed: ' + (e && e.message ? e.message : String(e)) };
+      }
+    }
+    case 'trusted_click': {
+      // ★ A GENUINELY TRUSTED CLICK, IN THE BACKGROUND (2026-10-01, Ali: "verify and register
+      // exactly how a human click is registered in the website code and simulate it in code
+      // background and implement when you find something that works 1:1 identical").
+      //
+      // WHY THIS EXISTS: a content-script click is dispatchEvent(), and an untrusted event runs NO
+      // default action — no navigation, no focus, no checkbox toggle — and carries zeros where a
+      // real input carries state (buttons, clickCount, pointerId, pressure). Measured on
+      // bench/click_fingerprint.html: the synthetic sequence reports isTrusted:false, detail:0,
+      // click clientX/Y 0,0 and no buttons/pointerId at all, while a real mouse reports
+      // isTrusted:true with the full field set. Input.dispatchMouseEvent goes through the
+      // browser's OWN input pipeline, so the page receives the same trusted record a real mouse
+      // produces and default actions RUN — and it needs NO OS focus and NO window activation, so
+      // it works on a background tab.
+      //
+      // chrome.debugger is already used in this file (the screenshot fallback), the 'debugger'
+      // permission is already declared, and the offscreen relay cannot do this (no debugger API
+      // there) — hence the SW.
+      const tClick = parseInt(payload.tabId, 10);
+      if (!tClick) return { error: 'trusted_click: tabId required' };
+      const cx = Number(payload.x), cy = Number(payload.y);
+      if (!isFinite(cx) || !isFinite(cy)) return { error: 'trusted_click: x and y (viewport CSS px) required' };
+      const btn = payload.button || 'left';
+      const mask = btn === 'left' ? 1 : btn === 'right' ? 2 : 4;
+      const count = Number(payload.clickCount) || 1;
+      const mods = Number(payload.modifiers) || 0;
+      const t0 = Date.now();
+      let didAttach = false;
+      let attachMs = 0;
+      let ok = false;
+      try {
+        if (!__dbgAttached.has(tClick)) {
+          const tA = Date.now();
+          try { await chrome.debugger.attach({ tabId: tClick }, '1.3'); didAttach = true; }
+          catch (e) {
+            const m = String((e && e.message) || e);
+            if (!/already attached/i.test(m)) throw e;
+          }
+          attachMs = Date.now() - tA;
+        }
+        __dbgKeepAlive(tClick);
+        // ★ MAKE THE RENDERER BEHAVE AS A FOCUSED, ACTIVE PAGE (2026-10-01). Measured on a
+        // background tab: the page reported document.visibilityState:'hidden', the mouseMoved
+        // command took ~5,080ms to return (renderer throttling) and the PRESS WAS DROPPED
+        // ENTIRELY — no pointerdown/mousedown/click ever arrived, so a "trusted" click did
+        // nothing at all. Emulation.setFocusEmulationEnabled simulates a focused and active page
+        // and Page.setWebLifecycleState('active') lifts the frozen/idle lifecycle, so the
+        // browser's input pipeline treats a background tab as live. Crucially this needs NO
+        // bring-to-front, so the user's active tab is never touched.
+        const emu = {};
+        try {
+          await chrome.debugger.sendCommand({ tabId: tClick }, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+          emu.focusEmulation = true;
+        } catch (e) { emu.focusEmulationError = String((e && e.message) || e); }
+        try {
+          await chrome.debugger.sendCommand({ tabId: tClick }, 'Page.setWebLifecycleState', { state: 'active' });
+          emu.lifecycle = 'active';
+        } catch (e) { emu.lifecycleError = String((e && e.message) || e); }
+        const base = { x: cx, y: cy, button: btn, clickCount: count, pointerType: 'mouse', modifiers: mods };
+        const gap = (ms) => new Promise((r) => setTimeout(r, ms));
+        const tMove = Date.now();
+        // A real mouse ARRIVES at the point before pressing. The move is load-bearing: it is what
+        // applies :hover and feeds mousemove-driven UI, so the press lands on the state a user
+        // would have been looking at.
+        await chrome.debugger.sendCommand({ tabId: tClick }, 'Input.dispatchMouseEvent',
+          Object.assign({ type: 'mouseMoved', buttons: 0 }, base));
+        // ★ AND IT TAKES TIME TO PRESS (2026-10-01). Firing move→press→release in the same tick
+        // meant Chrome's input pipeline coalesced the press away: the page received
+        // pointerover/pointermove and NO pointerdown/mousedown/click at all — measured on
+        // bench/click_fingerprint.html. A human has tens of milliseconds of real time between
+        // arriving and pressing; the gaps below are that time, and they are what makes the press
+        // real. (Gap is overridable for tests, never zero.)
+        await gap(Number(payload.movePressGapMs) || 60);
+        const tPress = Date.now();
+        await chrome.debugger.sendCommand({ tabId: tClick }, 'Input.dispatchMouseEvent',
+          Object.assign({ type: 'mousePressed', buttons: mask }, base));
+        await gap(Number(payload.pressReleaseGapMs) || 40);
+        await chrome.debugger.sendCommand({ tabId: tClick }, 'Input.dispatchMouseEvent',
+          Object.assign({ type: 'mouseReleased', buttons: 0 }, base));
+        ok = true;
+        return { success: true, mode: 'trusted', via: 'Input.dispatchMouseEvent',
+                 x: cx, y: cy, button: btn, clickCount: count,
+                 ms: Date.now() - t0, emulation: emu,
+                 timings: { totalMs: Date.now() - t0, attachMs: attachMs, moveToPressMs: tPress - tMove } };
+      } catch (e) {
+        return { error: 'trusted_click failed: ' + String((e && e.message) || e) };
+      } finally {
+        // On SUCCESS the attachment is kept briefly (see __dbgKeepAlive) so a loop of trusted
+        // clicks pays the ~5s attach once. On FAILURE it is released immediately — a broken
+        // attachment must not sit there holding the infobar.
+        if (!ok && didAttach) { try { await chrome.debugger.detach({ tabId: tClick }); } catch (_) {} }
       }
     }
     case 'capture_visible_tab': {

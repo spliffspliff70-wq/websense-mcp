@@ -2374,6 +2374,33 @@ test('collector: the walk must descend into OPEN SHADOW ROOTS', () => {
   assert(!/try \{ all = document\.querySelectorAll/.test(COLLECTOR), 'the light-DOM-only enumeration must be gone');
 });
 
+test('trusted_click: wired through all four layers, and it must make the renderer LIVE first', () => {
+  // ★ THE MEASURED DISCOVERY, and the reason this op is not just "dispatch through CDP": the
+  // browser DROPS input into a renderer that reports itself hidden. Measured on
+  // bench/click_fingerprint.html with a background tab: mouseMoved took 5,080ms and the press
+  // vanished — the page saw pointerover/pointermove and NO pointerdown/mousedown/click — so a
+  // "trusted" click did nothing. After Emulation.setFocusEmulationEnabled(true) +
+  // Page.setWebLifecycleState('active') the SAME click is 151ms and the page records
+  // click.isTrusted=true, detail=1, clientX=83 (real), with the default action firing on a button,
+  // a checkbox, a link and an input.
+  assert(/SW_REQUIRED_OPS[\s\S]{0,200}trusted_click/.test(HUB_SRC),
+    'the hub must route trusted_click to the service worker (chrome.debugger is not in a page)');
+  assert(/case 'trusted_click'/.test(OFF_SRC),
+    'and the offscreen relay must FORWARD it — the relay itself has no debugger API, and without a case it answers "Unknown action type" inside a success envelope');
+  assert(/Emulation\.setFocusEmulationEnabled/.test(BG_SRC),
+    'the SW must enable focus emulation, or the press is dropped on a background tab');
+  assert(/Page\.setWebLifecycleState[\s\S]{0,80}'active'/.test(BG_SRC),
+    'and lift the frozen/idle lifecycle');
+  for (const k of ['mouseMoved', 'mousePressed', 'mouseReleased']) {
+    assert(BG_SRC.indexOf(k) > 0, 'the SW must dispatch the real three-step sequence: missing ' + k);
+  }
+  assert(/movePressGapMs/.test(BG_SRC),
+    'with a gap between arriving and pressing — same-tick move+press gets coalesced away');
+  assert(/__dbgKeepAlive/.test(BG_SRC), 'and REUSE the attach: a cold attach is the slow part');
+  assert(/relayFailure/.test(SRV_SRC),
+    'and a refusal riding inside a success envelope must not read as a performed action');
+});
+
 test('browse: the reply must include the tabId (a caller sharing Chrome has nothing else to pass)', () => {
   // ★ Found 2026-10-01 by attempting a cross-tab isolation test: browse answered with an opaque
   // `handle` and no tabId, so the test could not name the two tabs it had opened, and a caller

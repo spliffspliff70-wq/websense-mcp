@@ -1,43 +1,64 @@
-shadow DOM was invisible to the collector, and browse never told you its tabId
+trusted_click: input the browser itself produced — 1:1 with a real mouse, still in the background
 
-Two findings from the fixture battery (repo fixtures, deterministic, no live site involved) and
-the cross-tab test.
+Ali: "verify and register exactly how a human click is registered in the website code and simulate
+it in code background and implement when you find something that works 1:1 identical".
 
-★ SHADOW DOM WAS INVISIBLE — the whole class of modern sites.
-Measured on the repo's own bench/shadow_fixture.html, which exists to catch exactly this and says
-so in its own comment ("a plain selector sees an empty page while the real controls are present"):
-the inventory held 22 light-DOM elements and NONE of the five marked controls — shadow-btn,
-deep-shadow-btn (two shadow roots deep), shadow-input, shadow-file. The collector was one
-document.querySelectorAll('*'), which cannot see into a shadow root, so browse/find reported an
-empty page over a real one on any Lit/FAST/Stencil/faceplate site.
-FIXED: the walk descends into every OPEN shadow root, and a shadow child's logical parent is its
-HOST element (it has no parentElement), so the branch pointer still walks up into the light DOM
-and a shadow control reports the region it lives in. regionOf uses the same resolver.
-VERIFIED with an oracle that shares no code with the collector — main_world traverses the shadow
-roots by hand:
-  inventory reaches 1 and 2 roots deep .......... PASS (27 elements, all five controls)
-  type_text fills a shadow input ............... PASS (shadow DOM reads value=shadow@example.com)
-  click reaches a control two roots deep ....... PASS
-  upload: shadow file input .................... PASS (page reads files=1)
-  upload: light-DOM file input ................. PASS (page reads files=1)
-REGRESSION-CHECKED on the 7-page live sample: no page got worse, all still scroll to
-mutated:false with 0 minted-id leaks, and MDN (738 -> 878 elements) and x.com (3,186 -> 3,411)
-GAIN detail because their own shadow content is finally visible.
+★ THE MEASUREMENT, NOT AN OPINION. bench/click_fingerprint.html attaches a capture-phase listener
+for every pointer/mouse/focus event and records the FULL property set of each one, plus the side
+state a site can read at that instant (activeElement, :hover, computed style, and whether the
+default action has already run). tools/click-fingerprint.mjs then runs the same four clicks — a
+button, a checkbox, a link, an input — through both paths and diffs the two records field by field,
+with the page's own JS as the oracle.
 
-★ browse NEVER RETURNED ITS tabId — only an opaque `handle`.
-Found by trying the cross-tab test: browse answered {success, cached, navigated, handle, seq,
-baseline, index, regions, hint} — no tabId — so the test could not even name the two tabs it had
-opened, and a caller that wants to address the tab explicitly (which any session sharing a Chrome
-with other workers must do, and the factory does) had nothing to pass and could only rely on
-session binding. Both the cold and the warm reply now carry tabId, and the hint says so.
-VERIFIED: cross-tab isolation now passes — two tabs, an op aimed at B lands on B (page reads
-CROSSTAB) and leaves A untouched (url, select value and text length all identical).
+MEASURED — what the two paths actually put in front of the page:
+                        click (dispatchEvent)        trusted_click (Input.dispatchMouseEvent)
+  click.isTrusted       false                        true
+  click.detail          0                            1
+  click.clientX/Y       0 / 0                        the real point (83,147)
+  pointermove/mousemove absent before the press      present, as a mouse does
+  event sequence        adds pointerenter/mouseenter exactly the browser's own sequence
+                        (visible to capture listeners)
+  default action        RUNS                         RUNS
+★ AND THAT LAST ROW CORRECTED ME. I had already written into the guide that the synthetic path
+"cannot toggle a checkbox, follow a link or submit a form". Measured: it does all three — click
+finishes with HTMLElement.click(), which performs activation behaviour. The guide now says what is
+true (and says that I had it wrong), because a doc that overstates the gap is the same kind of
+fault as one that overstates the capability.
 
-Also landed earlier in this round: the DIFF block now says when a diff was taken across a
-navigation (a replaced document's groups are meaningless, and mutated:false there does NOT mean
-nothing happened), and MODEL_PROMPT.md is regenerated from the live guide.
+★ THE HARD PART WAS NOT THE DISPATCH — IT WAS THAT THE BROWSER DROPS IT.
+First version, on a background tab: mouseMoved took 5,080ms to return and the PRESS VANISHED. The
+page recorded pointerover>pointermove and no pointerdown/mousedown/click at all — a "trusted" click
+that did nothing while its transport envelope said success. The cause is that the tab was not
+visible: the page reported document.visibilityState:'hidden', and Chrome throttles a hidden
+renderer and drops input into it.
+FIXED with two protocol calls that make the renderer behave as a focused, active page WITHOUT
+bringing it to the front:
+    Emulation.setFocusEmulationEnabled(true)   // "simulates a focused and active page"
+    Page.setWebLifecycleState('active')        // lifts the frozen/idle lifecycle
+Same click afterwards: 151ms, and the page records isTrusted:true, detail:1, clientX:83, with the
+default action firing on ALL FOUR elements — verified, not assumed. The tab stayed in the
+background; the user's active tab was never touched.
+★ Also fixed on the way: move→press→release in the same tick gets coalesced away, so there is a
+gap between arriving and pressing — real timing, which is part of what makes a click a click.
 
-BATTERIES AS ARTIFACTS (these are the point — they are what makes the claims checkable):
-  tools/task-battery.mjs    5/5 real tasks on real sites, each scored by page truth
-  tools/fixture-battery.mjs 5/5 shadow + upload checks on the repo's own fixture
-165 tests pass.
+★ ROUTING. chrome.debugger exists only in the service worker and the SW is not itself a WS client,
+so the op takes three layers: hub SW_REQUIRED_OPS (route to the relay), offscreen case (FORWARD it
+to the SW — the relay has no debugger API), SW handleTabControl (do it). All three are asserted by
+a test, because the first attempt silently answered "Unknown action type: trusted_click" INSIDE a
+success envelope while the page saw nothing. That produced a second fix, general:
+relayFailure(payload) — an error riding inside a successful envelope must never read as a result.
+
+★ COST, measured: ~2-3ms to attach (REUSED for 25s via __dbgKeepAlive, so a burst of clicks pays it
+once) and ~140-990ms per click, most of it the page's own handling. Chrome shows its "debugging
+this browser" infobar while attached and the attachment is released on a timer.
+
+★ RESEARCH THAT SHAPED IT (Ali asked me to look at what comparable tools do): the canonical field
+list a real mouse input carries is the CDP Input.setMouseEvent parameter set — button, buttons
+(Left=1), clickCount, force, pointerType, x/y, modifiers, timestamp — taken from the protocol
+source (chromedp/cdproto). Puppeteer and Playwright route clicks through that same pipeline, which
+is why their clicks are trusted; what they do NOT do is solve the background case without
+activating the tab. Our emulation calls are what let the same fidelity exist in a tab the user
+cannot see, which is the property WebSense is built around.
+
+166 tests pass. bench/click_fingerprint.html and tools/click-fingerprint.mjs stay in the repo: this
+claim is checkable, not just stated.

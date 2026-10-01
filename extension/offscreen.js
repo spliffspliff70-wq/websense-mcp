@@ -243,6 +243,14 @@ async function handleTabOperation(message) {
     case 'download_state': { return await sendTabControl('download_state', {}); }
     case 'download_op': { return await sendTabControl('download_op', message); }
     case 'cookie_op': { return await sendTabControl('cookie_op', message); }
+    case 'trusted_click': {
+      // ★ RELAY TO THE SW (2026-10-01). chrome.debugger does not exist in an offscreen document,
+      // and the SW is not itself a WS client — so an op that needs it must be FORWARDED here. The
+      // hub routes SW_REQUIRED_OPS to this document, and without this case the relay's default
+      // answered "Unknown action type: trusted_click" while the transport envelope still said
+      // success:true, so the click silently did nothing. (Measured: page saw zero events.)
+      return await sendTabControl('trusted_click', message);
+    }
     case 'respawn_offscreen': {
       // Reply FIRST, then relay (2026-09-25): awaiting sendTabControl here made
       // this document die (the SW closes it) before the reply was constructed,
