@@ -210,7 +210,8 @@ export const COLLECTOR = `() => {
     out.push(rec);
   }
   return { url: location.href, title: document.title, total: total, truncated: truncated,
-           vw: vw, vh: vh, count: out.length, elements: out };
+           nonRenderable: nonRenderable, vw: vw, vh: vh, count: out.length,
+           sx: (window.scrollX || 0), sy: (window.scrollY || 0), elements: out };
 }`;
 
 // ── Server-side snapshot store: one entry per tab, TTL + LRU bounded. ──

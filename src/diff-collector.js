@@ -35,17 +35,28 @@ export const DIFF_COLLECTOR = `() => {
   // diff for a NO-OP. Identity is the tag plus the element's OWN attributes. Region,
   // position and viewport state are reported as CONTEXT on a change, never as the
   // reason for one.
+  // ★ WHAT IS IDENTITY, AND WHAT IS PAINT? (2026-10-01)
+  // A change is STRUCTURAL only if it affects what the element IS, DOES or HOLDS. A change
+  // to how it is PAINTED, or to the framework's own bookkeeping, is VISUAL. Measured: a
+  // 972px scroll on x.com produced 609 structure.changed entries whose differences were
+  // class/style, class/data-testid/style, class/dir/style — 98,441 chars of repaint and
+  // React churn masquerading as page structure.
+  // NOT a site vocabulary: data-* attributes are metadata BY DEFINITION in HTML, and
+  // class/style/dir only ever describe rendering. Everything else — role, id, disabled,
+  // checked, value, aria-*, href, placeholder — is identity, state or semantics, and a
+  // change to any of those IS structural.
+  function isPresentationAttr(n) {
+    if (n === 'class' || n === 'style' || n === 'dir' || n === 'lang') return true;
+    if (n.length > 5 && n.lastIndexOf('data-', 0) === 0) return true;
+    return false;
+  }
+
   function fingerprint(r) {
     var a = r.attrs || {};
     var parts = [];
     for (var k in a) {
       if (!Object.prototype.hasOwnProperty.call(a, k)) continue;
-      // ★ PRESENTATION IS NOT IDENTITY (measured 2026-10-01). class and style are how the
-      // element is PAINTED, and on a CSS-in-JS site they flip constantly: a 972px scroll on
-      // x.com reported 98,441 chars of structure.changed entries whose only difference was
-      // class/style. Those are VISUAL changes — Ali's own three groups say so ("content/
-      // scroll visual difs") — so identity excludes them and they are classified as visual.
-      if (k === 'class' || k === 'style') continue;
+      if (isPresentationAttr(k)) continue;
       parts.push(k + '=' + a[k]);
     }
     parts.sort();
@@ -81,7 +92,7 @@ export const DIFF_COLLECTOR = `() => {
               baselineAt: prev ? prev.at : null, at: now.count, seq: (prev ? (prev.seq + 1) : 0) };
 
   if (!prev) {
-    window[KEY] = { url: now.url, at: now.count, seq: 0, els: now.elements, byLoc: null };
+    window[KEY] = { url: now.url, at: now.count, seq: 0, els: now.elements, byLoc: null, sx: now.sx, sy: now.sy };
     out.first = true;
     out.note = 'baseline seeded from this navigation — the NEXT op on this page is diffable';
     return out;
@@ -89,7 +100,7 @@ export const DIFF_COLLECTOR = `() => {
 
   // Same-document guard: if the URL changed, the baseline belongs to another page.
   if (prev.url !== now.url) {
-    window[KEY] = { url: now.url, at: now.count, seq: 0, els: now.elements, byLoc: null };
+    window[KEY] = { url: now.url, at: now.count, seq: 0, els: now.elements, byLoc: null, sx: now.sx, sy: now.sy };
     out.first = true;
     out.navigatedFrom = prev.url;
     out.note = 'URL changed — baseline re-seeded (the old page is not this page)';
@@ -124,8 +135,9 @@ export const DIFF_COLLECTOR = `() => {
     var attrsDiff = fieldsDiffer(nr, or);
     var presentOnly = [];
     for (var pd = 0; pd < attrsDiff.length; pd++) {
-      if (attrsDiff[pd] === 'class' || attrsDiff[pd] === 'style') presentOnly.push(attrsDiff[pd]);
+      if (isPresentationAttr(attrsDiff[pd])) presentOnly.push(attrsDiff[pd]);
     }
+    // Only presentation differs => this is a REPAINT, whatever else changed alongside it.
     var onlyPresentation = attrsDiff.length > 0 && presentOnly.length === attrsDiff.length;
     if (fsame && nameSame && valSame) {
       if (!gsame) viewport.moved.push({ i: nr.i, loc: nr.loc, was: { x: or.x, y: or.y, vp: or.vp }, now: { x: nr.x, y: nr.y, vp: nr.vp } });
@@ -171,46 +183,43 @@ export const DIFF_COLLECTOR = `() => {
     if (!newBy[pr.loc]) structure.removed.push(ident(pr));
   }
 
-  window[KEY] = { url: now.url, at: now.count, seq: (prev.seq + 1), els: now.elements, byLoc: null };
+  window[KEY] = { url: now.url, at: now.count, seq: (prev.seq + 1), els: now.elements, byLoc: null, sx: now.sx, sy: now.sy };
 
   var structN = addedIdx.length + structure.removed.length + structure.changed.length;
   var contentN = content.changed.length;
 
-  // ★ A UNIFORM MOVE IS ONE FACT, NOT N THOUSANDS (measured 2026-10-01).
-  // Scrolling an already-hydrated x.com page listed 2,525 individual "moved" elements —
-  // 230,879 chars, 68% of a 367 KB diff — to say "the page scrolled 972px", because every
-  // element had moved by the SAME delta. Reporting that N times is not completeness, it is
-  // repetition. A uniform translation is fully and exactly described by its delta plus the
-  // count, so that is what it now reports, and the per-element list is kept only when the
-  // movements DIFFER (a genuine relayout, where each element's movement is its own fact).
+  // ★ A SCROLL IS ONE FACT, NOT N THOUSANDS (measured 2026-10-01).
+  // Scrolling an already-hydrated x.com page enumerated 2,525 element movements — 300,769
+  // chars, 77% of a 379 KB diff — to say "the page scrolled 972px". The document's own
+  // scroll position is the discriminator (see below).
   var moved = viewport.moved;
   var viewportN = moved.length;
-  var uniform = null;
-  if (viewportN > 1) {
-    uniform = { dx: null, dy: null };
-    var u = moved[0].now.x - moved[0].was.x;
-    var v = moved[0].now.y - moved[0].was.y;
-    for (var mi = 1; mi < viewportN; mi++) {
-      if ((moved[mi].now.x - moved[mi].was.x) !== u || (moved[mi].now.y - moved[mi].was.y) !== v) {
-        uniform = null;
-        break;
-      }
-    }
-    if (uniform) { uniform.dx = u; uniform.dy = v; }
-  }
+  // ★ IS THIS A SCROLL OR A RELAYOUT? (2026-10-01) The document's own scroll position
+  // decides — not a guess from the element deltas. The uniform-delta test was tried first
+  // and is WRONG on a virtualized list: x.com recycles nodes, so a 972px scroll left 2,525
+  // elements moving by DIFFERENT deltas, and the test did not fire (measured: 300,769 chars
+  // of viewport enumeration, 77% of a 379 KB diff).
+  // A scroll is ONE fact — "the page moved dy" — and the per-element positions are already
+  // in the inventory, so enumerating them is repetition, exactly like attrs and text. A
+  // movement with the scroll position UNCHANGED is a real relayout, where each element's
+  // movement is its own fact, and that still enumerates.
+  var scrolled = (Number(prev.sx) !== Number(now.sx)) || (Number(prev.sy) !== Number(now.sy));
   out.structure = { added: addedIdx, removed: structure.removed, changed: structure.changed, count: structN };
   out.content = { changed: content.changed, count: contentN };
   // VISUAL: reported, but never a mutation. On x.com a scroll repaints thousands of nodes.
   out.visual = { changed: visual.changed, count: visual.changed.length };
-  if (uniform) {
+  if (scrolled) {
     out.viewport = {
-      scroll: { dx: uniform.dx, dy: uniform.dy },
+      scrolled: { dx: Number(now.sx) - Number(prev.sx), dy: Number(now.sy) - Number(prev.sy) },
       moved: viewportN,
-      uniform: true,
-      note: 'every moved element moved by the same delta — this is a SCROLL, not a layout change',
+      enumerated: false,
+      note: 'the page SCROLLED. Per-element positions are in the inventory (find{indices:[...]}); enumerating them would repeat one fact ' + viewportN + ' times. Not a mutation.',
     };
+  } else if (viewportN) {
+    out.viewport = { moved: moved, count: viewportN,
+      note: 'elements moved while the scroll position did NOT change — this is a LAYOUT change, so each movement is its own fact and is listed.' };
   } else {
-    out.viewport = { moved: moved, count: viewportN };
+    out.viewport = { moved: [], count: 0 };
   }
   out.mutated = structN > 0 || contentN > 0;
   out.hint = out.mutated
