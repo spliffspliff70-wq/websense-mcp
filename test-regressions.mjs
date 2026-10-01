@@ -11,7 +11,8 @@ import { summarizeRead } from './src/summarize.js';
 import { uploadVerdict } from './src/upload.js';
 import { SessionManager } from './src/session.js';
 import { diffScan, identityKey, disambiguate, fieldChanges } from './src/incr.js';
-import { buildIndex, sliceSnapshot } from './src/snapshot.js';
+import { buildIndex, sliceSnapshot, branchChain } from './src/snapshot.js';
+import { DIFF_COLLECTOR } from './src/diff-collector.js';
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -1569,12 +1570,20 @@ test('docs: MODEL_PROMPT.md is GENERATED from the live guide, not hand-maintaine
   assert(/in sync/.test(out), 'the guide export check must confirm the mirror is fresh');
 });
 
-test('delta: the guide tells the agent to read the DELTA block instead of re-exploring', () => {
+test('delta: the guide tells the agent to read the DIFF block instead of re-exploring', () => {
   // A feature an agent cannot discover is not a feature — this is the mem-795 failure
   // mode (fixes on disk that never reach the model). The guide is served as the tool
   // RESULT (textResult), not the description, so it is NOT hit by the 110-char wire cap.
+  // 2026-10-01: the block was renamed DELTA -> DIFF and now carries the THREE GROUPS, so
+  // the guide must name the groups too or the agent cannot tell churn from truth.
   assert(/DID IT LAND\?/.test(SRV_SRC), 'the guide must carry a DID IT LAND section');
-  assert(/DELTA \(auto, after/.test(SRV_SRC), 'the guide must name the DELTA block format');
+  assert(/DIFF \(auto, after/.test(SRV_SRC), 'the guide must name the DIFF block format');
+  for (const g of ['structure', 'content', 'viewport']) {
+    assert(new RegExp('^  ' + g + '\\s+—', 'm').test(SRV_SRC),
+      'the guide must name the ' + g + ' group and what it means');
+  }
+  assert(/NOT a mutation/i.test(SRV_SRC),
+    'the guide must say viewport churn is not a mutation — that is the whole grouping');
   assert(/verify:false/.test(SRV_SRC), 'the guide must document the verify:false opt-out');
 });
 
@@ -1984,6 +1993,60 @@ test('page_slice: the new dynamic dimensions are reachable from the tool', () =>
   // and the handler must hand the caller args straight to the slicer
   assert(/sliceSnapshot\(e\.snap, o\)/.test(S),
     'the handler must pass the caller args through to sliceSnapshot');
+});
+
+// ═══ 2026-10-01 — browse / find / grouped auto-DIFF / branch pointers ═══
+
+test('browse + find are registered and documented', () => {
+  assert(/reg\(server, 'browse'/.test(SRV_SRC), 'browse must be a tool');
+  assert(/reg\(server, 'find'/.test(SRV_SRC), 'find must be a tool');
+  assert(/^  browse\s/m.test(SRV_SRC), 'browse must be documented in the guide');
+  assert(/^  find\s/m.test(SRV_SRC), 'find must be documented in the guide');
+});
+
+test('diff: the auto-DIFF groups structure / content / viewport', () => {
+  const D = readFileSync(new URL('./src/diff-collector.js', import.meta.url), 'utf8');
+  const code = D.replace(/\/\/[^\n]*/g, '');
+  // It must actually evaluate as a function — a broken string here would silently no-op
+  // every mutating op's verdict. Import the MODULE value, not the file text: the source
+  // contains `${COLLECTOR}` which only interpolates on import.
+  const fn = eval('(' + DIFF_COLLECTOR + ')');
+  assert(typeof fn === 'function', 'DIFF_COLLECTOR must eval to a function');
+  for (const g of ['structure', 'content', 'viewport']) {
+    assert(new RegExp(g + ': \\{').test(code) || new RegExp("out\\." + g).test(code),
+      'the diff must emit a ' + g + ' group');
+  }
+  // mutated must be derived from structure+content ONLY — viewport churn must never
+  // make an action look landed.
+  assert(/out\.mutated = structN > 0 \|\| contentN > 0;/.test(code),
+    'mutated must ignore viewport churn (a scroll is not a mutation)');
+  assert(!/out\.mutated = [^;]*viewportN\s*>\s*0/.test(code),
+    'mutated must NOT be set by viewport movement');
+  // The page holds the baseline, so navigation gives a fresh one for free.
+  assert(/window\[KEY\]/.test(code), 'the baseline must live on the page');
+  // A URL change must re-seed rather than diff across documents.
+  assert(/prev\.url !== now\.url/.test(code), 'a navigation must re-seed the baseline');
+});
+
+test('snapshot: elements carry a parent pointer, and branchChain walks it', () => {
+  const S = readFileSync(new URL('./src/snapshot.js', import.meta.url), 'utf8');
+  const code = S.replace(/\/\/[^\n]*/g, '');
+  assert(/rec\.p = idxOf\.get\(pn\)/.test(code), 'records must carry a parent index');
+  assert(/var idxOf = new Map\(\)/.test(code), 'the element->index map must be built');
+  // Behavioural: give branchChain a synthetic 3-deep chain and walk it.
+  const snap = { elements: [
+    { i: 0, tag: 'body', loc: 'body', region: 'body', attrs: {} },
+    { i: 1, tag: 'div', loc: 'div', region: 'role:dialog', attrs: { role: 'dialog' }, p: 0, name: 'Composer' },
+    { i: 2, tag: 'button', loc: 'button', region: 'role:dialog', attrs: { role: 'button' }, p: 1, name: 'Post' },
+  ] };
+  const chain = branchChain(snap, snap.elements[2], 5);
+  assert.strictEqual(chain.length, 2, 'the walk must reach both ancestors');
+  assert.strictEqual(chain[0].i, 1, 'nearest ancestor first');
+  assert.strictEqual(chain[0].role, 'dialog', 'the branch carries the ancestor role');
+  assert.strictEqual(chain[1].i, 0, 'then the next ancestor up');
+  // A depth limit must bound it, and a root must yield an empty chain rather than loop.
+  assert.strictEqual(branchChain(snap, snap.elements[2], 1).length, 1, 'depth must bound the walk');
+  assert.strictEqual(branchChain(snap, snap.elements[0], 5).length, 0, 'a root has no branch');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

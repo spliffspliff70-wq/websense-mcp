@@ -155,6 +155,12 @@ export const COLLECTOR = `() => {
     }
   }
 
+  // Element -> index, so a record can carry a PARENT POINTER. With that, "where is
+  // this and which branch does it belong to" is an O(1) walk up the array instead of a
+  // rendered diagram — the branch is data, not a picture (2026-10-01).
+  var idxOf = new Map();
+  for (var q = 0; q < all.length; q++) { try { idxOf.set(all[q], q); } catch (_) {} }
+
   for (var i = 0; i < all.length; i++) {
     // ★ NO CAP: the early-break on MAX that used to sit here is gone.
     // ★ NO FILTER / NO HARDCODED NAMES: the old line skipped script/style/meta/link/
@@ -168,6 +174,11 @@ export const COLLECTOR = `() => {
     var inVp = !!(r && r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0
       && r.top < vh && r.left < vw);
     var rec = { i: i, tag: t, loc: locatorOf(el, attrCount), region: regionOf(el) };
+    // Branch pointer: the nearest ancestor that is itself in this inventory. Document
+    // order means that is nearly always the immediate parent, so this is O(1) amortised.
+    var pn = el.parentElement, hops = 0;
+    while (pn && hops < 200 && !idxOf.has(pn)) { pn = pn.parentElement; hops++; }
+    if (pn && idxOf.has(pn)) rec.p = idxOf.get(pn);
     var nm = nameOf(el);
     if (nm) rec.name = nm;
 
@@ -284,6 +295,28 @@ export function isInteractiveRec(e) {
   if (!e) return false;
   if (e.focusable || e.field) return true;
   return !!(e.attrs && e.attrs.role);
+}
+
+// ★ THE BRANCH an element sits in, resolved from the parent pointers in the inventory
+// (2026-10-01). This is why no mermaid diagram is needed: "where is this and which branch
+// does it belong to" is a bounded walk up the stored records, not a rendered picture —
+// so it costs bytes, not tokens, and cannot drift from the inventory it describes.
+export function branchChain(snap, rec, depth = 5) {
+  const els = (snap && snap.elements) || [];
+  const chain = [];
+  let cur = rec, n = 0;
+  while (cur && n < depth) {
+    const p = cur.p;
+    if (p == null || !els[p]) break;
+    const pr = els[p];
+    const role = (pr.attrs && pr.attrs.role) || '';
+    chain.push({
+      i: pr.i, tag: pr.tag, loc: pr.loc, region: pr.region,
+      role: role || undefined, name: pr.name || undefined,
+    });
+    cur = pr; n++;
+  }
+  return chain;
 }
 
 // ── SLICE: full-fidelity records for one dimension. ──

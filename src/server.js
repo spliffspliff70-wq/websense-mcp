@@ -23,7 +23,8 @@ import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { COLLECTOR, putSnapshot, getSnapshot, sliceSnapshot, snapshotStats } from './snapshot.js';
+import { COLLECTOR, putSnapshot, getSnapshot, sliceSnapshot, snapshotStats, branchChain } from './snapshot.js';
+import { DIFF_COLLECTOR } from './diff-collector.js';
 import { HubServer } from './hub.js';
 import { SessionManager } from './session.js';
 import { exportMermaid } from './mermaid.js';
@@ -516,6 +517,23 @@ function summarizeDelta(res) {
 
 // Wrap a mutating handler so its result carries the diff verdict as a SECOND content block
 // (a separate block, so the JSON payload the caller asked for can never be corrupted).
+// ★ THE AUTO-DIFF (2026-10-01, Ali: "directly dif at each page interaction automatically
+// and dynamically group difs into page structure difs and content/scroll visual difs and
+// automatically send you changes after each page interaction").
+//
+// Replaces the old delta, which diffed the interactive+in-viewport SCAN CACHE. That set
+// changes as you scroll, so scroll churn was reported as page mutation (measured: a scroll
+// gave changedRatio 1.038, "12 added / 40 removed"). This diffs the LOSSLESS inventory
+// against a baseline the PAGE holds, and returns three groups with the distinction made
+// explicit: structure (page shape — truth), content (the page answered you), viewport
+// (scroll/layout churn — NOT a mutation). Unchanged elements are counted, not shipped.
+async function runAutoDiff(tabId) {
+  const r = await getActiveHub().send({ type: 'main_world_exec', tabId, func: DIFF_COLLECTOR, args: [] });
+  const payload = (r && r.result !== undefined) ? r.result : r;
+  if (typeof payload === 'string') { try { return JSON.parse(payload); } catch (_) { return { mutated: null, reason: 'diff returned non-JSON' }; } }
+  return payload && typeof payload === 'object' ? payload : { mutated: null, reason: 'diff returned nothing' };
+}
+
 function withDelta(name, handler) {
   if (!DELTA_OPS.has(name)) return handler;
   return async (args) => {
@@ -523,14 +541,11 @@ function withDelta(name, handler) {
     if (args && args.verify === false) return res;
     let delta;
     try {
-      const inc = await getActiveHub().send({
-        type: 'explore_page', incremental: true, includeContent: false,
-      });
-      delta = summarizeDelta(inc);
+      delta = await runAutoDiff(args && args.tabId);
     } catch (err) {
       delta = { mutated: null, reason: 'delta unavailable: ' + (err && err.message) };
     }
-    const line = 'DELTA (auto, after ' + name + '): ' + JSON.stringify(delta);
+    const line = 'DIFF (auto, after ' + name + '): ' + JSON.stringify(delta);
     try {
       if (res && Array.isArray(res.content)) res.content.push({ type: 'text', text: line });
       else return { content: [{ type: 'text', text: line }] };
@@ -651,20 +666,26 @@ function registerAllTools(server) {
 
   // ═══ 1. GUIDE ═══
   reg(server, 'websense_guide', {
-    description: 'START HERE. Full usage guide for the 31 consolidated WebSense tools: explore, read, click, type, form, scroll, tabs, wait, evaluate, main_world, ax, snapshot map/slice, real input, status. Call once before using other tools.',
+    description: 'START HERE. Full usage guide for the 33 consolidated WebSense tools: browse, find, snapshot map/slice, explore, read, click, type, form, scroll, tabs, wait, evaluate, main_world, ax, real input, status. Call once before using other tools.',
   }, async () => {
-    return textResult(`WebSense MCP — Guide (31 consolidated tools)
+    return textResult(`WebSense MCP — Guide (33 consolidated tools)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
-THE LOOP: explore_page → pick refs → act (click/type_text/form/scroll) → read result → repeat.
+START HERE: browse{url} — ONE call that navigates, seeds the page's diff baseline, stores a lossless inventory and returns only the small INDEX + the vocabulary this page actually uses. Then find{query} to locate a control (it tells you WHERE it is — region, position, and the branch it sits in — and WHAT it is, from the page's own role/name/attributes), page_slice to load just that branch at full fidelity, then act.
 
-DID IT LAND? Every mutating op (click, type_text, form, press_key, real_click, real_paste, main_world, evaluate, dialog) returns a SECOND block: DELTA (auto, after <op>): {mutated: true|false|null, ...}. Read that instead of spending an extra explore_page{incremental:true} call — it is the same diff, already paid for. mutated:false means NO INTERACTIVE-ELEMENT CHANGE was detected — it is NOT proof the action failed: the diff fingerprints interactive elements only, so text/content changes elsewhere, async handlers that settle after the diff, focus-only clicks, downloads, and new-tab opens all report mutated:false while genuinely landing. Confirm with a real read (status / read{diff} / main_world / the downloads or tabs store) before concluding "not landed". mutated:null means no baseline existed yet on that tab, so that action seeded one and only the NEXT action is verifiable. Pass verify:false to skip the diff on a call you don't need checked.
+DID IT LAND? Every mutating op (click, type_text, form, press_key, real_click, real_paste, main_world, evaluate, dialog) returns a SECOND block: DIFF (auto, after <op>) — the change since your browse baseline, grouped so you cannot confuse churn with truth:
+  structure — the page's SHAPE changed (elements added/removed, tag/role/name/attrs changed). Page truth.
+  content   — the SAME element's value/text changed and its shape did not. The page answered you.
+  viewport  — ONLY vp/x/y differ. This is scroll/layout churn and is NOT a mutation. It used to be reported as one (a scroll measured changedRatio 1.038, "12 added / 40 removed") because the old diff compared the interactive+in-viewport subset, which changes as you scroll.
+mutated is true when structure or content moved. The baseline for any page is the first collection after that page loaded, and it is held BY THE PAGE, so navigating gives you a fresh one automatically. Pass verify:false to skip the diff on a call you don't need checked.
 
-FULL PAGE MAP vs A SLICE: page_snapshot collects a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and returns only a small INDEX (counts + the dimensions you can slice by). page_slice then fetches ONE slice (tag/role/region/vp/interactive/query) at full fidelity. Use this when you need the whole page's shape or something the SAG does not show (off-viewport elements, the rest of a long page, a full tag/region inventory). It is also scroll-stable, so its index does not churn the way a viewport-filtered scan does. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
+FULL PAGE MAP vs A SLICE: browse / page_snapshot collect a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and return only a small INDEX (counts + the dimensions you can slice by). find and page_slice then fetch only what you ask for, at full fidelity. The inventory is scroll-stable: it does not churn the way a viewport-filtered scan does, because it is not a subset that changes as you scroll — which is also why the DIFF can tell viewport churn from real mutation. Elements carry a parent pointer, so the BRANCH an element sits in is data you can walk, not a diagram you have to render. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 
-THE 31 TOOLS — what each absorbed from the old 65-tool surface:
+THE 33 TOOLS — what each absorbed from the old 65-tool surface:
   websense_guide   this guide
+  browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + the vocabulary. Replaces navigate+page_snapshot+map read.
+  find             TOOL 2 — search the stored inventory; each hit gives WHERE (region, position, branch chain resolved from parent pointers) and WHAT (the page's own role/name/attrs/state). Returns ALL matches.
   explore_page     page map (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (added/changed/removed, no settle/content — you usually do NOT need this any more: mutating ops return a DELTA block automatically; first call returns full SAG)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
   click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)
@@ -1848,6 +1869,126 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       success: true, snapshotSeq: e.seq, ageMs: Date.now() - e.at, url: e.snap.url,
       matched: s.matched, returned: s.returned, truncatedByLimit: s.truncatedByLimit,
       elements: s.elements,
+    });
+  });
+
+  // ═══ TOOL 1 — browse (Ali 2026-10-01) ═══
+  // "this should be automatically triggered when you bind to a tab and navigate to a page
+  //  it should cache ... the baseline for any page is initial navigation to that page
+  //  perhaps this should be tool 1 - browse or something"
+  //
+  // ONE call replaces navigate + page_snapshot + the map read. It navigates (or binds),
+  // seeds the page's DIFF BASELINE, stores the lossless inventory, and returns only the
+  // INDEX + the vocabulary. From then on every mutating op auto-diffs against that
+  // baseline, so the model never has to ask "what changed?".
+  reg(server, 'browse', {
+    description: 'TOOL 1. Go to a page and map it in ONE call: navigate (or bind an existing tab), seed the auto-diff BASELINE for that page, store the lossless inventory, and return ONLY the small index + the vocabulary this page actually uses. After browse, every mutating op automatically returns a DIFF grouped into structure / content / viewport — you never have to ask what changed. Then use find{query} to locate a control and page_slice to load just that branch. This is the token-efficient entry point: the index is bytes, the inventory stays server-side.',
+    inputSchema: {
+      url: z.string().optional().describe('URL to navigate to. Omit to just (re)baseline the bound tab.'),
+      tabId: z.number().optional().describe('Existing tab to bind instead of navigating'),
+      newTab: z.boolean().optional().describe('Force a fresh tab rather than reusing the bound one'),
+      fresh: z.boolean().optional().describe('Re-collect even if a snapshot for this tab is still warm'),
+    },
+  }, async (o) => {
+    let tabId = o.tabId || null;
+    let navigated = null;
+    if (o.url) {
+      const r = await getActiveHub().send({ type: 'navigate', url: o.url, newTab: !!o.newTab || !sessionTabOf() });
+      tabId = (r && r.tabId) || tabId;
+      navigated = o.url;
+      if (tabId) {
+        server._wsBoundTabId = tabId;
+        claimTab(server, tabId);
+        const st = sessionCtx.getStore();
+        if (st) st.boundTabId = Number(tabId);
+      }
+    }
+    if (!tabId) tabId = sessionTabOf();
+    if (!tabId) return textResult({ success: false, error: 'no tab — pass url or bind a tab first' });
+
+    if (!o.fresh) {
+      const warm = getSnapshot(tabId);
+      if (warm && Date.now() - warm.at < 20_000 && navigated === null) {
+        getSession().recordAction({ action: 'browse(warm)', tabId }, { elements: warm.index.elements });
+        return textResult({ success: true, cached: true, ageMs: Date.now() - warm.at, handle: 'snap:' + tabId + ':' + warm.seq, seq: warm.seq, index: warm.index, hint: 'find{query} to locate a control, page_slice to load one branch.' });
+      }
+    }
+
+    // Seed the page-held diag baseline FIRST, so the very next op is already diffable.
+    let baseline = null;
+    try { baseline = await runAutoDiff(tabId); } catch (e) { baseline = { error: String(e && e.message) }; }
+
+    const res = await getActiveHub().send({ type: 'main_world_exec', tabId, func: COLLECTOR, args: [] });
+    const snap = (res && res.result)
+      || (res && Array.isArray(res.results) && res.results[0] && res.results[0].result)
+      || (res && res.data && res.data.result)
+      || (res && res.data && Array.isArray(res.data.results) && res.data.results[0] && res.data.results[0].result);
+    if (!snap || !Array.isArray(snap.elements)) {
+      return textResult({ success: false, error: 'browse could not collect the inventory', got: JSON.stringify(res).slice(0, 300) });
+    }
+    const { seq, index } = putSnapshot(tabId, snap);
+    getSession().recordAction({ action: 'browse', tabId }, { elements: index.elements });
+    return textResult({
+      success: true, cached: false, navigated: navigated, handle: 'snap:' + tabId + ':' + seq, seq,
+      baseline: baseline && baseline.first ? 'seeded — the NEXT op on this page is diffable' : (baseline && baseline.note) || 'seeded',
+      index,
+      hint: 'find{query} to locate a control with its branch, or page_slice{...} to load one branch. Mutating ops now return a grouped DIFF automatically.',
+    });
+  });
+
+  // ═══ TOOL 2 — find (Ali 2026-10-01) ═══
+  // "be able to search in the page elements so ... when a search hits it shows you where
+  //  and what that does from context (positioning, branch it belongs to)"
+  //
+  // Returns WHERE (region, position, and the BRANCH — the ancestor chain, which is data,
+  // not a rendered diagram) and WHAT (the page's own role/name/attrs, plus state).
+  // The branch is resolved from the parent pointers in the inventory (branchChain, in
+  // snapshot.js) — so no mermaid graph is needed and nothing is re-fetched.
+  reg(server, 'find', {
+    description: 'TOOL 2. Search the stored page inventory and get WHERE and WHAT the hit is: its own role/name/attributes/state, its viewport position, the REGION the page labelled, and the BRANCH it sits in (the ancestor chain, resolved from parent pointers — no diagram, nothing re-fetched). This is the cheap way to locate a control: browse first, find by text/role/attribute, then act on the slice. Returns ALL matches (no cap).',
+    inputSchema: {
+      query: z.string().optional().describe('Substring match over name / locator / tag / region / attribute names. Prefer a word you can SEE on the page.'),
+      role: z.string().optional().describe('The page\'s own role attribute value, e.g. button'),
+      attr: z.union([z.string(), z.object({ name: z.string(), value: z.string().optional() })]).optional().describe('Match any attribute the page wrote'),
+      tag: z.string().optional().describe('Element tag'),
+      region: z.string().optional().describe('Region substring (region is derived from the nearest ancestor the PAGE labelled)'),
+      interactive: z.boolean().optional().describe('true = only controls (derived: focusable || field || role present)'),
+      vp: z.boolean().optional().describe('true = in viewport only'),
+      branchDepth: z.number().optional().describe('How many ancestors to include in the branch chain (default 5)'),
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
+      limit: z.number().optional().describe('OPT-IN cap on hits. Omit for ALL matches.'),
+    },
+  }, async (o) => {
+    const tabId = o.tabId || sessionTabOf();
+    const e = getSnapshot(tabId);
+    if (!e) return textResult({ success: false, error: 'no live snapshot for tab ' + tabId + ' — call browse (or page_snapshot) first' });
+    const filter = {};
+    for (const k of ['query', 'role', 'attr', 'tag', 'region', 'interactive', 'vp', 'limit']) {
+      if (o[k] !== undefined) filter[k] = o[k];
+    }
+    const s = sliceSnapshot(e.snap, filter);
+    const depth = o.branchDepth === undefined ? 5 : o.branchDepth;
+    const hits = s.elements.map((r) => {
+      const role = (r.attrs && r.attrs.role) || '';
+      const out = {
+        i: r.i, tag: r.tag, loc: r.loc, region: r.region,
+        role: role || undefined,
+        name: r.name || undefined,
+        state: {
+          focusable: r.focusable ? 1 : 0, field: r.field ? 1 : 0,
+          disabled: r.dis ? 1 : 0, checked: r.chk ? 1 : 0, inViewport: r.vp ? 1 : 0,
+        },
+        pos: (r.x == null) ? undefined : { x: r.x, y: r.y },
+        attrs: r.attrs,
+        branch: branchChain(e.snap, r, depth),
+      };
+      return out;
+    });
+    getSession().recordAction({ action: 'find', tabId, query: o.query }, { matched: s.matched });
+    return textResult({
+      success: true, url: e.snap.url, snapshotSeq: e.seq, ageMs: Date.now() - e.at,
+      matched: s.matched, returned: hits.length, truncatedByLimit: s.truncatedByLimit,
+      hits,
     });
   });
 
