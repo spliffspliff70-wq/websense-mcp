@@ -747,7 +747,7 @@ async function handleTabControl(action, payload) {
       try {
         await chrome.debugger.sendCommand({ tabId: tG }, 'Input.setInterceptDrags', { enabled: true });
         const dd = { items: [{ mimeType: 'text/plain', data: 'ws' }], files: [], dragOperationsMask: 1 };
-        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'dragEnter', x: t.x, y: t.y, data: dd });
+        await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'dragEnter', x: s.x, y: s.y, data: dd });
         await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'dragOver', x: t.x, y: t.y, data: dd });
         await chrome.debugger.sendCommand({ tabId: tG }, 'Input.dispatchDragEvent', { type: 'drop', x: t.x, y: t.y, data: dd });
         dropped = true;
