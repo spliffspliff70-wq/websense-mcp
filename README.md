@@ -40,12 +40,12 @@ Chrome Extension (extension/)
 Live DOM
 ```
 
-## Tools (31) — call `websense_guide` first
+## Tools (33) — call `websense_guide` first
 
 > **Count verified 2026-09-21** by `tools/list` against the RUNNING server
-> (`POST http://127.0.0.1:9222/mcp`, streamable HTTP JSON-RPC): **31 tools**.
-> The same 31 `reg(server, …)` names are in `src/server.js`. Anything in these
-> docs that says 20/21/29/43/61 tools is stale.
+> (`POST http://127.0.0.1:9222/mcp`, streamable HTTP JSON-RPC): **33 tools**.
+> The same 33 `reg(server, …)` names are in `src/server.js`. Anything in these
+> docs that says 20/21/29/31/43/61 tools is stale.
 
 ### Guide & Status
 `websense_guide` · `status` (kind:page|bridge|doctor|downloads)
@@ -99,7 +99,7 @@ Live DOM
 - **Chrome / Edge / Opera:** load `extension/manifest.json` (MV3, offscreen WS bridge).
 
 ## Key Features
-- **CSP-Safe (30/31 tools):** native DOM functions in the content script's isolated world. No eval, no string-to-code. Works on LinkedIn, GitHub, Google — any strict-CSP site. (`evaluate` is the only eval-based tool — and its `script` mode is blocked by the extension's own MV3 CSP on *every* page, so use its `query` mode or `main_world`; `dialog keystroke:true` is a Windows-control keystroke, and `main_world` uses Chrome's userScripts MAIN-world path which is CSP-proof by design.)
+- **CSP-Safe (32/33 tools):** native DOM functions in the content script's isolated world. No eval, no string-to-code. Works on LinkedIn, GitHub, Google — any strict-CSP site. (`evaluate` is the only eval-based tool — and its `script` mode is blocked by the extension's own MV3 CSP on *every* page, so use its `query` mode or `main_world`; `dialog keystroke:true` is a Windows-control keystroke, and `main_world` uses Chrome's userScripts MAIN-world path which is CSP-proof by design.)
 - **React-Compatible:** native prototype value setters bypass React's value tracker, then `input`/`change` events are dispatched.
 - **No Bot Detection:** real Chrome profile, cookies, fingerprint. No CDP, no `navigator.webdriver`, no headless.
 - **No Vision:** all structured JSON; no screenshots, no vision model.
@@ -171,7 +171,7 @@ node tools/export-guide.mjs --check
 websense/
 ├── package.json
 ├── src/
-│   ├── server.js       # MCP server with 31 consolidated tools
+│   ├── server.js       # MCP server with 33 consolidated tools
 │   ├── hub.js          # WebSocket hub
 │   ├── session.js      # Exploration map + diff engine
 │   └── mermaid.js      # Mermaid export

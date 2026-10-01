@@ -200,7 +200,7 @@ function annotateIntentResult(r, kind, q) {
   if (n !== 0) return r;
   const note = 'no elements matched ' + kind + ' "' + q + '" -- this is a ZERO-HIT SEMANTIC SEARCH, not an empty page. '
     + 'If you passed a FLAG as an intent (e.g. intent:"full" -- "full" is a BOOLEAN parameter of explore_page, not an intent), '
-    + 'call explore_page again with no intent/goal for the full page map.';
+    + 'call explore_page again with no intent/goal for the full action list, or — for the whole page rather than just its actions — use browse + find.';
   if (box === r) return Object.assign({}, r, { matched: 0, note });
   return Object.assign({}, r, { data: Object.assign({}, box, { matched: 0, note }) });
 }
@@ -727,7 +727,7 @@ THE 33 TOOLS — what each absorbed from the old 65-tool surface:
   websense_guide   this guide
   browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + the vocabulary. Replaces navigate+page_snapshot+map read.
   find             TOOL 2 — search the stored inventory; each hit gives WHERE (region, position, branch chain resolved from parent pointers) and WHAT (the page's own role/name/attrs/state). Returns ALL matches.
-  explore_page     page map (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (added/changed/removed, no settle/content — you usually do NOT need this any more: mutating ops return a DELTA block automatically; first call returns full SAG)
+  explore_page     quick look at a page's actions (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (you usually do NOT need this any more: every mutating op returns a grouped DIFF automatically; for a full page map use browse + find instead — explore_page is the quick look, not the map)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
   click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)
   type_text        fill one input (React-safe native setter) — or fields:[{ref,text},...] for batch (old type_many). Batch fills are SEQUENTIAL with a persistence check per field, so a 50-field batch takes ~50s; it reports filled/failed from the verified result, not from whether the write was dispatched. Password/OTP values are never echoed back.
