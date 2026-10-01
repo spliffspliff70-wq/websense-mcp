@@ -2432,5 +2432,25 @@ test('regions: the page\'s OWN named containers, nested, with NO counts', () => 
   assert(t2.outline.length < 200, 'the outline must not carry the payload (got ' + t2.outline.length + ' chars)');
 });
 
+test('browse: the WARM path and the COLD path must return the same shape', () => {
+  // ★ Found 2026-10-01 while answering Ali's "is everything confluent and wired?". The warm
+  // (cached) branch of browse returned index + hint but NOT `regions`, so calling browse twice
+  // inside the 20s window gave the page model the first time and silently withheld it the
+  // second — the same call answering differently depending on cache state. A cache that
+  // changes the SHAPE of a result, not just its freshness, is a correctness bug.
+  const src = SRV_SRC;
+  const warmBlock = src.match(/if \(!o\.fresh\) \{[\s\S]*?\n    \}\n/);
+  assert(warmBlock, 'the warm-path block must be findable');
+  const b = warmBlock[0];
+  assert(/cached: true/.test(b), 'this must be the warm branch');
+  assert(/regions:/.test(b), 'the warm branch must return `regions` like the cold branch does');
+  assert(/regionTree\(warm\.snap\)/.test(b), 'and it must compute them from the STORED snapshot');
+
+  // both branches must mention regions
+  const coldIdx = src.indexOf("reg(server, 'browse'");
+  const cold = src.slice(coldIdx, coldIdx + 12000);
+  assert(/regions: regions && regions\.outline/.test(cold), 'the cold branch must return regions');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

@@ -1970,7 +1970,14 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       const warm = getSnapshot(tabId);
       if (warm && Date.now() - warm.at < 20_000 && navigated === null) {
         getSession().recordAction({ action: 'browse(warm)', tabId }, { elements: warm.index.elements });
-        return textResult({ success: true, cached: true, ageMs: Date.now() - warm.at, handle: 'snap:' + tabId + ':' + warm.seq, seq: warm.seq, index: warm.index, hint: 'find{query} to locate a control, page_slice to load one branch.' });
+        // ★ THE WARM PATH MUST RETURN THE SAME SHAPE AS THE COLD ONE (2026-10-01). It used to
+        // omit `regions`, so a second browse inside the cache window silently withheld the page
+        // model while the first one had it — the same call giving different answers depending
+        // on cache state. `regions` is a pure function of the stored snapshot, so it costs
+        // nothing to recompute here.
+        let warmRegions = null;
+        try { warmRegions = regionTree(warm.snap); } catch (e) { warmRegions = { error: String(e && e.message) }; }
+        return textResult({ success: true, cached: true, ageMs: Date.now() - warm.at, handle: 'snap:' + tabId + ':' + warm.seq, seq: warm.seq, index: warm.index, regions: warmRegions && warmRegions.outline, hint: 'regions = the containers THIS page named, nested. find{query} to locate a control with its branch, page_slice to load one branch.' });
       }
     }
 
