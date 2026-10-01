@@ -1,0 +1,44 @@
+feat(regions): lossless by default + dynamic repetition (Ali: no filtering)
+
+Ali's correction, verbatim: "both rules cut too deep - there shall be no hard
+coding, filtering, truncating, grouping limiting rules or any other kinds of
+actions or code that would risk limiting the information taken dynamically from a
+webpage - everything must be done dynamically with the full data available from
+the page so sources have none of that. How we choose to organize them must also
+always be dynamic"
+
+He was right, and this is the correction. A first pass at the bbc.com/news flood
+(116 lines, 941 of 1,424 elements counted as "named") made the outline shorter by
+REJECTING the page's own words: a position/spread test and a per-instance
+identifier test. That is a cut dressed up as a rule. On the live x.com feed it
+deleted data-testid=primaryColumn and sidebarColumn - the page's own names for the
+feed and the rail.
+
+WHAT CHANGES
+- spread defaults to Infinity: no name is rejected. The admissibility machinery is
+  kept and still measurable, but opt-in (tools/regions-probe.mjs --spread 1).
+- the wrapper rule is opt-in (passthrough:true) instead of the default.
+- class is always a name source, not a last-resort fallback behind a policy test.
+- no depth cap (maxDepth Infinity) - a depth limit is a truncation.
+- no REPEATS threshold - a run collapses when it is longer than one period.
+
+THE ACTUAL DEFECT, FIXED DYNAMICALLY
+The volume was never the names. The repetition collapse only compared ADJACENT
+IDENTICAL shapes, so it missed the commonest real pattern - an ALTERNATING run
+(A,B,A,B). bbc.com's nav is div>div>a / div>button / div>div>a, so 9 menu items
+cost 15 lines while the page's own repetition sat there unread. Every period is
+now tried and whichever explains the longest run wins, derived from the data.
+Also fixed: shapeOf compared only the KIND of a name, so primaryColumn and
+sidebarColumn looked like one repeated thing and the collapse printed one with a
+count and HID THE OTHER entirely.
+
+MEASURED (lossless defaults)
+  bbc.com/news     1424 el   112 lines / 9.4 KB
+  x.com/home       2764 el   139 lines / 8.8 KB
+  books.toscrape    543 el    17 lines / 518 B   (was 2 lines / 45 B - the failure)
+
+x.com now shows the feed as ONE line (data-testid=primaryColumn / "Home timeline"),
+the 9 tweets as cellInnerDiv ^ REPEATS x9, and the rail as sidebarColumn / "Trending".
+
+153 tests pass, including new ones pinning BOTH halves: the lossless default and
+the opt-in organisations.

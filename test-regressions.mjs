@@ -2382,13 +2382,22 @@ test('regions: the page\'s OWN named containers, nested, with NO counts', () => 
     mk(7, 'div', { 'aria-label': 'Home timeline' }, 6),
     mk(8, 'article', { 'data-testid': 'cell' }, 7),
     mk(9, 'span', { 'aria-label': 'inner' }, 8),        // makes article a region
-    mk(10, 'article', { 'data-testid': 'cell' }, 7),
-    mk(11, 'span', { 'aria-label': 'inner' }, 10),
-    mk(12, 'article', { 'data-testid': 'cell' }, 7),
-    mk(13, 'span', { 'aria-label': 'inner' }, 12),
-    mk(14, 'div', { 'data-testid': 'sidebarColumn' }, 5),
-    mk(15, 'div', { 'aria-label': 'Trending' }, 14),
-    mk(16, 'span', { 'aria-label': 'topic' }, 15),
+    mk(10, 'span', { 'aria-label': 'meta' }, 8),
+    mk(11, 'article', { 'data-testid': 'cell' }, 7),
+    mk(12, 'span', { 'aria-label': 'inner' }, 11),
+    mk(13, 'span', { 'aria-label': 'meta' }, 11),
+    mk(14, 'article', { 'data-testid': 'cell' }, 7),
+    mk(15, 'span', { 'aria-label': 'inner' }, 14),
+    mk(16, 'span', { 'aria-label': 'meta' }, 14),
+    mk(17, 'div', { 'data-testid': 'composer' }, 6),
+    mk(18, 'span', { 'aria-label': 'What is happening' }, 17),
+    mk(19, 'span', { 'aria-label': 'Post' }, 17),
+    mk(20, 'div', { 'data-testid': 'sidebarColumn' }, 5),
+    mk(21, 'div', { 'aria-label': 'Trending' }, 20),
+    mk(22, 'span', { 'aria-label': 'topic' }, 21),
+    mk(23, 'span', { 'aria-label': 'topic two' }, 21),
+    mk(24, 'div', { 'aria-label': 'Search' }, 20),
+    mk(25, 'span', { 'aria-label': 'Search box' }, 24),
   ] };
 
   const t = regionTree(snap);
@@ -2425,11 +2434,128 @@ test('regions: the page\'s OWN named containers, nested, with NO counts', () => 
     mk(0, 'html', null, null),
     mk(1, 'div', { 'data-shortcuts': longVal }, 0),
     mk(2, 'span', { 'aria-label': 'inner' }, 1),
+    mk(3, 'span', { 'aria-label': 'other' }, 1),
   ] };
   const t2 = regionTree(snap2);
   assert(t2.outline.indexOf(longVal) === -1, 'a long data-* VALUE must never be printed');
   assert(/data-shortcuts/.test(t2.outline), 'the attribute NAME must still be printed');
   assert(t2.outline.length < 200, 'the outline must not carry the payload (got ' + t2.outline.length + ' chars)');
+
+  // ★ THE DEFAULT IS LOSSLESS (Ali, 2026-10-01): "there shall be no hard coding, filtering,
+  // truncating, grouping limiting rules ... everything must be done dynamically with the full
+  // data available from the page". A first pass at the bbc.com/news flood made the wrapper
+  // rule the DEFAULT, which meant the outline silently dropped the page's own words — that was
+  // a cut, not an organisation. It is now opt-in, and both halves are pinned.
+  //
+  // bbc.com puts data-testid="anchor-inner-wrapper" on 157 elements, each wrapping a single
+  // <a>, and with it the page ran to 116 lines with 941 of 1,424 elements counted as "named".
+  const snapWrap = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'div', { 'data-testid': 'anchor-inner-wrapper' }, 0),   // wraps ONE <a>
+    mk(2, 'a', { 'data-testid': 'internal-link' }, 1),
+    mk(3, 'span', { 'aria-label': 'label' }, 2),
+  ] };
+  assert(/anchor-inner-wrapper/.test(regionTree(snapWrap).outline),
+    'DEFAULT is lossless: the page\'s own wrapper name is KEPT');
+  assert(!/anchor-inner-wrapper/.test(regionTree(snapWrap, { passthrough: true }).outline),
+    'passthrough:true is the OPT-IN organisation that stops a one-child wrapper being a region');
+
+  // ★ NO NAME IS REJECTED BY DEFAULT — the position/spread and instance-identifier tests are
+  // available but OFF, because discarding the page's own words is exactly the cut Ali called out.
+  const snapSpread = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'body', null, 0),
+    mk(2, 'section', null, 1),
+    mk(3, 'div', { 'data-testid': 'widget' }, 2),
+    mk(4, 'a', { 'aria-label': 'one' }, 3),
+    mk(5, 'a', { 'aria-label': 'one b' }, 3),
+    mk(6, 'article', null, 1),
+    mk(7, 'div', { 'data-testid': 'widget' }, 6),   // same hook, DIFFERENT position shape
+    mk(8, 'a', { 'aria-label': 'two' }, 7),
+    mk(9, 'a', { 'aria-label': 'two b' }, 7),
+  ] };
+  assert(/data-testid=widget/.test(regionTree(snapSpread).outline),
+    'DEFAULT is lossless: a hook used in two places is still shown');
+  assert(!/data-testid=widget/.test(regionTree(snapSpread, { spread: 1 }).outline),
+    'spread:1 is the OPT-IN test that treats a word used in many places as a component marker');
+
+  // ★ AND THE SAME HOOK AT THE SAME POSITION IS STILL A PLACE — otherwise the opt-in rule above
+  // would just be "ignore hooks", and the whole feed would vanish. The main fixture proves it
+  // (data-testid="cell" x3 collapses), asserted above.
+  assert(/REPEATS x3/.test(t.outline), 'a hook repeated at ONE position is a place, and collapses');
+
+  // ★ CLASS IS ALWAYS A NAME SOURCE (Ali, 2026-10-01, "the full data available from the page"):
+  // a page that names its entire layout with class only (books.toscrape: div.page >
+  // article.product_pod, no id/role/data-* on a single container) must still produce a model.
+  // It used to be a last-resort fallback behind a "did the page name anything?" test — that was
+  // a fixed policy, and it is gone.
+  const snapBare = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'body', { id: 'default' }, 0),
+    mk(2, 'div', { class: 'page' }, 1),
+    mk(3, 'article', { class: 'product_pod' }, 2),
+    mk(4, 'span', { 'aria-label': 'inner' }, 3),
+    mk(5, 'article', { class: 'product_pod' }, 2),
+    mk(6, 'span', { 'aria-label': 'inner' }, 5),
+    mk(7, 'article', { class: 'product_pod' }, 2),
+    mk(8, 'span', { 'aria-label': 'inner' }, 7),
+    mk(9, 'span', { 'aria-label': 'meta' }, 3),
+    mk(10, 'span', { 'aria-label': 'meta' }, 5),
+    mk(11, 'span', { 'aria-label': 'meta' }, 7),
+  ] };
+  const t5 = regionTree(snapBare);
+  assert(/product_pod/.test(t5.outline), 'a class-only page must still produce a model (books.toscrape)');
+  assert(/REPEATS x3/.test(t5.outline), 'and its repeated cards must collapse');
+
+  // ★ AN id IS MINTED PER ELEMENT BY SPEC (2026-10-01, found on the live x.com feed).
+  // Every tweet carried a React-generated id — #id__kaz8g4cuhrn, #id__nhffana1zz,
+  // #id__uyjanmr0dmf — and each is unique, so every "is this name shared?" test passed it
+  // happily while the timeline grew ~40 lines of per-tweet noise. A page showing SEVERAL
+  // DIFFERENT ids at ONE position is minting identifiers, not naming places. Note the two
+  // articles here are named, so without the rule the id divs WOULD be regions and would
+  // appear — this assertion is not vacuous.
+  const snapIds = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'body', null, 0),
+    mk(2, 'article', { 'data-testid': 'cell' }, 1),
+    mk(3, 'div', { id: 'id__aaa111' }, 2),
+    mk(4, 'span', { 'aria-label': 'x' }, 3),
+    mk(5, 'span', { 'aria-label': 'y' }, 3),
+    mk(6, 'article', { 'data-testid': 'cell' }, 1),
+    mk(7, 'div', { id: 'id__bbb222' }, 6),
+    mk(8, 'span', { 'aria-label': 'x' }, 7),
+    mk(9, 'span', { 'aria-label': 'y' }, 7),
+  ] };
+  const t6 = regionTree(snapIds);
+  assert(/data-testid=cell/.test(t6.outline), 'the named card is still a place');
+  assert(/id__aaa111/.test(t6.outline),
+    'DEFAULT is lossless: even a per-instance id is KEPT');
+  assert(!/id__aaa111|id__bbb222/.test(regionTree(snapIds, { spread: 1 }).outline),
+    'the OPT-IN instance-identifier test is what treats it as an identifier instead of a name');
+
+  // ★ ...BUT TWO SIBLING PLACES WITH DIFFERENT HOOKS MUST BOTH SURVIVE (same live session).
+  // x.com's primaryColumn and sidebarColumn sit side by side at ONE position carrying two
+  // different data-testids. A first cut of the rule above deleted BOTH — the feed lost the
+  // page's own name for it. Author-chosen words are not instance identifiers.
+  // This also pins the pass-through fix: element 3 has exactly ONE child, but that child
+  // opens into the composer/toolbar/timeline, so the column is not a wrapper.
+  const snapSibs = { elements: [
+    mk(0, 'html', null, null),
+    mk(1, 'body', null, 0),
+    mk(2, 'main', { role: 'main' }, 1),
+    mk(3, 'div', { 'data-testid': 'primaryColumn' }, 2),
+    mk(4, 'div', { 'aria-label': 'Home timeline' }, 3),
+    mk(5, 'span', { 'aria-label': 'a' }, 4),
+    mk(6, 'span', { 'aria-label': 'b' }, 4),
+    mk(7, 'div', { 'data-testid': 'sidebarColumn' }, 2),
+    mk(8, 'div', { 'aria-label': 'Trending' }, 7),
+    mk(9, 'span', { 'aria-label': 'c' }, 8),
+    mk(10, 'span', { 'aria-label': 'd' }, 8),
+  ] };
+  const t7 = regionTree(snapSibs);
+  assert(/primaryColumn/.test(t7.outline), 'a named column must survive beside its sibling');
+  assert(/sidebarColumn/.test(t7.outline), 'and so must the sibling');
+  assert(/Home timeline/.test(t7.outline), 'and the column collapses with its label into one line');
 });
 
 test('browse: the WARM path and the COLD path must return the same shape', () => {

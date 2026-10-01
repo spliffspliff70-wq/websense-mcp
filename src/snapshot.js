@@ -401,28 +401,183 @@ export function branchChain(snap, rec, depth = 5) {
 // siblings are repetition.
 export function regionTree(snap, opts = {}) {
   const els = (snap && snap.elements) || [];
-  const maxDepth = opts.depth || 14;
+  const maxDepth = opts.depth || Infinity;   // no cap — a depth limit is a truncation
 
-  const nameOf = (e) => {
+  // ── ADMISSIBILITY: a name must identify a PLACE ───────────────────────────────────
+  // ★ MEASURED 2026-10-01. The page's own words are the only vocabulary we use — but a
+  // page REUSES words, and the same word in many different places names a component,
+  // not a place. BBC News puts data-testid="anchor-inner-wrapper" on 157 elements that
+  // sit under 113 DIFFERENT parents, "...=internal-link" on 71/71, "...=external-anchor"
+  // on 62/62; those three plus their card-part siblings accounted for most of a
+  // 117-line outline in which 941 of 1,424 elements counted as "named".
+  //
+  // A genuine repeated region sits under ONE parent — its grid or list. Measured on the
+  // same page: data-testid="contentlink-li" 16 carriers / 1 parent,
+  // "mainNavigationItemStyled" 13 / 1. So the cut is structural, not a size threshold:
+  //   carriers share a parent  → one repeated run, or a single element → a place.
+  //   carriers spread across many parents → a component marker → names nothing.
+  //
+  // The SAME test is what makes `class` usable as a LAST-RESORT name. Utility and
+  // framework classes are spread by construction (Tailwind "p-4 flex", styled-components
+  // "sc-bdVaJa iHZvIS"), so they fail the test and never reach the outline; a class that
+  // names a component tends to be carried by one repeated run.
+  //
+  // WebSense's OWN bookkeeping is never the page's words: our attributes are on the page
+  // because we put them there, and one of them ("data-ws-dialogs=[]") surfaced as the
+  // top region on a page that named nothing else.
+  const OWN_ATTR = (k) => k === 'data-websense-ref' || k === 'data-ws' || k.lastIndexOf('data-ws-', 0) === 0;
+  // ★ NO FILTERING BY DEFAULT (Ali, 2026-10-01): "there shall be no hard coding, filtering,
+  // truncating, grouping limiting rules ... everything must be done dynamically with the full
+  // data available from the page". Every word the page uses is KEPT. The admissibility
+  // machinery below still exists and is still measurable (tools/regions-probe.mjs --spread N),
+  // but it is OFF unless a caller explicitly asks for it — dropping the page's own names is a
+  // cut, not an organisation, and it was the wrong way to make the outline shorter.
+  const spread = opts.spread == null ? Infinity : opts.spread;
+
+  const carriers = new Map();                                // signature -> Set(position shape)
+  const slots = new Map();                                   // kind|key|shape -> Set(value present there)
+  const sigOf = (kind, k, v) => kind + '|' + k + '|' + v;
+  // ★ HOW THE ADMISSIBILITY TEST IS MEASURED (2026-10-01, third iteration).
+  // "Several distinct parents" was the wrong measure, and so was "look N levels up": both
+  // depend on the depth at which a repetition happens to sit. books.toscrape proved it —
+  // the 20 article.product_pod sit under 20 different <li>, one <ol>; their inner
+  // div.image_container sits under 20 different <article>. A run is real at BOTH levels,
+  // but each level has a different parent count, so a fixed span admits one and rejects
+  // the other and the whole grid collapses.
+  //
+  // The measure that does not depend on depth is the POSITION SHAPE: the tag-path from
+  // the document root. A name is a place-name when its carriers all sit at structurally
+  // IDENTICAL positions — the page is using one word for one kind of place, however
+  // deeply nested. bbc.com's data-testid="anchor-inner-wrapper" covers 157 elements
+  // sitting at wildly different paths (header, nav, cards, footer) → not a place.
+  // books.toscrape's ".product_pod" covers 20 elements all at ol>li>article → a place.
+  //
+  // Pure tree fact, no threshold, no magic depth.
+  const pathCache = new Array(els.length);
+  const pathOf = (i) => {
+    if (pathCache[i] !== undefined) return pathCache[i];
+    const stack = [];
+    let j = i;
+    while (j != null && els[j] && pathCache[j] === undefined) { stack.push(j); j = els[j].p; }
+    let base = (j != null && els[j] && pathCache[j] !== undefined) ? pathCache[j] : '';
+    while (stack.length) {
+      const k = stack.pop();
+      base = base ? base + '>' + els[k].tag : els[k].tag;
+      pathCache[k] = base;
+    }
+    return pathCache[i];
+  };
+  const note = (i, kind, k, v) => {
+    const sh = pathOf(i);
+    const sig = sigOf(kind, k, v);
+    let s = carriers.get(sig);
+    if (!s) { s = new Set(); carriers.set(sig, s); }
+    s.add(sh);
+    const sl = kind + '|' + k + '|' + sh;
+    let t = slots.get(sl);
+    if (!t) { t = { n: 0, vals: new Set() }; slots.set(sl, t); }
+    t.n++;
+    t.vals.add(v);
+  };
+  const wantClass = opts.className !== false;   // the page's class IS the page's own word
+  for (let i = 0, N = Number.isFinite(spread) ? els.length : 0; i < N; i++) {
+    const e = els[i], a = e.attrs;
+    if (!a) continue;
+    for (const k in a) {
+      const v = a[k];
+      if (v == null || v === '') continue;
+      if (k === 'role') {
+        note(i, 'r', 'role', v);
+        if (a['aria-label']) note(i, 'r', 'role+label', v + '\u0000' + a['aria-label']);
+      } else if (k === 'aria-label') {
+        note(i, 'a', 'aria-label', v);
+      } else if (k === 'id') {
+        note(i, 'i', 'id', v);
+      } else if (k.lastIndexOf('data-', 0) === 0) {
+        if (k.length > 5 && !OWN_ATTR(k)) note(i, 'h', k, v);
+      } else if (wantClass && k === 'class') {
+        for (const tok of String(v).split(/\s+/)) if (tok) note(i, 'c', 'class', tok);
+      }
+    }
+  }
+  // ★ THE MIRROR OF THE SPREAD TEST (2026-10-01, found on the live x.com feed).
+  // The spread test asks "does this word appear in many DIFFERENT places?" — that catches a
+  // component marker. This one asks the opposite question about the SLOT: "does this place
+  // get many DIFFERENT words?" — and that catches a PER-INSTANCE value.
+  //
+  // Measured on the x.com feed: every tweet carries a React-generated id
+  // (#id__kaz8g4cuhrn, #id__nhffana1zz, #id__uyjanmr0dmf …) and a role="group" whose
+  // accessible name is its own engagement count ("1 reply, 2 likes, 2 bookmarks, 65
+  // views"). Each value is unique, so the spread test passes it happily — but neither tells
+  // you WHERE anything is, and together they buried the timeline under ~40 lines of
+  // per-tweet noise.
+  //
+  // The test is NOT "does this slot hold several values" — books.toscrape has three <p> in
+  // every product card (price_color, instock availability, star-rating) and they are
+  // perfectly good names for three different elements. The test is whether the value is
+  // DIFFERENT ON EVERY OCCURRENCE, which is what an instance identifier does.
+  //
+  // And it applies to `id` ONLY. An id is unique PER ELEMENT by the HTML spec, so a page
+  // showing 9 distinct ids at one position is minting an identifier per instance — that is
+  // React's #id__kaz8g4cuhrn. Author-chosen words are the opposite: x.com's primaryColumn
+  // and sidebarColumn are SIBLINGS at one position with two different data-testids, and an
+  // earlier version of this test deleted both of them.
+  const mechanical = (kind, k, v, shape) => {
+    if (!Number.isFinite(spread)) return false;
+    const s = carriers.get(sigOf(kind, k, v));
+    if (s && s.size > spread) return true;                       // spread across positions
+    if (kind !== 'i') return false;
+    const t = slots.get(kind + '|' + k + '|' + shape);
+    return !!t && t.n > 1 && t.vals.size === t.n;                // a fresh value every time
+  };
+
+  // ★ WHAT KIND OF WORD IS IT? A `role` or `aria-label` is a name the page wrote FOR A
+  // READER ("navigation \"Footer navigation\""). A `data-*` hook is written for the
+  // page's own code, and it lands on layout wrappers a human never perceives. That
+  // distinction is what the pass-through test below uses.
+  const nameParts = (e, i) => {
     const a = e.attrs;
-    if (!a) return '';
-    if (a.role) return a.role + (a['aria-label'] ? ' "' + a['aria-label'] + '"' : '');
-    if (a['aria-label']) return '"' + a['aria-label'] + '"';
+    if (!a) return null;
+    const sh = pathOf(i);
+    if (a.role) {
+      if (a['aria-label']) {
+        if (!mechanical('r', 'role+label', a.role + '\u0000' + a['aria-label'], sh)) {
+          return { n: a.role + ' "' + a['aria-label'] + '"', src: 'role' };
+        }
+        // The label varies per instance (x.com: role="group" whose name IS the engagement
+        // count) — but the ROLE itself is still a real word, so keep that much.
+        return { n: a.role, src: 'role' };
+      }
+      return { n: a.role, src: 'role' };
+    }
+    if (a['aria-label']) {
+      if (!mechanical('a', 'aria-label', a['aria-label'], sh)) return { n: '"' + a['aria-label'] + '"', src: 'aria' };
+    }
     if (e.attrNames) {
       for (const k of e.attrNames) {
-        if (k.length > 5 && k.lastIndexOf('data-', 0) === 0) {
+        if (k.length > 5 && k.lastIndexOf('data-', 0) === 0 && !OWN_ATTR(k)) {
           // ★ AN ATTRIBUTE NAME IS IDENTITY; ITS VALUE IS SOMETIMES A PAYLOAD (2026-10-01).
           // Measured on x.com: data-at-shortcutkeys holds the ENTIRE keyboard-shortcut map
           // (~1.5 KB) and it landed in the outline. A short value IS the identity
           // (data-testid=primaryColumn); a long one is reported by name only.
           const v = a[k];
-          return (v && v.length <= 40) ? k + '=' + v : k;
+          if (v == null || v === '') continue;
+          if (mechanical('h', k, v, sh)) continue;           // component marker, not a place
+          return { n: (v.length <= 40) ? k + '=' + v : k, src: 'hook' };
         }
       }
     }
-    if (a.id) return '#' + a.id;
-    return '';
+    if (a.id && !mechanical('i', 'id', a.id, sh)) return { n: '#' + a.id, src: 'id' };
+    if (wantClass && a.class) {
+      // last resort — the page named this container only with a class, which some pages
+      // do for their entire layout (books.toscrape: div.page > article.product_pod).
+      for (const tok of String(a.class).split(/\s+/)) {
+        if (tok && !mechanical('c', 'class', tok, sh)) return { n: '.' + tok, src: 'class' };
+      }
+    }
+    return null;
   };
+  const nameOf = (e, i) => { const p = nameParts(e, i); return p ? p.n : ''; };
 
   const kids = [];
   for (let i = 0; i < els.length; i++) kids.push([]);
@@ -431,15 +586,47 @@ export function regionTree(snap, opts = {}) {
     if (p != null && kids[p]) kids[p].push(i);
   }
 
-  const named = els.map((e) => !!nameOf(e));
-  // hasNamedDesc[i] — does i contain a named element anywhere below it?
+  const named = els.map((e, i) => !!nameParts(e, i));
+  // ★ A PASS-THROUGH IS NOT A PLACE (2026-10-01, measured).
+  // An element whose whole content is ONE child holds nothing of its own — a human sees the
+  // same box, one level in. That is the anatomy of the bbc.com flood: data-testid=
+  // "anchor-inner-wrapper" wraps a single <a> and appears 157 times, and with it the page
+  // ran to 116 lines with 941 of 1,424 elements counted as "named".
+  //
+  // BUT "one child" alone was too blunt, and the live x.com feed proved it: primaryColumn
+  // holds exactly ONE child div — which itself holds the composer, the toolbar and the
+  // timeline. Testing the immediate child count deleted the page's own name for the feed
+  // (and sidebarColumn for the rail). The honest shape of the rule is about the whole
+  // SUBTREE: a single child is only a pass-through when nothing below it splits. A wrapper
+  // around a link stays a wrapper; a column that opens into a feed does not.
+  //
+  // role / aria-label / id are exempt, because those are words the page wrote for a reader
+  // rather than test hooks on a wrapper — `nav :: navigation "Footer navigation"` holds one
+  // <ul> and is still a place worth naming.
+  //
+  // The name itself is NOT thrown away: it stays in the inventory, in `find`, and in the
+  // collapsed chain line. It simply does not CREATE a region.
+  const hasSplit = new Array(els.length).fill(false);
+  for (let i = els.length - 1; i >= 0; i--) {
+    if (kids[i].length > 1) { hasSplit[i] = true; continue; }
+    for (const c of kids[i]) if (hasSplit[c]) { hasSplit[i] = true; break; }
+  }
+  const passthrough = opts.passthrough === true;   // opt-in only — OFF by default
+  const place = els.map((e, i) => {
+    const p = nameParts(e, i);
+    if (!p) return false;
+    if (!passthrough) return true;
+    if (p.src === 'role' || p.src === 'aria' || p.src === 'id') return true;   // deliberate
+    return hasSplit[i];        // a hook/class must open into more than one thing, anywhere below
+  });
+  // hasNamedDesc[i] — does i contain a PLACE anywhere below it?
   const hasNamedDesc = new Array(els.length).fill(false);
   for (let i = els.length - 1; i >= 0; i--) {
     for (const c of kids[i]) {
-      if (named[c] || hasNamedDesc[c]) { hasNamedDesc[i] = true; break; }
+      if (place[c] || hasNamedDesc[c]) { hasNamedDesc[i] = true; break; }
     }
   }
-  const isRegion = els.map((e, i) => named[i] && hasNamedDesc[i]);
+  const isRegion = els.map((e, i) => place[i] && hasNamedDesc[i]);
   const regionChild = [];   // region children of each region
   for (let i = 0; i < els.length; i++) regionChild.push([]);
   for (let i = 0; i < els.length; i++) {
@@ -450,15 +637,12 @@ export function regionTree(snap, opts = {}) {
 
   // shape of a region for the repetition test: tag + its OWN name KIND (not the value, because
   // per-instance values differ) + the tag sequence of its region children.
-  const shapeOf = (i) => {
-    const a = els[i].attrs || {};
-    const kinds = [];
-    if (a.role) kinds.push('role');
-    else if (a['aria-label']) kinds.push('aria');
-    else if (a.id) kinds.push('id');
-    else kinds.push('data');
-    return els[i].tag + '|' + kinds.join(',') + '|' + regionChild[i].map((c) => els[c].tag).join(',');
-  };
+  // ★ A REPEAT IS THE SAME THING AGAIN, so the comparison carries the element's own NAME —
+  // not merely the KIND of name it has. Comparing kinds alone made two differently-named
+  // siblings (x.com's primaryColumn beside sidebarColumn) look like one repeated thing, and
+  // the collapse then printed one of them with a count and HID THE OTHER ENTIRELY.
+  const shapeOf = (i) =>
+    els[i].tag + '|' + nameOf(els[i], i) + '|' + regionChild[i].map((c) => els[c].tag).join(',');
 
   const lines = [];
   const seenRep = [];
@@ -470,29 +654,42 @@ export function regionTree(snap, opts = {}) {
     // hook (primaryColumn) and its label ("Home timeline") are different facts about the same
     // place, and dropping either loses information. This is a collapse of the LINE, not of the
     // names.
-    let cur = i, chain = els[i].tag, names = [nameOf(els[i])];
+    let cur = i, chain = els[i].tag, names = [nameOf(els[i], i)];
     while (regionChild[cur].length === 1) {
       const only = regionChild[cur][0];
       if (regionChild[only].length === 0) break;   // keep a leaf-ish region visible
       chain += ' > ' + els[only].tag;
-      names.push(nameOf(els[only]));
+      names.push(nameOf(els[only], only));
       cur = only;
     }
     lines.push(ind + chain + ' :: ' + names.filter(Boolean).join('  /  '));
     const rc = regionChild[cur];
-    // repetition: consecutive region children with the same shape
+    // ★ DYNAMIC REPETITION — the LONGEST run, period or not (2026-10-01, after Ali:
+    // "How we choose to organize them must also always be dynamic"). The old version only
+    // compared ADJACENT identical shapes, which misses the most common real pattern: a run
+    // that ALTERNATES (A,B,A,B …) because the page interleaves two kinds of thing. bbc.com's
+    // nav is div>div>a / div>button / div>div>a / … so its 9 menu items cost 15 lines while
+    // the page's own repetition sat there unread. The period is DERIVED from the data — every
+    // period is tried, and whichever explains the longest run wins — not chosen by us.
+    const shapes = rc.map((c) => shapeOf(c));
     let k = 0;
     while (k < rc.length) {
-      let j = k + 1;
-      while (j < rc.length && shapeOf(rc[j]) === shapeOf(rc[k])) j++;
-      if (j - k >= 3) {
-        emit(rc[k], d + 1);
-        lines.push('  '.repeat(d + 1) + '^ the block above REPEATS x' + (j - k));
-        seenRep.push(j - k);
-      } else {
-        for (let m = k; m < j; m++) emit(rc[m], d + 1);
+      const rest = shapes.slice(k);
+      let bestSpan = 1, bestP = 1;
+      for (let p = 1; p * 2 <= rest.length; p++) {
+        let j = p;
+        while (j < rest.length && rest[j] === rest[j - p]) j++;
+        if (j > bestSpan) { bestSpan = j; bestP = p; }
       }
-      k = j;
+      if (bestSpan > bestP) {   // the run is longer than ONE period — no x3 style threshold
+        for (let m = 0; m < bestP; m++) emit(rc[k + m], d + 1);
+        lines.push('  '.repeat(d + 1) + '^ the block above REPEATS x' + bestSpan);
+        seenRep.push(bestSpan);
+        k += bestSpan;
+      } else {
+        emit(rc[k], d + 1);
+        k += 1;
+      }
     }
   };
 
@@ -505,6 +702,18 @@ export function regionTree(snap, opts = {}) {
     if (!hasParentRegion) roots.push(i);
   }
   for (const r of roots) emit(r, 0);
+
+  if (opts.debug) {
+    return {
+      regions: lines.filter((l) => l.indexOf('REPEATS') < 0).length,
+      named: named.filter(Boolean).length,
+      outline: lines.join('\n'),
+      debug: els.map((e, i) => {
+        const p = nameParts(e, i);
+        return { i, tag: e.tag, kids: kids[i].length, name: p ? p.n : '', src: p ? p.src : '', place: place[i], region: isRegion[i] };
+      }),
+    };
+  }
 
   return {
     regions: lines.filter((l) => l.indexOf('REPEATS') < 0).length,
