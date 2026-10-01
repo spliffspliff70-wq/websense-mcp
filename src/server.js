@@ -825,6 +825,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'read', {
     description: 'Read page content. format: "text" (innerText of selector, offset-paged) | "content" (smart SPA extraction) | "markdown" (clean MD conversion) | "diff" (only what changed since last read — huge token saver) | "scrollextract" (infinite scroll) | "preload" (defeat lazy loading).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       format: z.enum(['text', 'content', 'markdown', 'diff', 'scrollextract', 'preload']).optional().describe('Default text'),
       selector: z.string().optional().describe('CSS selector (default body/auto)'),
       maxLen: z.number().optional().describe('Char cap'),
@@ -861,6 +862,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'click', {
     description: 'Interact by ref: click (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef→toRef) — or x,y viewport coords for canvas (ref optional origin). Returns before/after + effect verdict; on suspected_noop escalate (OS-level click) instead of retrying blind.',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       ref: z.string().optional().describe('Element ref e.g. "E7"'),
       mode: z.enum(['click', 'hover', 'rightclick', 'drag']).optional().describe('Default click'),
       x: z.number().optional().describe('Viewport X (canvas clicks; origin=ref if given)'),
@@ -953,6 +955,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'type_text', {
     description: 'Fill input(s) with the React-safe native setter + input/change events. One field: ref+text. Many at once: fields:[{ref,text,clearFirst?},...] (old type_many — one round trip). Verifies value persistence; effect verdict included. On a contenteditable editor (Draft.js/Lexical/ProseMirror/Slate) the result carries mode:"replace"|"append" and expectedFinal, so you can tell a replace from an append without re-reading; clearFirst:false appends onto what is already there.',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       ref: z.string().optional().describe('Element ref (single-field mode)'),
       text: z.string().optional().describe('Text to set (single-field mode)'),
       clearFirst: z.boolean().optional().describe('Clear before typing (default true)'),
@@ -979,6 +982,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'form', {
     description: 'Form ops: action:"state" (fields, validation, submit readiness; formRef optional = all) | "select" (ref,value — native <select> AND ARIA dropdowns; select[multiple] accepts JSON array) | "toggle" (checkbox/switch/aria-pressed) | "special" (ref,value — date/time/color/range/number/checkbox/radio with auto-format + browser-rejection detection) | "upload" (ref, filePath — file input / dropzone / rich-editor paste, auto-picked).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       action: z.enum(['state', 'select', 'toggle', 'special', 'upload']).describe('Form operation'),
       formRef: z.string().optional().describe('state: form ref e.g. "F0" (omit = all forms)'),
       ref: z.string().optional().describe('Element ref for select/toggle/special/upload'),
@@ -1061,6 +1065,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'reveal', {
     description: 'Pre-extract hidden content WITHOUT clicking: kind:"dropdown" (all options, native + ARIA) | "tabs" (all tab panels) | "accordion" (all collapsible sections).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       kind: z.enum(['dropdown', 'tabs', 'accordion']).describe('What to reveal'),
       ref: z.string().optional().describe('Element ref (optional for tabs/accordion)'),
     },
@@ -1073,6 +1078,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'scroll', {
     description: 'Scroll: direction:"down"+amount (ticks, 1 tick ≈ 80% viewport; ref scrolls that element\'s container) — or y:<px> absolute — or intoView:"E5" (center element).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       direction: z.enum(['up', 'down', 'left', 'right']).optional().describe('Scroll direction (tick mode)'),
       amount: z.number().optional().describe('Ticks (default 1)'),
       ref: z.string().optional().describe('Element whose scrollable ancestor to scroll / intoView target'),
@@ -1156,6 +1162,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'status', {
     description: 'Diagnostics: kind:"page" (URL/title/modal/captcha/loading/viewport — call after actions) | "bridge" (hub+page connection, instant) | "doctor" (full self-diagnostics: hub, clients, SW alarms, wsDebug, cookie names+expiry) | "downloads" (recent downloads state).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       kind: z.enum(['page', 'bridge', 'doctor', 'downloads']).optional().describe('Default page'),
     },
   }, async (o) => {
@@ -1218,6 +1225,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'wait', {
     description: 'Block until a condition (poll) OR a page event. Conditions (ANDed): urlContains, hasModal, hasCaptcha, notLoading, pendingDialogsGt, selector (CSP-safe), script (JS expr), timeoutMs, pollMs. Event mode: event:"dialog_open|dialog_close|navigation|network|form_update|any".',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       urlContains: z.string().optional(),
       hasModal: z.boolean().optional(),
       hasCaptcha: z.boolean().optional(),
@@ -1523,6 +1531,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'screenshot', {
     description: 'Capture the visible tab. No debug port, no bot-detection surface. (chrome.tabs.captureVisibleTab, with a chrome.debugger fallback the result reports via mode=). Returns {dataUrl, mime} for a vision model. For pages the structured tree can\'t fully represent.',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       format: z.enum(['png', 'jpeg']).optional().describe('Default png'),
       quality: z.number().optional().describe('JPEG quality 0-100 (default 80)'),
     },
@@ -1546,6 +1555,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'press_key', {
     description: 'Press key(s) with modifiers: press_key("c",["ctrl"]) = Ctrl+C, press_key("Tab",["shift"]) = Shift+Tab. Optional ref target (default: focused element).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       key: z.string().describe('Key name e.g. "Enter", "Tab", "Escape", "c", "ArrowDown"'),
       ref: z.string().optional().describe('Element ref to target'),
       modifiers: z.array(z.enum(['ctrl', 'shift', 'alt', 'meta'])).optional(),
@@ -1556,6 +1566,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'dialog', {
     description: 'Resolve dialogs. JS dialogs (alert/confirm/prompt — captured, non-blocking): action:"accept"|"dismiss" + index? + value? (prompt answer). OS-level dialogs (basic-auth, print — unreachable by DOM): keystroke:true + key:"enter|escape|tab|space|f5|ctrl+c" + optional value typed first (e.g. credentials).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       action: z.enum(['accept', 'dismiss']).optional().describe('JS-dialog resolution'),
       index: z.number().optional().describe('Which captured dialog (default newest)'),
       value: z.string().optional().describe('Prompt answer / text typed before keystroke'),
@@ -1619,6 +1630,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'network_log', {
     description: 'Captured fetch/XHR since last call (call once to start, again after interactions). Returns URLs, methods, statuses, response bodies (truncated). clear, maxEntries.',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       clear: z.boolean().optional().describe('Clear log after returning (default true)'),
       maxEntries: z.number().optional().describe('Default 50'),
     },
@@ -1628,6 +1640,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'console_log', {
     description: 'Captured browser console + JS errors since last call (console.log/warn/error/info/debug + window.onerror + unhandledrejection, ring buffer 300). Call once to start capturing, then again after an interaction that "does nothing" to read what the page JS is complaining about. clear, maxEntries (default 100).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       clear: z.boolean().optional().describe('Clear the buffer after returning (default true)'),
       maxEntries: z.number().optional().describe('Max entries to return (default 100)'),
     },
@@ -1640,6 +1653,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'cookies', {
     description: 'Cookie session manager: action:"list" (metadata for a url domain — names, expiry, httpOnly, secure; NO values) | "get" (one cookie WITH value — for session transplant) | "clear" (one cookie by name) | "clear_all" (all cookies for the domain). url is the page/API origin.',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       action: z.enum(['list', 'get', 'clear', 'clear_all']).optional().describe('Default list'),
       url: z.string().describe('Page/API origin e.g. https://hackerone.com'),
       name: z.string().optional().describe('Cookie name (get/clear)'),
@@ -1743,6 +1757,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'clipboard', {
     description: 'System clipboard: action:"copy" (text) | "read" (needs clipboardRead permission; best-effort).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       action: z.enum(['copy', 'read']).describe('Clipboard operation'),
       text: z.string().optional().describe('copy: text to copy'),
     },
@@ -1755,6 +1770,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'inspect', {
     description: 'Element introspection without vision: kind:"element" (is ref alive? re-resolve after re-render → {found,tag,text,locator}) | "geometry" (bounding box, z-depth, position vs real scroll container; ref or selector) | "relation" (refA vs refB: above/below/overlaps/covers — modal-over-form detection).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       kind: z.enum(['element', 'geometry', 'relation']).describe('What to inspect'),
       ref: z.string().optional().describe('element/geometry: element ref'),
       selector: z.string().optional().describe('geometry: CSS selector alternative'),
@@ -1997,6 +2013,12 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       tag: z.string().optional().describe('Element tag'),
       region: z.string().optional().describe('Region substring (region is derived from the nearest ancestor the PAGE labelled)'),
       interactive: z.boolean().optional().describe('true = only controls (derived: focusable || field || role present)'),
+      // ★ DECLARED 2026-10-01. These two were accepted-looking but ABSENT: not in the schema
+      // and not in the handler's filter list, so find{field:true} returned every element on
+      // the page (103 of 103 on the workbench, html and style included) while looking like a
+      // filtered answer. Both layers fixed, and a test now pins the schema against the list.
+      field: z.boolean().optional().describe('true = only form controls (platform-reported: the element is an input/select/textarea/etc.)'),
+      focusable: z.boolean().optional().describe('true = only focusable elements (el.tabIndex >= 0 — the browser own computation)'),
       vp: z.boolean().optional().describe('true = in viewport only'),
       branchDepth: z.number().optional().describe('How many ancestors to include in the branch chain (default 5)'),
       indices: z.array(z.number()).optional().describe('Fetch exact records by inventory index — this is how you pull the detail for indices a DIFF block named.'),
@@ -2010,7 +2032,12 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     if (!ens.entry) return textResult({ success: false, error: ens.error || ('could not map tab ' + tabId) });
     const e = ens.entry;
     const filter = {};
-    for (const k of ['query', 'role', 'attr', 'tag', 'region', 'interactive', 'vp', 'limit', 'indices']) {
+    // ★ `field` and `focusable` WERE MISSING HERE (found 2026-10-01 by running find{field:true}
+    // on the workbench: it returned 103 of 103 elements — html, style, head — because the
+    // filter was never copied through, and sliceSnapshot only filters on keys it is given.
+    // A filter the tool ACCEPTS in its schema but never applies is worse than no filter: it
+    // answers confidently and wrongly. The test pins this list against the schema.
+    for (const k of ['query', 'role', 'attr', 'tag', 'region', 'interactive', 'vp', 'limit', 'indices', 'field', 'focusable']) {
       if (o[k] !== undefined) filter[k] = o[k];
     }
     const s = sliceSnapshot(e.snap, filter);
@@ -2042,6 +2069,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'real_activate_tab', {
     description: 'OS-INPUT ONLY (before real_click/real_paste) — page ops NEVER need this. REAL OS click on a Chrome tab pill via UIA (pywinauto): makes the tab the OS-active one and gates on the window title. address the tab EITHER by match (title substring) OR by index (0-based position) — and on an SPA you MUST use index: x.com reports EVERY /compose/post tab as "Home / X" through UIA, so a title match is ambiguous there (the tool now refuses with the tab list instead of activating the wrong one). WHEN YOU NEED IT: only before OS-LEVEL INPUT (real_click / real_paste), because SendInput lands on whatever window is frontmost. You do NOT need it for page ops — navigate, explore_page, read, click(ref), type_text, inspect, form and main_world all travel over tabs.sendMessage by tabId and work on a backgrounded tab (measured 2026-09-20: bound an active:false tab, no activation, explore_page returned 29 live matches). CHEAPER ALTERNATIVE, no OS input at all: tabs{action:"bind", tabId, activate:true} makes a tab OS-active by tabId and needs no title — prefer it unless you specifically need this. It CANNOT fix a minimised Chrome window either — a UIA click needs the window on screen; restore that with tabs{action:"focus"} instead. Do not reach for it as a liveness remedy for a hang: diagnose a minimised/occluded window or a parked native dialog first. Requires the user\'s foreground — never use it for routine page work.',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       match: z.string().optional().describe('Tab title substring to match (omit when using index)'),
       index: z.number().optional().describe('Activate the Nth open tab, 0-based — REQUIRED when several tabs share a title (SPAs do: on x.com every /compose/post tab reads "Home / X"). Pair with tabs{action:"list"}, which enumerates tabs in the same order.'),
       gate: z.string().optional().describe('Expected window title after activation (default: match)'),
@@ -2051,6 +2079,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'real_click', {
     description: 'GENUINE OS-level click (SendInput) at VIEWPORT coords (x,y) — bypasses synthetic-click-ignoring submit buttons (React/Lit/CustomElement). Title-gated: gate must match the active Chrome tab title or the click is refused (multi-agent churn protection). Get coords from inspect{kind:"geometry"}. origin: override doc-origin Y if the auto-measure fails (default measured via UIA).',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       x: z.number().describe('Viewport X (from inspect geometry: vp.x + vp.w/2)'),
       y: z.number().describe('Viewport Y (from inspect geometry: vp.y + vp.h/2)'),
       gate: z.string().describe('Expected active-tab title substring (gate)'),
@@ -2061,6 +2090,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   reg(server, 'real_paste', {
     description: 'GENUINE paste into a focused editor (click at VIEWPORT coords + system clipboard + real Ctrl+V) — for Lexical/Draft.js/ProseMirror editors that revert synthetic paste events. text: content to paste; x,y: viewport coords of the editor (inspect geometry center); gate: expected active-tab title substring. Verify after with evaluate extract:"html".',
     inputSchema: {
+      tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       x: z.number().describe('Editor viewport X center'),
       y: z.number().describe('Editor viewport Y center'),
       text: z.string().describe('Text to paste'),

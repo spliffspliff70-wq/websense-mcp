@@ -2252,5 +2252,76 @@ test('dispatchers: the two copies of a duplicated op must not drift apart', () =
   }
 });
 
+test('find: every filter the handler applies must ALSO be declared in the schema', () => {
+  // ★ Found 2026-10-01 by running find{field:true} on the workbench and getting 103 of 103
+  // elements back — html, head, style included. `field` and `focusable` were in NEITHER the
+  // tool schema NOR the handler's filter-copy list, so the filter silently did nothing and
+  // the answer looked filtered. That is worse than having no filter at all.
+  const src = SRV_SRC;
+  const m = src.match(/reg\(server, 'find',[\s\S]*?for \(const k of \[([^\]]+)\]\)/);
+  assert(m, 'the find handler filter list must be findable');
+  const applied = m[1].split(',').map((s) => s.trim().replace(/['"]/g, '')).filter(Boolean);
+
+  const schemaBlock = src.match(/reg\(server, 'find', \{[\s\S]*?inputSchema: \{[\s\S]*?\n    \}/);
+  assert(schemaBlock, 'the find schema must be findable');
+  const schemaText = schemaBlock[0];
+
+  const missing = applied.filter((k) => !new RegExp('^\\s*' + k + ':', 'm').test(schemaText));
+  assert(missing.length === 0,
+    'these filters are applied by the handler but NOT declared in the schema, so they can be '
+    + 'stripped before the handler sees them: ' + missing.join(', '));
+
+  // And the two that were actually broken must be present, in both places.
+  for (const k of ['field', 'focusable']) {
+    assert(applied.includes(k), k + ' must be in the handler filter list');
+    assert(new RegExp('^\\s*' + k + ':', 'm').test(schemaText), k + ' must be in the schema');
+  }
+});
+
+test('page ops: every tool that can act on a tab must DECLARE tabId in its schema', () => {
+  // ★ Found 2026-10-01 by running a real task on the workbench: type_text{ref:'#txt',
+  // tabId:328034510} returned "Element not found" and its auto-DIFF came back for a DIFFERENT
+  // SITE — the session's tab. `tabId` was not declared in type_text's inputSchema, so zod
+  // stripped it before the handler ran, the handler fell back to sessionTabOf(), and the op
+  // silently acted on a tab the caller had not chosen.
+  // That is the worst failure shape available: the parameter is documented, accepted without
+  // complaint, and inert — so every page op can land somewhere you did not pick and report a
+  // result you cannot attribute. Only 9 of 33 tools declared it; 28 do now.
+  const src = SRV_SRC;
+
+  // Any tool whose body routes through the hub for a PAGE op must accept a tab.
+  const PAGE_OPS = [
+    'click', 'type_text', 'form', 'read', 'reveal', 'scroll', 'press_key', 'inspect',
+    'wait', 'dialog', 'screenshot', 'network_log', 'console_log', 'cookies', 'clipboard',
+    'real_paste', 'real_click', 'real_activate_tab', 'status',
+    'evaluate', 'ax', 'main_world', 'page_snapshot', 'page_slice', 'browse', 'find', 'navigate', 'tabs',
+  ];
+
+  const missing = [];
+  for (const name of PAGE_OPS) {
+    const needle = "reg(server, '" + name + "'";
+    const at = src.indexOf(needle);
+    if (at < 0) { missing.push(name + ' (NOT REGISTERED)'); continue; }
+    const sm = /inputSchema:\s*\{/.exec(src.slice(at));
+    if (!sm) { missing.push(name + ' (no inputSchema)'); continue; }
+    const start = at + sm.index + sm[0].length;
+    let depth = 1, i = start;
+    while (i < src.length && depth > 0) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}') depth--;
+      i++;
+    }
+    const block = src.slice(start, i);
+    if (!/\btabId\s*:/.test(block)) missing.push(name);
+  }
+  assert(missing.length === 0,
+    'these page ops do not declare tabId, so a tabId passed to them is silently stripped and '
+    + 'the op lands on the session tab instead: ' + missing.join(', '));
+
+  // And the failure must stay documented where the next reader will look.
+  assert(/zod stripped it before the handler ran|silently stripped/.test(src) ||
+         /tabId/.test(src), 'tabId must be declared');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
