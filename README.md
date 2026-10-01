@@ -155,7 +155,7 @@ Live DOM
 
 ## Known limitations (honest)
 
-- **A trusted drag does not complete.** The trusted path produces trusted `dragstart`/`dragenter`/`dragover` but **no `drop`**, so a drag does not finish. The plain `drag` mode fires the whole sequence, but its events are **not** trusted, so a page checking `isTrusted` ignores them.
+- **Trusted drag works end-to-end** (verified on the fixture): `act{action:"drag", how:"trusted"}` produces trusted `dragstart`/`dragenter`/`dragover` **and a real `drop`**, from a background tab, with both ends scrolled into view automatically. The plain `drag` mode still fires the whole sequence but its events are **not** trusted — use `how:"trusted"` when the page checks `isTrusted`.
 - **OS-click equivalence is unproven.** `act{how:"trusted"}` is the browser's own input pipeline; it is not proven byte-identical to a real OS click. `real_click` (Windows `SendInput`) is the only genuinely OS-level path.
 - **Canvas / WebGL coordinate clicks work (verified within 1px) but are not trusted events.** Use `act{action:"click", x, y}`; the page receives an untrusted click at the right pixel.
 - **Chrome-only.** MV3 + offscreen WebSocket bridge; no Firefox code.
