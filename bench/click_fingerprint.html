@@ -122,6 +122,16 @@ bench.innerHTML =
   '</div>' +
   '<div id="fp-bigblock" style="display:none;height:200px;background:#f2f6fa"></div>' +
   '<div id="fp-shifters"></div>' +
+  // ★ THE FRAME + DRAG CASES (added 2026-10-01). Two areas I had NO evidence about, which I had been
+  // listing as "untested" instead of testing. Same-origin on purpose: a cross-origin frame is a
+  // different problem (nothing in the page can reach it at all, and the tool reports that honestly).
+  '<div class="row"><b>frame:</b></div>' +
+  '<iframe id="fp-frame" data-testid="fp-frame" src="frame_child.html" style="width:420px;height:150px;border:1px solid #ccd"></iframe>' +
+  '<div id="fp-frame-echo" data-testid="fp-frame-echo">frame said: (nothing yet)</div>' +
+  '<div class="row"><b>drag:</b> <span id="fp-drag-state" data-testid="fp-drag-state">drop: none</span></div>' +
+  '<div id="fp-drag-src" data-testid="fp-drag-src" draggable="true" style="display:inline-block;padding:6px 10px;background:#e8f0fe;border:1px solid #9bb">drag me</div>' +
+  '<div id="fp-drop" data-testid="fp-drop" style="margin-top:6px;padding:22px;border:2px dashed #9bb;text-align:center">drop here</div>' +
+  '<div id="fp-shifters"></div>' +
   // ★ THE KEYBOARD CASE (added 2026-10-01). ONE text input and no submit button, which is exactly
   // the implicit-submission case an Enter triggers — and the case the old press_key faked by
   // calling form.requestSubmit() because the synthetic Enter ran no default action at all. The
@@ -138,6 +148,23 @@ document.getElementById('fp-form').addEventListener('submit', (e) => {
   e.preventDefault();
   window.__submits++;
   document.getElementById('fp-submits').textContent = String(window.__submits);
+});
+
+// ★ DRAG — the dragstart .. drop triad a real drag produces, with the trust flag recorded so a
+// synthetic drag cannot masquerade as one. Capture phase, so nothing can hide from it.
+window.__drag = [];
+['dragstart','drag','dragenter','dragover','dragleave','drop','dragend'].forEach(function (t) {
+  document.addEventListener(t, function (ev) {
+    window.__drag.push({ type: t, isTrusted: ev.isTrusted, target: (ev.target && (ev.target.id || ev.target.tagName)) || null, hasDataTransfer: !!ev.dataTransfer });
+    document.getElementById('fp-drag-state').textContent = 'drop: ' + window.__drag.filter(function (d) { return d.type === 'drop'; }).length + ' drop event(s)';
+  }, true);
+});
+window.__dragDump = function () { return window.__drag; };
+
+// ★ FRAME ECHO — the frame posts back when its button is clicked, so a click that LANDS inside the
+// frame is provable from the parent even if the parent's collector cannot see into the frame.
+window.addEventListener('message', function (ev) {
+  if (ev.data && ev.data.from === 'frame') document.getElementById('fp-frame-echo').textContent = 'frame said: clicks ' + ev.data.clicks;
 });
 
 const shifters = document.getElementById('fp-shifters');

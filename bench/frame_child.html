@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>frame child</title></head>
+<body style="font-family:system-ui;padding:12px">
+  <p id="frame-text">inside the frame</p>
+  <button id="frame-btn" data-testid="frame-btn">Frame button</button>
+  <input id="frame-q" data-testid="frame-q" type="text" placeholder="frame field">
+  <div id="frame-log" data-testid="frame-log">clicks: 0</div>
+  <script>
+    let n = 0;
+    document.getElementById('frame-btn').addEventListener('click', () => {
+      n++;
+      document.getElementById('frame-log').textContent = 'clicks: ' + n;
+      // and tell the parent, so the parent can prove the click happened even if the parent's
+      // collector cannot see into the frame
+      try { parent.postMessage({ from: 'frame', clicks: n }, '*'); } catch (e) {}
+    });
+    window.__frameClicks = () => n;
+  </script>
+</body>
+</html>
