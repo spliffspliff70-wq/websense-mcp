@@ -11,7 +11,7 @@ import { summarizeRead } from './src/summarize.js';
 import { uploadVerdict } from './src/upload.js';
 import { SessionManager } from './src/session.js';
 import { diffScan, identityKey, disambiguate, fieldChanges } from './src/incr.js';
-import { buildIndex, sliceSnapshot, branchChain } from './src/snapshot.js';
+import { buildIndex, sliceSnapshot, branchChain, COLLECTOR } from './src/snapshot.js';
 import { DIFF_COLLECTOR } from './src/diff-collector.js';
 
 let passed = 0, failed = 0;
@@ -517,8 +517,7 @@ const HUB_SRC = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
 const SRV_SRC = readFileSync(new URL('./src/server.js', import.meta.url), 'utf8');
 // The page-side collector is a STRING, so a syntax error inside it is invisible to
 // node --check (that is exactly how a broken `rec reg = 0;` line once shipped). Import it
-// so it can be compiled for real, below.
-import { COLLECTOR } from './src/snapshot.js';
+// so it can be compiled for real, below. (COLLECTOR is imported once, at the top.)
 // ── 2026-09-11b: performance + reload-path guards ───────────────────────────
 // Measured baseline these exist to prevent from returning: explore_page's DEFAULT
 // call had no action cap, walked every DOM node in document order, read
@@ -2055,6 +2054,24 @@ test('snapshot: elements carry a parent pointer, and branchChain walks it', () =
   // A depth limit must bound it, and a root must yield an empty chain rather than loop.
   assert.strictEqual(branchChain(snap, snap.elements[2], 1).length, 1, 'depth must bound the walk');
   assert.strictEqual(branchChain(snap, snap.elements[0], 5).length, 0, 'a root has no branch');
+});
+
+test('collectors: NO BACKTICKS inside the template-literal collector bodies', () => {
+  // ★ THIS HAS NOW BIT SIX TIMES (2026-10-01). COLLECTOR and DIFF_COLLECTOR are TEMPLATE
+  // LITERALS holding page-side functions, so a backtick anywhere inside — including in an
+  // ordinary explanatory comment — terminates the literal and breaks the file. One such
+  // commit was made and only caught because the next `npm test` crashed. The suite must
+  // catch it, not luck.
+  for (const f of ['./src/snapshot.js', './src/diff-collector.js']) {
+    const src = readFileSync(new URL(f, import.meta.url), 'utf8');
+    const m = src.match(/= `([\s\S]*?)`;/);
+    assert(m, f + ': a template-literal collector must exist');
+    assert(!m[1].includes('`'),
+      f + ': the collector body must contain NO backticks (it is itself a template literal)');
+  }
+  // And the modules must actually load — a broken literal would not even parse.
+  assert(typeof COLLECTOR === 'string' && COLLECTOR.length > 200, 'COLLECTOR must be a real string');
+  assert(typeof DIFF_COLLECTOR === 'string' && DIFF_COLLECTOR.length > 200, 'DIFF_COLLECTOR must be a real string');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
