@@ -802,25 +802,63 @@ function sendKeysForWindows(key) {
 // ★ ONE FRAME-AWARE RESOLVER (2026-10-01, Ali: "for the click and for the drag use the click you
 // used on x.com for the + Add button"). It finds the element ANYWHERE, including inside same-origin
 // iframes (document.querySelector does NOT descend into frames — that is why the frame click kept
-// failing), scrolls it into view (a rect below the fold receives no browser input at all), and
-// converts the rect into TOP-viewport coordinates by walking up through frameElement.
+// failing), brings it into view when it is not already clickable (a rect below the fold receives no
+// browser input at all), and converts the rect into TOP-viewport coordinates by walking up through
+// frameElement.
+//
+// ★ AND A CORRECT BOX CAN STILL BE UNCLICKABLE (2026-10-01). Measured on bench/click_fingerprint.html:
+// the frame's button is at top-viewport y=1727 in a 1271px-tall window, so the resolved rect was
+// RIGHT and the click could not land — elementFromPoint at it answers null. After the reveal the
+// same button is at (92, 881), elementFromPoint answers IFRAME#fp-frame, and the page's own counter
+// goes 0 -> 1. A viewport coordinate is only usable if it is INSIDE the viewport.
+//
+// ★ THE REVEAL IS CONDITIONAL, AND THAT IS THE POINT. An unconditional scrollIntoView{block:'center'}
+// also lands the frame click, but it MOVES THE USER'S TAB on every trusted click — measured on the
+// same fixture: clicking its already-visible #btn scrolled the page 0 -> 547. A background tool that
+// repositions the tab it is not supposed to disturb is the same class of side effect as stealing
+// focus, so the scroll happens only when the CENTRE is outside the viewport.
 const PAGE_CENTRE_FUNC = 'function(){' +
   'var SEL=' + 'SELV' + ';' +
   'function find(s,d){var e=d.querySelector(s);if(e)return e;var fs=d.querySelectorAll("iframe");' +
   'for(var i=0;i<fs.length;i++){try{if(fs[i].contentDocument){var r=find(s,fs[i].contentDocument);if(r)return r;}}catch(x){}}return null;}' +
   'var el=find(SEL,document);if(!el)return null;' +
-  'el.scrollIntoView({block:"center"});' +
-  'var r=el.getBoundingClientRect();var x=r.left+r.width/2,y=r.top+r.height/2,inFrame=false;' +
+  // topRect(): the element rect, converted to TOP-viewport space by walking frameElement up to the
+  // top window. Re-read AFTER any scroll — the old version measured, then scrolled, and could have
+  // shipped the pre-scroll number.
+  'function topRect(){var r=el.getBoundingClientRect();var x=r.left,y=r.top,inF=false;' +
   'var w=el.ownerDocument.defaultView;' +
-  'while(w&&w!==window){try{var fe=w.frameElement,f2=fe.getBoundingClientRect();x+=f2.left;y+=f2.top;inFrame=true;w=w.parent;}catch(x2){break;}}' +
-  'return {x:Math.round(x),y:Math.round(y),inFrame:inFrame};}';
+  'while(w&&w!==window){try{var fe=w.frameElement,f2=fe.getBoundingClientRect();x+=f2.left;y+=f2.top;inF=true;w=w.parent;}catch(e2){break;}}' +
+  'return {x:x,y:y,w:r.width,h:r.height,inFrame:inF};}' +
+  'var a=topRect();' +
+  'var cx=a.x+a.w/2,cy=a.y+a.h/2;' +
+  'var off=(cx<0||cy<0||cx>window.innerWidth||cy>window.innerHeight);' +
+  'if(SCROLLV&&off){el.scrollIntoView({block:"center"});}' +
+  'var t=(SCROLLV&&off)?topRect():a;' +
+  'return {x:Math.round(t.x+t.w/2),y:Math.round(t.y+t.h/2),inFrame:t.inFrame,offViewport:off,scrolled:!!(SCROLLV&&off)};}';
+
+// ★ THE REPLY IS JSON, SO IT IS READ AS JSON (2026-10-01). pageCentre used to pull the two numbers
+// straight out of the reply TEXT with /x[^-\d]{0,10}(-?\d+)/ — a parse that only works because of
+// which character class the punctuation happens to fall into, and that FAILED OUTRIGHT on the
+// neighbouring flag: it reported inFrame:false for a button that IS inside a frame, because its
+// pattern for that was /inFrame[^:]{0,4}true/ and the text reads "inFrame":true — the class excluded
+// the very colon it had to cross. A coordinate read out of a regex is a coordinate nobody can trust,
+// so the payload is parsed and the numbers are TYPE-CHECKED.
+function mainWorldValue(raw) {
+  const text = ((raw && raw.content && raw.content[0] && raw.content[0].text) || '');
+  let j = null;
+  try { j = JSON.parse(text); } catch (_) { return null; }
+  // main_world_exec answers with a PER-FRAME ENVELOPE: {success, results:[{frameId, result, error}]}
+  const r = (j && Array.isArray(j.results) && j.results[0]) || null;
+  return r ? r.result : (j && j.result !== undefined ? j.result : null);
+}
 async function pageCentre(sel, tabId, doScroll) {
   const raw = await callTool('main_world', { tabId: tabId, verify: false,
-    func: PAGE_CENTRE_FUNC.replace('SELV', JSON.stringify(String(sel))).replace('el.scrollIntoView({block:"center"});', doScroll ? 'el.scrollIntoView({block:"center"});' : '') });
-  const txt = ((raw && raw.content && raw.content[0] && raw.content[0].text) || '');
-  const m = txt.match(/x[^-\d]{0,10}(-?\d+)[\s\S]{0,90}?y[^-\d]{0,10}(-?\d+)/);
-  if (!m) return null;
-  return { x: Number(m[1]), y: Number(m[2]), w: 2, h: 2, fromPage: true, inFrame: /inFrame[^:]{0,4}true/.test(txt) };
+    func: PAGE_CENTRE_FUNC.replace('SELV', JSON.stringify(String(sel)))
+                          .replace('SCROLLV', doScroll ? 'true' : 'false') });
+  const p = mainWorldValue(raw);
+  if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return null;
+  return { x: p.x, y: p.y, w: 2, h: 2, fromPage: true, inFrame: !!p.inFrame,
+           offViewport: !!p.offViewport, scrolled: !!p.scrolled };
 }
 
 async function callTool(name, args) {
@@ -1879,18 +1917,30 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       // (it runs in the main frame only).
       vpResolved = (o.ref || o.selector) ? await pageCentre(o.ref || o.selector, tabId, true) : null;
       const g = vpResolved ? null : await getActiveHub().send({ type: 'geometry', ref: o.ref, selector: o.selector, tabId });
-      const box = vpResolved ? null : unwrapRelay(g);
+      // ★ `box` MUST BE THE OUTER ONE (2026-10-01). This used to read `const box = …`, which
+      // SHADOWED the variable the caller tests: the geometry answer was scoped to the try block, so
+      // `box` stayed null at every use below and the failure reply could not show WHY the resolve
+      // failed. One binding per name.
+      if (g) box = unwrapRelay(g);
     } catch (e) { box = { error: String((e && e.message) || e) }; }
     let vp = vpResolved || (box && box.viewport);
     if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
       const ent = getSnapshot(tabId);
       const want = String(o.ref || o.selector || "");
-      const hit = ent && (ent.elements || []).find((r2) => r2.loc === want);
+      // ★ THE ELEMENTS LIVE AT ent.snap.elements, NOT ent.elements (2026-10-01). getSnapshot answers
+      // with the store ENTRY {at, seq, snap, index, actionsSinceCollect}, so `ent.elements` was
+      // undefined on every read and this fallback had NEVER ONCE FIRED — the documented last resort
+      // for a control the live resolver cannot reach was dead code, and the reply blamed the element
+      // for a lookup that never ran. The collector writes rec.x/rec.y already converted into
+      // TOP-viewport space (frame offset included), which is exactly what a viewport click needs.
+      const els = (ent && ((ent.snap && ent.snap.elements) || ent.elements)) || [];
+      const hit = els.find((r2) => r2.loc === want);
       if (hit && hit.w > 0 && hit.h > 0) vp = { x: (hit.x + (hit.w >> 1)) - 1, y: (hit.y + (hit.h >> 1)) - 1, w: 2, h: 2, fromInventory: true };
     }
     if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
       return textResult({ success: false, effect: 'failed', error: 'trusted_click: could not resolve a clickable box for that element',
-        detail: JSON.stringify(box).slice(0, 240), escalation: { recommended: 're_read', reason: 'no box in the MAIN frame — hidden, detached, zero-sized, OR inside an IFRAME. The collector and the box resolver see only the main frame, so a control in a frame is not reachable this way; list frames with tabs{action:"frames"}' } });
+        ...(box ? { detail: JSON.stringify(box).slice(0, 240) } : {}),
+        escalation: { recommended: 're_read', reason: 'no box for that element, and the frame-aware PAGE resolver could not find it either. Same-origin frame content IS reachable now — the resolver walks every iframe document the way the collector does and converts the rect into TOP-viewport space, so what is left is a CROSS-ORIGIN frame (nothing in the page can read it, and no click can be aimed inside it), OR inside an IFRAME that is not same-origin, OR an element that is hidden, detached or zero-sized. Address it by the loc find gives you, or list frames with tabs{action:"frames"}' } });
     }
     const x = Math.round(vp.x + vp.w / 2), y = Math.round(vp.y + vp.h / 2);
     const before = await readPageState(tabId);
