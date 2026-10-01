@@ -24,7 +24,7 @@ node tools/export-guide.mjs        # rewrites the fenced block below
 ---
 
 ```
-WebSense MCP — Guide (34 consolidated tools)
+WebSense MCP — Guide (35 consolidated tools)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
@@ -39,7 +39,7 @@ A NAVIGATION IS THE STRONGEST CONFIRMATION AND IT IS NOT IN THE GROUPS: when cli
 
 FULL PAGE MAP vs A SLICE: browse / page_snapshot collect a LOSSLESS inventory of the page (nothing filtered out — not interactive-only, not in-viewport-only) and return only a small INDEX (counts + the dimensions you can slice by). find and page_slice then fetch only what you ask for, at full fidelity. The inventory is scroll-stable: it does not churn the way a viewport-filtered scan does, because it is not a subset that changes as you scroll — which is also why the DIFF can tell viewport churn from real mutation. Elements carry a parent pointer, so the BRANCH an element sits in is data you can walk, not a diagram you have to render. Cost measured on github.com/nodejs/node: index 690 B vs a 116,573 B explore_page, over 3,842 elements.
 
-THE 34 TOOLS — what each absorbed from the old 65-tool surface:
+THE 35 TOOLS — what each absorbed from the old 65-tool surface:
   websense_guide   this guide
   browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + the vocabulary. Replaces navigate+page_snapshot+map read.
   find             TOOL 2 — search the stored inventory; each hit gives WHERE (region, position, branch chain resolved from parent pointers) and WHAT (the page's own role/name/attrs/state). Returns ALL matches.
@@ -47,6 +47,7 @@ THE 34 TOOLS — what each absorbed from the old 65-tool surface:
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
   click            click ref (default) | mode:"hover" | mode:"rightclick" | mode:"drag" (fromRef/toRef) | x,y for canvas (old click_xy)
   trusted_click    click through the BROWSER'S OWN input pipeline (chrome.debugger + Input.dispatchMouseEvent) instead of dispatching an event. The page receives exactly what a real mouse produces — click isTrusted:true, detail:1, the real clientX/Y, and the move that precedes the press applies :hover and feeds mousemove — and default actions run the way the browser runs them. Still background: no OS focus, no window activation, no bring-to-front. Measured on bench/click_fingerprint.html across a button, a checkbox, a link and an input: every one reports isTrusted=true/detail=1/real coordinates, and every one's default action fires. Reach for it when a page checks isTrusted, reads detail/coordinates/buttons, is a canvas or a custom control, or when click reports success and the page ignores it. Pass ref — it resolves the element box itself.
+  trusted_key      type and/or press a key through the BROWSER'S OWN input pipeline (chrome.debugger + Input.dispatchKeyEvent) instead of dispatching a KeyboardEvent. The page receives trusted key events and the BROWSER runs the DEFAULT ACTION — an Enter in a form SUBMITS it, Tab moves focus — instead of us guessing at it with form.requestSubmit(). Still background: no OS focus, no window activation, no bring-to-front. One call does a fill AND a submit: text types a string key by key, key presses one key after it (the usual fill-then-Enter). Pass ref to focus the target first — the reply carries the focus outcome, because a key with no focus goes to body and lands nowhere, which looks exactly like "the key did nothing". Reach for it where press_key lands nothing silently, where a key must trigger a page behaviour, or where the page checks isTrusted. Measured: a fill+Enter on the fixture reports isTrusted:true and the form's submit EVENT fires.
 
 CLICK FIDELITY — measured on bench/click_fingerprint.html, field by field, so you know which to reach for:
   Both paths RUN DEFAULT ACTIONS. That was worth measuring: click finishes with

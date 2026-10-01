@@ -495,6 +495,34 @@ try {
   }
 } catch (_) {}
 
+// ★ ONE PREPARATION FOR EVERY TRUSTED-INPUT OP (2026-10-01).
+// Attach, keep-alive, and the two emulation calls that make a BACKGROUND renderer behave as
+// focused and active. Both are needed by every trusted op, and a second copy of this is a second
+// chance to get it wrong — the failure mode this codebase has paid for most often. A new trusted
+// op (keyboard, paste, drag) calls this; it does not re-implement it.
+async function __dbgPrepare(tabId) {
+  const out = { attached: false, attachMs: 0, emulation: {} };
+  if (!__dbgAttached.has(tabId)) {
+    const tA = Date.now();
+    try { await chrome.debugger.attach({ tabId }, '1.3'); out.attached = true; }
+    catch (e) {
+      const m = String((e && e.message) || e);
+      if (!/already attached/i.test(m)) throw e;   // someone else's attachment is also fine
+    }
+    out.attachMs = Date.now() - tA;
+  }
+  __dbgKeepAlive(tabId);
+  try {
+    await chrome.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+    out.emulation.focusEmulation = true;
+  } catch (e) { out.emulation.focusEmulationError = String((e && e.message) || e); }
+  try {
+    await chrome.debugger.sendCommand({ tabId }, 'Page.setWebLifecycleState', { state: 'active' });
+    out.emulation.lifecycle = 'active';
+  } catch (e) { out.emulation.lifecycleError = String((e && e.message) || e); }
+  return out;
+}
+
 async function handleTabControl(action, payload) {
   switch (action) {
     case 'main_world_exec': {
@@ -569,33 +597,18 @@ async function handleTabControl(action, payload) {
       let attachMs = 0;
       let ok = false;
       try {
-        if (!__dbgAttached.has(tClick)) {
-          const tA = Date.now();
-          try { await chrome.debugger.attach({ tabId: tClick }, '1.3'); didAttach = true; }
-          catch (e) {
-            const m = String((e && e.message) || e);
-            if (!/already attached/i.test(m)) throw e;
-          }
-          attachMs = Date.now() - tA;
-        }
-        __dbgKeepAlive(tClick);
-        // ★ MAKE THE RENDERER BEHAVE AS A FOCUSED, ACTIVE PAGE (2026-10-01). Measured on a
-        // background tab: the page reported document.visibilityState:'hidden', the mouseMoved
-        // command took ~5,080ms to return (renderer throttling) and the PRESS WAS DROPPED
-        // ENTIRELY — no pointerdown/mousedown/click ever arrived, so a "trusted" click did
-        // nothing at all. Emulation.setFocusEmulationEnabled simulates a focused and active page
-        // and Page.setWebLifecycleState('active') lifts the frozen/idle lifecycle, so the
-        // browser's input pipeline treats a background tab as live. Crucially this needs NO
-        // bring-to-front, so the user's active tab is never touched.
-        const emu = {};
-        try {
-          await chrome.debugger.sendCommand({ tabId: tClick }, 'Emulation.setFocusEmulationEnabled', { enabled: true });
-          emu.focusEmulation = true;
-        } catch (e) { emu.focusEmulationError = String((e && e.message) || e); }
-        try {
-          await chrome.debugger.sendCommand({ tabId: tClick }, 'Page.setWebLifecycleState', { state: 'active' });
-          emu.lifecycle = 'active';
-        } catch (e) { emu.lifecycleError = String((e && e.message) || e); }
+        // ★ THE PREPARATION IS SHARED WITH EVERY OTHER TRUSTED OP (__dbgPrepare).
+        // What it does and why it is not optional: on a background tab the page reports
+        // document.visibilityState:'hidden', mouseMoved took ~5,080ms to return (renderer
+        // throttling) and the PRESS WAS DROPPED ENTIRELY — no pointerdown/mousedown/click arrived,
+        // so a "trusted" click did nothing while its transport envelope said success. After
+        // Emulation.setFocusEmulationEnabled(true) + Page.setWebLifecycleState('active') the same
+        // click is ~151ms and lands, and it needs NO bring-to-front — the user's active tab is
+        // never touched.
+        const prep = await __dbgPrepare(tClick);
+        didAttach = prep.attached;
+        attachMs = prep.attachMs;
+        const emu = prep.emulation;
         const base = { x: cx, y: cy, button: btn, clickCount: count, pointerType: 'mouse', modifiers: mods };
         const gap = (ms) => new Promise((r) => setTimeout(r, ms));
         const tMove = Date.now();
@@ -629,6 +642,86 @@ async function handleTabControl(action, payload) {
         // clicks pays the ~5s attach once. On FAILURE it is released immediately — a broken
         // attachment must not sit there holding the infobar.
         if (!ok && didAttach) { try { await chrome.debugger.detach({ tabId: tClick }); } catch (_) {} }
+      }
+    }
+    case 'trusted_key': {
+      // ★ A GENUINELY TRUSTED KEY, IN THE BACKGROUND (2026-10-01).
+      // Same reason as trusted_click: a synthetic KeyboardEvent is untrusted, so it reaches the
+      // page's listeners and the browser runs NO DEFAULT ACTION. Measured on en.wikipedia.org: a
+      // dispatched Enter arrived with the right target ({key:'Enter', trusted:false}) and the form
+      // did NOT submit — and the old code worked around that by calling form.requestSubmit()
+      // itself, which is a GUESS about what the page would have done. Input.dispatchKeyEvent goes
+      // through the browser's own input pipeline, so the default action belongs to the browser.
+      //
+      // TWO SHAPES, one round trip each: payload.text types a string key by key (a form fill is
+      // one call, not one call per character), and payload.key presses a single named key. Both
+      // can be given together — the usual "fill this field and press Enter".
+      const tKey = parseInt(payload.tabId, 10);
+      if (!tKey) return { error: 'trusted_key: tabId required' };
+      const named = payload.key ? String(payload.key) : '';
+      const text = (payload.text === undefined || payload.text === null) ? '' : String(payload.text);
+      if (!named && !text) return { error: 'trusted_key: pass key and/or text' };
+      const mods = Number(payload.modifiers) || 0;
+      const t0 = Date.now();
+      let prep = null, ok = false, focusResult = null;
+      try {
+        prep = await __dbgPrepare(tKey);
+        // The renderer routes key events to its FOCUSED element, so the target must be focused
+        // first. focus() is a DOM call, not a key press — it needs no input pipeline and no OS
+        // focus — and the result is reported so a caller can tell "focused" from "refused".
+        if (payload.selector) {
+          const sel = JSON.stringify(String(payload.selector));
+          const r = await chrome.debugger.sendCommand({ tabId: tKey }, 'Runtime.evaluate', {
+            expression: '(function(){var e=document.querySelector(' + sel + ');'
+              + ' if(!e) return "not-found"; try { e.focus(); } catch (x) { return "focus-threw"; }'
+              + ' return (document.activeElement===e) ? "focused" : "focus-refused";})()',
+            returnByValue: true,
+          });
+          focusResult = r && r.result ? r.result.value : null;
+        }
+        // key / code / virtual-key for a printable character. US layout — what the renderer assumes.
+        const VK = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowUp: 38,
+          ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33,
+          PageDown: 34, ' ': 32 };
+        const forChar = (ch) => {
+          if (ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z') {
+            return { key: ch, code: 'Key' + ch.toUpperCase(), vk: ch.toUpperCase().charCodeAt(0), text: ch };
+          }
+          if (ch >= '0' && ch <= '9') return { key: ch, code: 'Digit' + ch, vk: ch.charCodeAt(0), text: ch };
+          return { key: ch, code: '', vk: 0, text: ch };
+        };
+        const forName = (k) => {
+          if (VK[k] === undefined) return { key: k, code: k, vk: 0, text: null };
+          const t = (k === 'Enter') ? '\r' : (k === 'Tab' ? '\t' : (k === ' ' ? ' ' : null));
+          return { key: k, code: (k === ' ') ? 'Space' : k, vk: VK[k], text: t };
+        };
+        const send = async (type, spec) => {
+          const p = { type: type, modifiers: mods, key: spec.key, code: spec.code,
+            windowsVirtualKeyCode: spec.vk, nativeVirtualKeyCode: spec.vk };
+          if (type !== 'keyUp' && spec.text !== null && spec.text !== undefined) {
+            p.text = spec.text; p.unmodifiedText = spec.text;
+          }
+          await chrome.debugger.sendCommand({ tabId: tKey }, 'Input.dispatchKeyEvent', p);
+        };
+        const press = async (spec) => {
+          // A key that produces text is a keyDown WITH text (that is what makes the character
+          // appear and what lets the browser see an Enter as a submit); one that does not is a
+          // rawKeyDown.
+          await send((spec.text === null || spec.text === undefined) ? 'rawKeyDown' : 'keyDown', spec);
+          await send('keyUp', spec);
+        };
+        let typed = 0;
+        for (let ci = 0; ci < text.length; ci++) { await press(forChar(text[ci])); typed++; }
+        if (named) await press(forName(named));
+        ok = true;
+        return { success: true, mode: 'trusted', via: 'Input.dispatchKeyEvent',
+                 typed: typed, key: named || null, modifiers: mods, focus: focusResult,
+                 ms: Date.now() - t0, emulation: prep.emulation,
+                 timings: { totalMs: Date.now() - t0, attachMs: prep.attachMs } };
+      } catch (e) {
+        return { error: 'trusted_key failed: ' + String((e && e.message) || e) };
+      } finally {
+        if (!ok && prep && prep.attached) { try { await chrome.debugger.detach({ tabId: tKey }); } catch (_) {} }
       }
     }
     case 'capture_visible_tab': {

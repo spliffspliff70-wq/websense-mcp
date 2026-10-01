@@ -35,7 +35,7 @@ window.__count = 0;
 const EVENTS = ['pointerover','pointerenter','pointermove','pointerdown','pointerup','pointerout','pointerleave',
                 'pointercancel','gotpointercapture','lostpointercapture','mouseover','mouseenter','mousemove',
                 'mousedown','mouseup','click','auxclick','dblclick','contextmenu','focus','blur','focusin',
-                'focusout','change','input','beforeinput','keydown','keyup'];
+                'focusout','change','input','beforeinput','keydown','keypress','keyup'];
 
 function snap(ev) {
   const t = ev.target;
@@ -57,6 +57,13 @@ function snap(ev) {
     pressure: ev.pressure, width: ev.width, height: ev.height, tiltX: ev.tiltX, tiltY: ev.tiltY, twist: ev.twist,
     // modifiers + time
     mods: [ev.ctrlKey, ev.shiftKey, ev.altKey, ev.metaKey].join(','), timeStamp: Math.round(ev.timeStamp),
+    // KEYBOARD identity — what a site reads to tell a real key press from a dispatched one.
+    // A synthetic KeyboardEvent can be given key/code/keyCode by hand, so those alone prove
+    // nothing; isTrusted and whether the browser ran the DEFAULT ACTION are the parts that matter,
+    // and the default action is only visible as a side effect (see submits below).
+    key: (typeof ev.key === 'string' ? ev.key : null), code: ev.code || null,
+    keyCode: (typeof ev.keyCode === 'number' ? ev.keyCode : null),
+    repeat: (typeof ev.repeat === 'boolean' ? ev.repeat : null),
     // delivery
     target: el ? (el.tagName.toLowerCase() + (el.id ? '#' + el.id : '')) : String(t && t.nodeName),
     pathDepth: (ev.composedPath ? ev.composedPath().length : -1),
@@ -65,7 +72,13 @@ function snap(ev) {
     activeElement: (document.activeElement && document.activeElement.id) || (document.activeElement && document.activeElement.tagName) || null,
     targetHover: hover, targetActive: active, targetBg: bg, cursor: cur,
     // has the default action already run by now?
-    counted: window.__count, chk: document.getElementById('chk').checked, hash: location.hash
+    counted: window.__count, chk: document.getElementById('chk').checked, hash: location.hash,
+    // ★ THE KEYBOARD DEFAULT ACTION, MADE OBSERVABLE (2026-10-01). A single-input form submits on
+    // an implicit Enter — that IS the default action this was built to test, and it is the one the
+    // old code faked with form.requestSubmit(). The handler cancels the navigation so the page
+    // stays put, but the submit EVENT firing at all is the proof: an untrusted Enter fires nothing.
+    submits: window.__submits || 0,
+    fieldValue: (document.getElementById('fp-q') || {}).value === undefined ? null : document.getElementById('fp-q').value
   };
   return r;
 }
@@ -108,8 +121,24 @@ bench.innerHTML =
     ' <span id="fp-grow-state" data-testid="fp-grow-state">off</span>' +
   '</div>' +
   '<div id="fp-bigblock" style="display:none;height:200px;background:#f2f6fa"></div>' +
-  '<div id="fp-shifters"></div>';
+  '<div id="fp-shifters"></div>' +
+  // ★ THE KEYBOARD CASE (added 2026-10-01). ONE text input and no submit button, which is exactly
+  // the implicit-submission case an Enter triggers — and the case the old press_key faked by
+  // calling form.requestSubmit() because the synthetic Enter ran no default action at all. The
+  // submit handler cancels the navigation and counts instead, so the page survives while the
+  // firing of the submit event remains the proof.
+  '<form id="fp-form" method="get" action="?" style="margin-top:16px">' +
+    '<input id="fp-q" name="q" data-testid="fp-q" type="text" size="40" placeholder="type here, then Enter submits">' +
+  '</form>' +
+  '<div id="fp-keys">submits: <span id="fp-submits">0</span></div>';
 document.body.appendChild(bench);
+
+window.__submits = 0;
+document.getElementById('fp-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  window.__submits++;
+  document.getElementById('fp-submits').textContent = String(window.__submits);
+});
 
 const shifters = document.getElementById('fp-shifters');
 for (let i = 0; i < 60; i++) {

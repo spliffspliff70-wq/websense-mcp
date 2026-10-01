@@ -251,6 +251,13 @@ async function handleTabOperation(message) {
       // success:true, so the click silently did nothing. (Measured: page saw zero events.)
       return await sendTabControl('trusted_click', message);
     }
+    case 'trusted_key': {
+      // Same reason as trusted_click: Input.dispatchKeyEvent is SW-only, and the SW is not itself
+      // a WS client. A new SW-only op needs a case HERE, a route in the hub's SW_REQUIRED_OPS, and
+      // a handler in the SW — three layers, and a missing one fails as "Unknown action type"
+      // inside a successful envelope, which reads as success. Asserted by a test for both ops.
+      return await sendTabControl('trusted_key', message);
+    }
     case 'respawn_offscreen': {
       // Reply FIRST, then relay (2026-09-25): awaiting sendTabControl here made
       // this document die (the SW closes it) before the reply was constructed,

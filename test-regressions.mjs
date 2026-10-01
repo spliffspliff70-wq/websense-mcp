@@ -2412,6 +2412,36 @@ test('trusted_click: wired through all four layers, and it must make the rendere
     'and a refusal riding inside a success envelope must not read as a performed action');
 });
 
+test('trusted_key: wired like the click, and it must SHARE the preparation', () => {
+  // The keyboard half of trusted_click, for the same measured reason: a dispatched KeyboardEvent is
+  // untrusted, so the browser runs NO default action. Measured on en.wikipedia.org: an Enter reached
+  // the element ({key:'Enter', trusted:false}) and the form did NOT submit — press_key worked around
+  // that by calling form.requestSubmit() itself, which is a GUESS at what the page wanted.
+  assert(/SW_REQUIRED_OPS[\s\S]{0,200}trusted_key/.test(HUB_SRC), 'the hub must route trusted_key to the SW');
+  assert(/case 'trusted_key'/.test(OFF_SRC), 'the offscreen relay must forward it (it has no debugger API)');
+  assert(/case 'trusted_key'/.test(BG_SRC), 'the SW must handle it');
+  assert(/Input\.dispatchKeyEvent/.test(BG_SRC), 'through the browser\'s own input pipeline');
+  assert(/rawKeyDown/.test(BG_SRC),
+    'a key with no text is rawKeyDown; one that produces text is keyDown WITH text — that is what makes an Enter submit');
+  assert(/Runtime\.evaluate[\s\S]{0,300}\.focus\(\)/.test(BG_SRC),
+    'the target must be focused first: the renderer routes key events to its focused element');
+  // ★ ONE PREPARATION, NOT TWO. Attach + keep-alive + the focus emulation are the part that is
+  // easy to get subtly wrong, and this codebase has paid repeatedly for two copies of one idea.
+  const prepCalls = (BG_SRC.match(/await __dbgPrepare\(/g) || []).length;
+  assert(prepCalls >= 2, 'BOTH trusted ops must call the shared preparation (found ' + prepCalls + ')');
+  const afterPrep = BG_SRC.split('async function __dbgPrepare')[1] || '';
+  // Counting CALL SITES is position-independent, which matters here: splitting at the function's
+  // signature leaves its own BODY in the second half, so a "not in the remainder" test is wrong by
+  // construction. (First version of this assertion failed on its own body; the one before that
+  // failed on the comment that documents it.)
+  const emuCalls = (BG_SRC.match(/'Emulation\.setFocusEmulationEnabled'/g) || []).length;
+  assert(emuCalls === 1,
+    'the focus emulation must have exactly ONE call site, inside __dbgPrepare (found ' + emuCalls + ')');
+  assert(afterPrep.indexOf('function ') > 0, 'sanity: the split really did yield the rest of the file');
+  assert(/looksLikeSubmit \? 6 : 1/.test(SRV_SRC),
+    'the server side must give an Enter a LONGER navigation window (a real page load outlasts a short probe: measured — Wikipedia navigated and the verdict still said unverifiable) and a single probe to everything else, so typing a character costs nothing');
+});
+
 test('browse: the reply must include the tabId (a caller sharing Chrome has nothing else to pass)', () => {
   // ★ Found 2026-10-01 by attempting a cross-tab isolation test: browse answered with an opaque
   // `handle` and no tabId, so the test could not name the two tabs it had opened, and a caller
