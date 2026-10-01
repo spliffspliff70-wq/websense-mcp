@@ -1844,6 +1844,9 @@ test('no capping / no filtering: the snapshot inventory is complete by construct
   // 2026-10-01 (Ali: "Agreed no capping no filtering implement and test"). Four real
   // cuts were removed from src/snapshot.js. Pin all four so none can return.
   const S = readFileSync(new URL('./src/snapshot.js', import.meta.url), 'utf8');
+  // Strip comments up front: each fix's own comment names the removed code, so a raw
+  // regex would match PROSE. (This trap bit four times while writing these.)
+  const S_code = S.replace(/\/\/[^\n]*/g, '');
 
   // 1. No element cap in the collector.
   const collector = S.match(/export const COLLECTOR = `([\s\S]*?)`;/);
@@ -1854,18 +1857,30 @@ test('no capping / no filtering: the snapshot inventory is complete by construct
   const code = body.replace(/\/\/[^\n]*/g, '');
   assert(!/MAX\s*=\s*\d+/.test(code), 'the collector must not carry an element MAX cap');
   assert(!/out\.length\s*>=\s*MAX/.test(code), 'the collector must not break early on a cap');
-  assert(!/t === 'script'[\s\S]{0,120}continue;/.test(body),
-    'script/style/meta/link/head/title/base must NOT be skipped — they are recorded');
-  assert(/nonRenderable\+\+/.test(body),
-    'non-renderable tags must be COUNTED (nonRenderable), not dropped');
+  assert(!/t === 'script'[\s\S]{0,120}continue;/.test(code),
+    'script/style/meta/link/head/title/base must NOT be skipped — every element is recorded');
+  // 3. No hardcoded vocabularies anywhere in the collector or the index.
+  //    (Ali: "any value or names should be dynamically parsed by the script".)
+  assert(!/new Set\(\[/.test(S_code),
+    'no hardcoded tag/role table may remain (the INTERACTIVE sets were two of them)');
+  assert(!/data-testid/.test(code),
+    'the locator must not prefer data-testid — uniqueness is derived from the element OWN attributes');
+  assert(!/INTERACTIVE\.has\(/.test(S_code),
+    'interactive must be DERIVED (isInteractiveRec), not looked up in a declared table');
+  assert(/function isInteractiveRec/.test(S) && /e\.focusable \|\| e\.field/.test(S),
+    'isInteractiveRec must read platform state (focusable/field), not a name list');
+  assert(/el\.tabIndex >= 0/.test(code),
+    'focusability must come from the BROWSER (tabIndex), which is a computed platform fact');
+  assert(/el\.attributes/.test(code) && /rec\.attrs = attrs/.test(code),
+    'EVERY attribute the page wrote must be recorded — the page owns the field names');
+  assert(!/regionOf[\s\S]{0,400}=== 'form'/.test(code),
+    'regionOf must not test a hardcoded tag vocabulary (form/header/nav/...)');
   // 3. No field truncation — short() must normalise whitespace only.
   const shortFn = body.match(/function short\(s, n\) \{[\s\S]*?\n  \}/);
   assert(shortFn, 'short() must exist');
   assert(!/\.slice\(0,\s*n\)/.test(shortFn[0]),
     'short() must not truncate — a stored record cut mid-string is unreadable (cf. LABEL_MAX=40)');
   // 4. The slice returns everything unless the caller asks for a limit; no clamp.
-  // Again: strip comments, because the fix's comment quotes the removed clamp.
-  const S_code = S.replace(/\/\/[^\n]*/g, '');
   assert(/hasLimit/.test(S_code), 'slice must treat limit as opt-in');
   assert(!/Math\.min\(Number\(filter\.limit\)/.test(S_code),
     'the slice limit must not be defaulted to 200 nor clamped to 2000');
@@ -1882,16 +1897,23 @@ test('no capping / no filtering: BEHAVIOUR — a slice returns everything by def
   // limit was 200, so this exact size would previously have come back short.
   const els = [];
   for (let i = 0; i < 250; i++) {
-    els.push({ i, tag: i % 3 === 0 ? 'div' : 'a', loc: '#e' + i, region: 'body', vp: 1, name: 'n' + i });
+    // Elements carry their OWN attributes — that is the only vocabulary the map has.
+    els.push({ i, tag: i % 3 === 0 ? 'div' : 'a', loc: '#e' + i, region: 'body', vp: 1,
+               name: 'n' + i, focusable: i % 3 === 0 ? 1 : undefined,
+               attrs: i % 5 === 0 ? { 'data-offset': String(i) } : { role: 'link' } });
   }
-  const snap = { url: 'x', title: 't', total: 250, elements: els, nonRenderable: 4 };
+  const snap = { url: 'x', title: 't', total: 250, elements: els };
 
   // 1. Completeness is reported and it is exact.
   const idx = buildIndex(snap);
   assert.strictEqual(idx.elements, 250, 'all 250 must be in the index');
   assert.strictEqual(idx.domTotal, 250, 'domTotal must be reported');
   assert.strictEqual(idx.dropped, 0, 'dropped must be 0 — nothing was cut');
-  assert.strictEqual(idx.nonRenderable, 4, 'non-renderable elements are counted, not dropped');
+  // interactive is DERIVED from platform/page state, not looked up in a table:
+  // 84 elements are focusable (i%3==0), 200 carry a role (i%5!=0), 67 are both.
+  // Union = 84 + 200 - 67 = 217. Exact, and computed with no vocabulary of ours.
+  assert.strictEqual(idx.interactive, 217,
+    'interactive must be the DERIVED union of focusable and role-carrying elements');
 
   // 2. A bare slice returns ALL matches (the old code capped this at 200).
   const all = sliceSnapshot(snap, {});
@@ -1907,15 +1929,37 @@ test('no capping / no filtering: BEHAVIOUR — a slice returns everything by def
   const big = sliceSnapshot(snap, { limit: 5000 });
   assert.strictEqual(big.returned, 250, 'a limit above the size must not pad or clamp');
 
-  // 4. A tag slice is complete for that tag.
-  const divs = sliceSnapshot(snap, { tag: 'div' });
-  assert.strictEqual(divs.returned, divs.matched, 'a tag slice returns every match');
-  assert(divs.returned > 0, 'the tag slice must find the divs');
+  // 4. Slice by ANY attribute the page wrote — no fixed vocabulary involved.
+  const byAttr = sliceSnapshot(snap, { attr: 'data-offset' });
+  assert.strictEqual(byAttr.matched, 50, 'attr by name only must match the 50 carrying it');
+  const byAttrVal = sliceSnapshot(snap, { attr: { name: 'data-offset', value: '5' } });
+  assert.strictEqual(byAttrVal.matched, 1, 'attr name+value must narrow to one');
+  const byRole = sliceSnapshot(snap, { role: 'link' });
+  assert.strictEqual(byRole.matched, 200, 'role is read from the recorded attribute');
+  const byField = sliceSnapshot(snap, { focusable: true });
+  assert.strictEqual(byField.matched, 84, 'focusable is a first-class slice dimension');
 
   // 5. dropped goes non-zero ONLY when the inventory really is short — so the field
   //    can actually detect a future cut rather than always reading 0.
   const short = buildIndex({ url: 'x', title: 't', total: 250, elements: els.slice(0, 200) });
   assert.strictEqual(short.dropped, 50, 'dropped must expose a short inventory (50 missing)');
+});
+
+test('page_slice: the new dynamic dimensions are reachable from the tool', () => {
+  // A dimension that exists in snapshot.js but not in the tool schema is unreachable —
+  // the caller can never ask for it. Pin the wiring on both sides.
+  const S = readFileSync(new URL('./src/server.js', import.meta.url), 'utf8');
+  const reg = S.match(/reg\(server, 'page_slice'[\s\S]*?\n  \}, async/);
+  assert(reg, 'page_slice must be registered');
+  const schema = reg[0].replace(/\/\/[^\n]*/g, '');
+  for (const dim of ['field', 'focusable', 'attr']) {
+    assert(new RegExp('\\b' + dim + ':').test(schema), 'page_slice must expose the ' + dim + ' dimension');
+  }
+  assert(!/default 200/.test(schema),
+    'the schema must not still advertise a default limit of 200 — limit is opt-in now');
+  // and the handler must hand the caller args straight to the slicer
+  assert(/sliceSnapshot\(e\.snap, o\)/.test(S),
+    'the handler must pass the caller args through to sliceSnapshot');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

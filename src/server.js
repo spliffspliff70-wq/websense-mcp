@@ -1816,16 +1816,22 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   });
 
   reg(server, 'page_slice', {
-    description: 'Full-fidelity records from the stored page snapshot, filtered to ONE slice: tag / role / region / vp (true|false) / interactive / query (+limit, default 200). This is how you load only the branch you need WITHOUT re-reading the page and without cutting anything out. Call page_snapshot first.',
+    description: 'Full-fidelity records from the stored page snapshot, filtered to ONE slice: tag / role / region / vp (true|false) / interactive / field / focusable / attr / query. Returns ALL matches by default — pass limit only if you actually want a cut, and truncatedByLimit will say so. This is how you load only the branch you need WITHOUT re-reading the page and without anything being cut out. Call page_snapshot first.',
     inputSchema: {
       tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       tag: z.string().optional().describe('Filter by tag, e.g. input'),
-      role: z.string().optional().describe('Filter by ARIA role'),
-      region: z.string().optional().describe('Filter by region substring, e.g. form, nav, footer'),
+      role: z.string().optional().describe('Filter by ARIA role (read from the element own recorded attributes)'),
+      region: z.string().optional().describe('Filter by region substring — region is derived from the nearest ancestor the PAGE labelled'),
       vp: z.boolean().optional().describe('true = in viewport only, false = off-viewport only'),
-      interactive: z.boolean().optional().describe('true = actionable elements only'),
-      query: z.string().optional().describe('Substring match over name / locator / tag'),
-      limit: z.number().optional().describe('Max records (default 200, hard max 2000)'),
+      interactive: z.boolean().optional().describe('true = actionable only, DERIVED (focusable || form field || role present), not a tag table'),
+      field: z.boolean().optional().describe('true = form controls only (platform-reported)'),
+      focusable: z.boolean().optional().describe('true = focusable only (el.tabIndex >= 0, the browser own computation)'),
+      attr: z.union([
+        z.string(),
+        z.object({ name: z.string(), value: z.string().optional() }),
+      ]).optional().describe('Filter by ANY attribute the page wrote, e.g. attr:"data-testid" or attr:{name:"data-offset",value:"3"}'),
+      query: z.string().optional().describe('Substring match over name / locator / tag / region / attribute names'),
+      limit: z.number().optional().describe('OPT-IN cap on returned records. Omit for ALL matches (no default, no clamp)'),
     },
   }, async (o) => {
     const tabId = o.tabId || sessionTabOf();

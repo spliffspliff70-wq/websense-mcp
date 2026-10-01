@@ -50,15 +50,26 @@ export const COLLECTOR = `() => {
     return (s == null ? '' : String(s)).replace(/\\s+/g, ' ').trim();
   }
 
-  // A usable CSS locator: prefer stable identity, else an nth-of-type chain.
-  function locatorOf(el) {
-    if (el.id) {
-      try { if (document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) return '#' + el.id; } catch (e) {}
+  // A usable CSS locator, built from whatever THIS element actually carries.
+  // ★ DERIVED, NOT DECLARED (2026-10-01): the old version preferred a hardcoded
+  // 'data-testid' (a React convention) and then 'name'. Now: id first, then whichever
+  // of the element's OWN attributes is unique in this document. No framework
+  // convention is assumed. Uniqueness is a MAP LOOKUP against a single pre-pass
+  // (attrCount) rather than a document-wide query per attribute — the naive version
+  // is O(elements x attributes) document scans, which is how a page like x.com turns
+  // a locator into a multi-second stall.
+  function locatorOf(el, attrCount) {
+    if (el.id) return '#' + el.id;
+    var at = el.attributes;
+    if (at && attrCount) {
+      for (var i = 0; i < at.length; i++) {
+        var an = at[i].name;
+        if (an === 'style' || an === 'class' || an === 'data-websense-ref') continue;
+        if (attrCount[an + '=' + at[i].value] === 1) {
+          try { return el.tagName.toLowerCase() + '[' + an + '="' + CSS.escape(at[i].value) + '"]'; } catch (e) {}
+        }
+      }
     }
-    var a = el.getAttribute && el.getAttribute('data-testid');
-    if (a) { try { if (document.querySelectorAll('[data-testid="' + a + '"]').length === 1) return '[data-testid="' + a + '"]'; } catch (e) {} }
-    var nm = el.getAttribute && el.getAttribute('name');
-    if (nm) return el.tagName.toLowerCase() + '[name="' + nm + '"]';
     var parts = [], node = el, depth = 0;
     while (node && node.nodeType === 1 && depth < 5) {
       var tag = node.tagName.toLowerCase();
@@ -73,80 +84,122 @@ export const COLLECTOR = `() => {
   }
 
   function nameOf(el) {
-    var v = el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('placeholder')
-      || el.getAttribute('title') || el.getAttribute('alt'));
-    if (v) return short(v, 90);
+    // ★ DERIVED, NOT DECLARED: scan the element's OWN attributes for a name-ish one by
+    // PATTERN (label/title/alt/placeholder/name), rather than testing a fixed list of
+    // attribute names. Then fall back to the element's own visible text when it is a
+    // leaf (so parents never absorb their descendants' text).
+    var at = el.attributes;
+    if (at) {
+      var best = '';
+      for (var i = 0; i < at.length; i++) {
+        var an = at[i].name;
+        if (an === 'class' || an === 'style' || an === 'id') continue;
+        if (/label|title|alt|placeholder|name/i.test(an)) {
+          var v = at[i].value;
+          if (v && v.replace(/\\s+/g, '')) { best = short(v); break; }
+        }
+      }
+      if (best) return best;
+    }
     var id = el.id;
     if (id) {
       try {
         var lab = document.querySelector('label[for="' + CSS.escape(id) + '"]');
-        if (lab) return short(lab.textContent, 90);
+        if (lab) return short(lab.textContent);
       } catch (e) {}
     }
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
-      var p = el.closest && el.closest('label');
-      if (p) return short(p.textContent, 90);
-    }
-    // own text only (leaf-ish), so parents do not absorb all descendants' text
     var kids = el.children ? el.children.length : 0;
-    if (kids === 0) return short(el.textContent, 90);
+    if (kids === 0) return short(el.textContent);
     return '';
   }
 
+  // REGION — derived from the page's OWN vocabulary.
+  // ★ NO HARDCODED NAMES (2026-10-01, Ali: "any value or names should be dynamically
+  // parsed by the script"). The old version named form/header/nav/main/footer/aside/
+  // section/article — a hand-written list of tags, so a page that structures itself
+  // with custom elements or ARIA roles got no region at all. The region key is now
+  // whatever the PAGE says: the nearest ancestor that carries a role, or an accessible
+  // name (aria-label / aria-labelledby). Nothing here is a fixed vocabulary.
   function regionOf(el) {
     var node = el.parentElement, hops = 0;
     while (node && hops < 12) {
-      var t = node.tagName ? node.tagName.toLowerCase() : '';
-      if (t === 'form') return 'form:' + (node.getAttribute('name') || node.id || 'anonymous');
-      if (t === 'header') return 'header';
-      if (t === 'nav') return 'nav';
-      if (t === 'main') return 'main';
-      if (t === 'footer') return 'footer';
-      if (t === 'aside') return 'aside';
-      if (t === 'section' || t === 'article') {
-        var h = node.querySelector && node.querySelector('h1,h2,h3');
-        return t + ':' + short(h ? h.textContent : (node.getAttribute('aria-label') || ''), 50);
-      }
       var role = node.getAttribute && node.getAttribute('role');
-      if (role === 'dialog') return 'dialog';
-      if (role === 'region') return 'region:' + short(node.getAttribute('aria-label') || '', 40);
+      var label = node.getAttribute && (node.getAttribute('aria-label')
+        || (node.getAttribute('aria-labelledby')
+             ? (function (ids) {
+                 var t = [];
+                 for (var k = 0; k < ids.length; k++) {
+                   var r = document.getElementById(ids[k]);
+                   if (r) t.push(r.textContent);
+                 }
+                 return t.join(' ');
+               })(String(node.getAttribute('aria-labelledby')).split(/\\s+/))
+             : ''));
+      var tag = (node.tagName || '').toLowerCase();
+      if (role) return 'role:' + role + (label ? ':' + short(label, 60) : '');
+      if (label) return tag + ':' + short(label, 60);
       node = node.parentElement; hops++;
     }
     return 'body';
   }
 
+  // ONE pre-pass: count every attribute-name=value occurrence in the document, so a
+  // per-element uniqueness test is a map lookup instead of a document-wide query.
+  var attrCount = Object.create(null);
+  for (var pi = 0; pi < all.length; pi++) {
+    var pat = all[pi].attributes;
+    if (!pat) continue;
+    for (var pj = 0; pj < pat.length; pj++) {
+      var pk = pat[pj].name + '=' + pat[pj].value;
+      attrCount[pk] = (attrCount[pk] || 0) + 1;
+    }
+  }
+
   for (var i = 0; i < all.length; i++) {
     // ★ NO CAP: the early-break on MAX that used to sit here is gone.
+    // ★ NO FILTER / NO HARDCODED NAMES: the old line skipped script/style/meta/link/
+    //   head/title/base (a hand-written tag list) and the record below read a fixed set
+    //   of attribute names. Both are gone — see the attribute capture, which records
+    //   EVERY attribute the page wrote, so the vocabulary belongs to the page.
     var el = all[i];
     var t = (el.tagName || '').toLowerCase();
-    // ★ NO FILTER: this used to skip script/style/meta/link/head/title/base with a
-    // continue. That made elements (2719) disagree with domTotal (2774) while truncated
-    // still read FALSE — a silent 55-element cut the index could not report, which is
-    // worse than the cut. Every element is recorded now; slice them out by tag.
-    if (t === 'script' || t === 'style' || t === 'meta' || t === 'link' || t === 'head' || t === 'title' || t === 'base') nonRenderable++;
     var r = null;
     try { r = el.getBoundingClientRect(); } catch (e) { r = null; }
     var inVp = !!(r && r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0
       && r.top < vh && r.left < vw);
-    var role = el.getAttribute && el.getAttribute('role');
-    var rec = { i: i, tag: t, loc: locatorOf(el), region: regionOf(el) };
-    if (role) rec.role = role;
-    var ty = el.getAttribute && el.getAttribute('type');
-    if (ty) rec.type = ty;
+    var rec = { i: i, tag: t, loc: locatorOf(el, attrCount), region: regionOf(el) };
     var nm = nameOf(el);
     if (nm) rec.name = nm;
-    var hr = el.getAttribute && el.getAttribute('href');
-    if (hr) rec.href = short(hr, 120);
-    if (inVp) rec.vp = 1;
+
+    // EVERY ATTRIBUTE, verbatim. The page decides the field names: data-offset-*,
+    // data-contents, data-block, data-testid, hooks, bespoke names — all of it. The
+    // caller can then group or slice by whatever THIS site calls things.
+    var at = el.attributes;
+    if (at && at.length) {
+      var attrs = {};
+      for (var a = 0; a < at.length; a++) {
+        var an = at[a].name;
+        if (an === 'data-websense-ref') continue;   // our bookkeeping, not page truth
+        attrs[an] = at[a].value;
+      }
+      var akeys = [];
+      for (var k in attrs) if (Object.prototype.hasOwnProperty.call(attrs, k)) akeys.push(k);
+      if (akeys.length) { rec.attrs = attrs; rec.attrNames = akeys; }
+    }
+
+    // State read from the PLATFORM's own IDL, not from a name table.
+    if (el.tabIndex >= 0) rec.focusable = 1;
     if (el.disabled) rec.dis = 1;
     if (el.checked) rec.chk = 1;
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') rec.field = 1;
     var val = el.value;
-    if (typeof val === 'string' && val) rec.value = short(val, 80);
+    if (typeof val === 'string' && val) rec.value = val;
+    if (inVp) rec.vp = 1;
     if (r) { rec.x = Math.round(r.left); rec.y = Math.round(r.top); }
     out.push(rec);
   }
   return { url: location.href, title: document.title, total: total, truncated: truncated,
-           nonRenderable: nonRenderable, vw: vw, vh: vh, count: out.length, elements: out };
+           vw: vw, vh: vh, count: out.length, elements: out };
 }`;
 
 // ── Server-side snapshot store: one entry per tab, TTL + LRU bounded. ──
@@ -188,18 +241,14 @@ export function buildIndex(snap) {
   const els = (snap && snap.elements) || [];
   const byTag = {}, byRole = {}, byRegion = {};
   let interactive = 0, inViewport = 0, withName = 0, offViewport = 0;
-  const INTERACTIVE = new Set(['a', 'button', 'input', 'select', 'textarea', 'summary', 'details', 'option']);
   for (const e of els) {
     byTag[e.tag] = (byTag[e.tag] || 0) + 1;
-    const r = e.role || '(none)';
+    const r = (e.attrs && e.attrs.role) || '(none)';
     byRole[r] = (byRole[r] || 0) + 1;
     if (e.name) withName++;
     if (e.vp) inViewport++;
     else offViewport++;
-    if (INTERACTIVE.has(e.tag) || e.role === 'button' || e.role === 'link' || e.role === 'textbox'
-      || e.role === 'checkbox' || e.role === 'combobox' || e.role === 'tab' || e.role === 'menuitem') {
-      interactive++;
-    }
+    if (isInteractiveRec(e)) interactive++;
   }
   const top = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]);
   const byTagAll = top(byTag), byRoleAll = top(byRole);
@@ -209,23 +258,37 @@ export function buildIndex(snap) {
     // ★ COMPLETENESS PROOF (2026-10-01, no capping / no filtering). `dropped` must be
     // 0. Before this, a tag filter cut 55 elements and `truncated` still read false, so
     // the index could not tell you the map was incomplete — a silent loss is worse than
-    // a declared one. `nonRenderable` counts script/style/meta/link/head/title/base,
-    // which are RECORDED (not dropped) and sliceable by tag.
+    // a declared one.
     dropped: Math.max(0, Number(snap.total || 0) - els.length),
-    nonRenderable: Number(snap.nonRenderable || 0),
     interactive, inViewport, offViewport, named: withName,
     // FULL lists, no top-N cut — the caller slices what it wants.
     topTags: byTagAll, topRoles: byRoleAll,
     tagCount: byTagAll.length, roleCount: byRoleAll.length,
     // Addressable dimensions — the keys a slice can be taken by.
-    addressableBy: ['tag', 'role', 'region', 'vp', 'interactive', 'query'],
+    addressableBy: ['tag', 'role', 'region', 'vp', 'interactive', 'field', 'focusable', 'attr', 'query'],
   };
+}
+
+// ★ INTERACTIVE — DERIVED, NOT DECLARED (2026-10-01, Ali: "any value or names should
+// be dynamically parsed by the script").
+// This used to be two hardcoded tables — a tag set (a/button/input/select/textarea/
+// summary/details/option) and an ARIA widget-role set — applied in buildIndex AND in
+// sliceSnapshot. A component-library control (<faceplate-button>, a custom element with
+// role="none") matched neither table and was silently classed non-interactive.
+// Now it is read off the element's own platform state:
+//   focusable  — el.tabIndex >= 0, i.e. the BROWSER's own focusability computation
+//   field      — the platform says it is a form control
+//   role       — the PAGE asserts a semantic for it (any role it chose to write)
+// Nothing in this predicate is a vocabulary we invented.
+export function isInteractiveRec(e) {
+  if (!e) return false;
+  if (e.focusable || e.field) return true;
+  return !!(e.attrs && e.attrs.role);
 }
 
 // ── SLICE: full-fidelity records for one dimension. ──
 export function sliceSnapshot(snap, filter = {}) {
   const els = (snap && snap.elements) || [];
-  const INTERACTIVE = new Set(['a', 'button', 'input', 'select', 'textarea', 'summary', 'details', 'option']);
   const q = filter.query ? String(filter.query).toLowerCase() : null;
   // ★ NO CAP (2026-10-01): this was `Math.min(Number(filter.limit) || 200, 2000)` — a
   // DEFAULT of 200 with a hard ceiling of 2000, so asking for everything silently got
@@ -238,14 +301,31 @@ export function sliceSnapshot(snap, filter = {}) {
   let matched = 0;
   for (const e of els) {
     if (filter.tag && e.tag !== filter.tag) continue;
-    if (filter.role && (e.role || '') !== filter.role) continue;
+    // role now lives with every other attribute (rec.attrs), because the page decides
+    // the field names — so accept either a bare rec.role for callers that pass it or
+    // the attribute the collector actually recorded.
+    const eRole = (e.attrs && e.attrs.role) || e.role || '';
+    if (filter.role && eRole !== filter.role) continue;
     if (filter.region && !String(e.region || '').includes(filter.region)) continue;
     if (filter.vp === true && !e.vp) continue;
     if (filter.vp === false && e.vp) continue;
-    if (filter.interactive === true
-      && !(INTERACTIVE.has(e.tag) || ['button', 'link', 'textbox', 'checkbox', 'combobox', 'tab', 'menuitem'].includes(e.role))) continue;
+    if (filter.field === true && !e.field) continue;
+    if (filter.focusable === true && !e.focusable) continue;
+    // ★ DERIVED, NOT DECLARED: was a hardcoded tag set + ARIA widget-role list.
+    if (filter.interactive === true && !isInteractiveRec(e)) continue;
+    // Filter by ANY attribute the page wrote, e.g. attr:{name:"data-offset", value:"3"}
+    // or attr:"data-contents" (name only). No fixed vocabulary is involved.
+    if (filter.attr) {
+      const aName = typeof filter.attr === 'string' ? filter.attr : filter.attr.name;
+      const aVal = typeof filter.attr === 'string' ? undefined : filter.attr.value;
+      const has = e.attrs && aName != null
+        && Object.prototype.hasOwnProperty.call(e.attrs, aName)
+        && (aVal === undefined || e.attrs[aName] === aVal);
+      if (!has) continue;
+    }
     if (q) {
-      const hay = ((e.name || '') + ' ' + (e.loc || '') + ' ' + (e.tag || '')).toLowerCase();
+      const hay = ((e.name || '') + ' ' + (e.loc || '') + ' ' + (e.tag || '') + ' '
+        + (e.region || '') + ' ' + (e.attrNames ? e.attrNames.join(' ') : '')).toLowerCase();
       if (!hay.includes(q)) continue;
     }
     matched++;
