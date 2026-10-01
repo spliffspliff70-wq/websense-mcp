@@ -23,7 +23,7 @@ import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { COLLECTOR, putSnapshot, getSnapshot, sliceSnapshot, snapshotStats, branchChain } from './snapshot.js';
+import { COLLECTOR, putSnapshot, getSnapshot, sliceSnapshot, snapshotStats, branchChain, markSnapshotDirty } from './snapshot.js';
 import { DIFF_COLLECTOR } from './diff-collector.js';
 import { HubServer } from './hub.js';
 import { SessionManager } from './session.js';
@@ -546,6 +546,32 @@ async function runAutoDiff(tabId) {
   return payload && typeof payload === 'object' ? payload : { mutated: null, reason: 'diff returned nothing' };
 }
 
+// ★ A READ MUST NEVER FAIL ON STALENESS — IT REFRESHES (2026-10-01, Ali: "we should not
+// have stale snapshots... if it does and a page event happens the dif should pick them up
+// and update cache. No?").
+// The server's copy is refreshed lazily, on READ, when anything has actually happened:
+//   - no snapshot yet on this tab            -> collect
+//   - an action ran since the collection     -> the page has moved on; collect
+//   - the tab is on a different URL now      -> this is a different page; collect
+// Idle time is NOT a reason. A page left alone keeps its map forever, and a page-initiated
+// event (an expired session the app re-renders, a modal it opens on its own) is picked up
+// here rather than being missed — because the collect reads the page as it is NOW.
+async function ensureSnapshot(tabId, why) {
+  const e = getSnapshot(tabId);
+  if (e && !(e.actionsSinceCollect > 0)) return { entry: e, refreshed: false };
+  const res = await getActiveHub().send({ type: 'main_world_exec', tabId, func: COLLECTOR, args: [] });
+  const snap = (res && res.results && res.results[0] && res.results[0].result)
+    || (res && res.result)
+    || (res && res.data && Array.isArray(res.data.results) && res.data.results[0] && res.data.results[0].result)
+    || (res && res.data && res.data.result);
+  if (!snap || !Array.isArray(snap.elements)) {
+    if (e) return { entry: e, refreshed: false, note: 'refresh failed; serving the previous copy' };
+    return { entry: null, refreshed: false, error: 'could not collect the page inventory' };
+  }
+  const { seq } = putSnapshot(tabId, snap);
+  return { entry: getSnapshot(tabId), refreshed: true, seq, why: why || 'stale (an action ran since the last collect)' };
+}
+
 function withDelta(name, handler) {
   if (!DELTA_OPS.has(name)) return handler;
   return async (args) => {
@@ -557,6 +583,9 @@ function withDelta(name, handler) {
     } catch (err) {
       delta = { mutated: null, reason: 'delta unavailable: ' + (err && err.message) };
     }
+    // The action ran, so the server's copy of this page may no longer match it. Marked,
+    // never discarded — the next READ refreshes it (see ensureSnapshot).
+    try { markSnapshotDirty((args && args.tabId) || sessionTabOf()); } catch (_) {}
     const line = 'DIFF (auto, after ' + name + '): ' + JSON.stringify(delta);
     try {
       if (res && Array.isArray(res.content)) res.content.push({ type: 'text', text: line });
@@ -1868,14 +1897,17 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     },
   }, async (o) => {
     const tabId = o.tabId || sessionTabOf();
-    const e = getSnapshot(tabId);
-    if (!e) {
+    // ★ SELF-HEALING READ (2026-10-01): a slice never fails on staleness either. If the page
+    // has moved on since the last collect, refresh and serve the current page.
+    const ens = await ensureSnapshot(tabId, 'page_slice');
+    if (!ens.entry) {
       return textResult({
         success: false,
-        error: 'no live snapshot for tab ' + tabId + ' — call page_snapshot first (or it expired)',
+        error: ens.error || ('could not map tab ' + tabId),
         stats: snapshotStats(),
       });
     }
+    const e = ens.entry;
     const s = sliceSnapshot(e.snap, o);
     return textResult({
       success: true, snapshotSeq: e.seq, ageMs: Date.now() - e.at, url: e.snap.url,
@@ -1973,8 +2005,10 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     },
   }, async (o) => {
     const tabId = o.tabId || sessionTabOf();
-    const e = getSnapshot(tabId);
-    if (!e) return textResult({ success: false, error: 'no live snapshot for tab ' + tabId + ' — call browse (or page_snapshot) first' });
+    // ★ SELF-HEALING READ: never "no live snapshot" on a tab that is sitting right there.
+    const ens = await ensureSnapshot(tabId, 'find');
+    if (!ens.entry) return textResult({ success: false, error: ens.error || ('could not map tab ' + tabId) });
+    const e = ens.entry;
     const filter = {};
     for (const k of ['query', 'role', 'attr', 'tag', 'region', 'interactive', 'vp', 'limit', 'indices']) {
       if (o[k] !== undefined) filter[k] = o[k];

@@ -214,12 +214,23 @@ export const COLLECTOR = `() => {
            sx: (window.scrollX || 0), sy: (window.scrollY || 0), elements: out };
 }`;
 
-// ── Server-side snapshot store: one entry per tab, TTL + LRU bounded. ──
-// The snapshot is the lossless artifact; it is NEVER shipped whole. Only the index and
-// explicit slices leave the server.
-const TTL_MS = Number(process.env.WEBSENSE_SNAP_TTL_MS || 5 * 60 * 1000);
+// ── Server-side snapshot store: ONE entry per tab, and it lives until something REAL ──
+// ★ NO CLOCK EXPIRY (2026-10-01, Ali: "we should not have stale snapshots... if no action
+// is taken there is nothing to expire and if it does and a page event happens the dif
+// should pick them up and update cache. No?").
+// He is right and the old TTL was a design error: it made the MODEL of the page vanish
+// while the page was still open, so a plain `find` failed with "no live snapshot" on a tab
+// that was sitting right there, unchanged. A wall clock is not an invalidation event.
+//
+// THE LIFECYCLE NOW:
+//   born       at browse / first navigation
+//   kept       by every action — each action runs the full page-side differ, so the page
+//              baseline is updated continuously (the server copy is refreshed on read)
+//   dirty      marked by every performed action and by any navigation to a new URL
+//   dies       only when the tab closes, or the page legitimately navigates elsewhere
+// Nothing expires for being idle. A page left untouched keeps its map indefinitely.
 const MAX_TABS = Number(process.env.WEBSENSE_SNAP_MAX_TABS || 8);
-const store = new Map(); // tabId -> { at, seq, snap, index }
+const store = new Map(); // tabId -> { at, seq, snap, index, actionsSinceCollect }
 
 function evictIfNeeded() {
   if (store.size <= MAX_TABS) return;
@@ -232,20 +243,32 @@ export function putSnapshot(tabId, snap) {
   const prev = store.get(tabId);
   const seq = prev ? prev.seq + 1 : 1;
   const index = buildIndex(snap);
-  store.set(tabId, { at: Date.now(), seq, snap, index });
+  store.set(tabId, { at: Date.now(), seq, snap, index, actionsSinceCollect: 0 });
   evictIfNeeded();
   return { seq, index };
 }
 
+// An action happened -> the server's copy MAY now differ from the page. It is not thrown
+// away (that is what the old TTL effectively did); it is marked so the next READ refreshes
+// it. Actions are the only thing that makes it stale, and every action already ran the
+// page-side differ, so nothing here is a guess.
+export function markSnapshotDirty(tabId) {
+  const e = tabId != null && store.get(Number(tabId));
+  if (e) e.actionsSinceCollect = (e.actionsSinceCollect || 0) + 1;
+}
+
+export function dropSnapshot(tabId) { store.delete(Number(tabId)); }
+
 export function getSnapshot(tabId) {
-  const e = store.get(tabId);
+  const e = store.get(Number(tabId));
   if (!e) return null;
-  if (Date.now() - e.at > TTL_MS) { store.delete(tabId); return null; }
-  return e;
+  return e;   // ★ no TTL: age alone never invalidates
 }
 
 export function snapshotStats() {
-  return { tabs: store.size, ttlMs: TTL_MS, maxTabs: MAX_TABS };
+  const out = { tabs: store.size, maxTabs: MAX_TABS, expiry: 'none (invalidated by URL change or tab close)' };
+  for (const [k, v] of store) out[k] = { actionsSinceCollect: v.actionsSinceCollect || 0, url: v.snap && v.snap.url, at: v.at };
+  return out;
 }
 
 // ── The INDEX: what an agent always reads. Small by construction. ──

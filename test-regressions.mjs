@@ -2117,5 +2117,37 @@ test('collectors: NO BACKTICKS inside the template-literal collector bodies', ()
   assert(typeof DIFF_COLLECTOR === 'string' && DIFF_COLLECTOR.length > 200, 'DIFF_COLLECTOR must be a real string');
 });
 
+test('snapshot lifecycle: nothing expires on a clock; reads SELF-HEAL', () => {
+  // ★ Ali, 2026-10-01: "we should not have stale snapshots... if no action is taken there
+  // is nothing to expire and if it does and a page event happens the dif should pick them
+  // up and update cache. No?"
+  // He is right, and the old 5-minute TTL was a design error: it made the MODEL of the page
+  // vanish while the page was still open — a plain `find` failed with "no live snapshot" on
+  // a tab sitting right there, unchanged. A wall clock is not an invalidation event.
+  const S = readFileSync(new URL('./src/snapshot.js', import.meta.url), 'utf8');
+  const code = S.replace(/\/\/[^\n]*/g, '');
+  assert(!/Date\.now\(\) - e\.at > TTL_MS/.test(code),
+    'getSnapshot must not expire an entry by age — a clock is not an invalidation event');
+  assert(!/TTL_MS/.test(code), 'the TTL constant must be gone entirely from the store');
+  assert(/export function markSnapshotDirty/.test(code), 'an action must be able to mark the copy stale');
+  assert(/export function getSnapshot\(tabId\) \{[\s\S]*?\n\}/.test(code), 'getSnapshot must exist');
+  const gs = code.match(/export function getSnapshot\(tabId\) \{[\s\S]*?\n\}/)[0];
+  assert(!/\.at\b/.test(gs), 'getSnapshot must not compare the entry age against anything');
+  assert(/actionsSinceCollect: 0/.test(code), 'a fresh collect resets the dirty counter');
+  assert(/expiry: 'none \(invalidated by URL change or tab close\)'/.test(S),
+    'the store must state that nothing expires by time');
+
+  // The server side: reads refresh rather than failing, and actions mark dirty.
+  assert(/async function ensureSnapshot\(tabId, why\)/.test(SRV_SRC), 'ensureSnapshot must exist');
+  assert(/actionsSinceCollect > 0\)\) return \{ entry: e, refreshed: false \}/.test(SRV_SRC),
+    'a clean snapshot must be served without a needless re-collect');
+  assert(/await ensureSnapshot\(tabId, 'find'\)/.test(SRV_SRC), 'find must self-heal');
+  assert(/await ensureSnapshot\(tabId, 'page_slice'\)/.test(SRV_SRC), 'page_slice must self-heal');
+  assert(!/no live snapshot for tab/.test(SRV_SRC),
+    'the "no live snapshot" failure must be gone — that was the stale-snapshot complaint');
+  assert(/markSnapshotDirty\(\(args && args\.tabId\) \|\| sessionTabOf\(\)\)/.test(SRV_SRC),
+    'every performed action must mark the copy dirty');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
