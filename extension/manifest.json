@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "WebSense MCP Bridge",
   "description": "Non-vision browser automation for AI agents \u2014 real logged-in Chrome, no CDP debug port, no screenshots",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "permissions": [
     "tabs",
     "storage",

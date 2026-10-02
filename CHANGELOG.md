@@ -3,6 +3,12 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [2.1.0] — 2026-10-02
+
+- **`preflight` (new, listed tool):** walks launch → server → extension → binding → page-ready, stops at the first broken link and returns the exact command that fixes it. Never guesses which tab you meant.
+- **`/health` now carries `mcpOk`** — a real MCP round-trip probe. `status:"ok"` alone could report healthy while `/mcp` returned zero bytes forever.
+- The tool-count guard derives both numbers from the source instead of pinning a literal.
+
 ## [2.0.3] — 2026-10-02
 
 - **The ambiguous-selector refusal now covers typing as well as clicking** (found by live re-test, not by the suite). `trusted_key` resolves the selector server-side before dispatching key events, so text can no longer land in the wrong editor when a selector matches two elements.

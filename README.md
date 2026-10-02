@@ -46,9 +46,9 @@ node src/server.js --http --http-port 9222
 
 **Bridge port.** Default `38401`, plain `ws://` on `127.0.0.1` (loopback is exempt from mixed-content blocking, so it works from HTTPS pages). Override with `--port <n>` on the server and the matching `PORT` constant in `extension/offscreen.js`. If the port is already taken the hub logs a warning and the server keeps running — MCP still works, the bridge just isn't claimed. Run isolated servers with different `--port` values.
 
-## The model's surface: 7 listed tools
+## The model's surface: 8 listed tools
 
-A model sees exactly seven tools. The rest stay callable by name but are not listed, so a model never has to choose between a wall of one-verb tools.
+A model sees exactly eight tools. The rest stay callable by name but are not listed, so a model never has to choose between a wall of one-verb tools.
 
 | tool | what it does |
 |---|---|
@@ -58,9 +58,10 @@ A model sees exactly seven tools. The rest stay callable by name but are not lis
 | `page_slice` | Full-fidelity records for one slice of the inventory (`tag / role / region / vp / interactive / query`), or any cached part of a diff. |
 | `tabs` | Tab/window ops: `list · switch · close · bind · frames · windows · focus · move · transfer · switchread`. |
 | `debug` | WebSense itself + raw reads: `status · session · logs · cookies · clipboard · screenshot · ax · evaluate · main_world · explore_page · reload · respawn · guide`. |
+| `preflight` | **Call this first when anything is refused.** Walks launch → server → extension → binding → page-ready, stops at the *first* broken link, and returns the command that fixes it. Read-only by default. |
 | `websense_guide` | Start here — returns the full in-tool guide. |
 
-**37 tools are registered; 30 of them are unlisted but callable by name.** The listable extras are summarised under [Other registered tools](#other-registered-tools).
+**38 tools are registered; 30 of them are unlisted but callable by name.** The listable extras are summarised under [Other registered tools](#other-registered-tools).
 
 ## Quick start — the loop
 

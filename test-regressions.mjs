@@ -3638,5 +3638,34 @@ test('watchdog: /health must report whether the MCP endpoint ACTUALLY answers', 
     'it must print the command a SUPERVISOR can run — found block was ' + wd.length + ' chars');
 });
 
+test('docs: README and the in-tool guide must agree on the LISTED surface (push checklist #1+#3)', () => {
+  // The push checklist's rule: two surfaces must never contradict each other. The listed count
+  // lived in three places and drifted (7 in README prose, 7 in the heading, 37 registered) while
+  // the guide said something else. Derive all of it from ONE source — WIRE_SURFACE — so adding
+  // a tool cannot leave the README claiming a number nobody maintains.
+  const CODE = SRV_SRC.replace(/\/\/[^\n]*/g, '');
+  const surfM = /WIRE_SURFACE = new Set\(\[([^\]]+)\]/.exec(SRV_SRC);
+  assert(surfM, 'WIRE_SURFACE must exist — it is the single source of truth for the listed surface');
+  const listed = surfM[1].matchAll(/'([a-z_]+)'/g);
+  const names = [...listed].map((m) => m[1]);
+  const rd = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  assert(rd.includes("The model's surface: " + names.length + ' listed tools'),
+    'the README heading must state the real listed count (' + names.length + ')');
+  assert(new RegExp('sees exactly ' + (names.length === 8 ? 'eight' : String(names.length))).test(rd),
+    'the README prose ("sees exactly N tools") must match too — words and digits drift apart');
+  // Every listed tool must have a README row, or a model reading only the README cannot find it.
+  for (const n of names) {
+    assert(rd.includes('`' + n + '`'), 'listed tool ' + n + ' must appear in the README table');
+  }
+  // And the guide must document each one — the guide is what an agent reads at runtime.
+  for (const n of names) {
+    assert(new RegExp('^\\s{2}' + n + '\\s{2,}', 'm').test(SRV_SRC),
+      'the in-tool guide must have a row for the listed tool ' + n);
+  }
+  // preflight is the FIRST call when refused — say so in the README, not only in the guide.
+  assert(/preflight.*first when anything is refused/is.test(rd),
+    'the README must tell a model to call preflight when a call is refused');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
