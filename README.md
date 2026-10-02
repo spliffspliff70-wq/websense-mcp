@@ -81,6 +81,15 @@ Every mutating action returns a second block: a grouped **DIFF** against your `b
 
 **A navigation is the strongest confirmation and is not in the groups:** when a `click` or `press_key` (Enter/Space) replaces the document, the result carries `effect:"confirmed"` plus a `navigation {from,to}`, and the diff line says so explicitly — a diff across a navigation compares two different documents, so its groups are meaningless.
 
+### Verdicts, and when they are wrong
+
+`effect` is derived from `page_state` — **url, title, readyState, scroll**. That is a deliberately weak signal, and an action that only changes the DOM does not move any of them. Two rules make that honest:
+
+- **The diff can upgrade the verdict.** When the page-side differ measures a real structure/content move (`mutated:true`), an `unverifiable` or `suspected_noop` verdict is upgraded to `confirmed` and carries `effectSource:"page_diff"`, and its stale escalation advice is removed with it. Measured on x.com: every trusted `type` into the thread composer used to answer `unverifiable` while the same reply said `mutated:true` — a verdict contradicting its own evidence, which reads as "no proof" and makes a caller re-run an action that already worked. **It only ever upgrades:** a `failed` verdict (the action layer refused — disabled, read-only) stays `failed`. The measurement happened; `classifyEffect` simply could not see it.
+- **An ambiguous selector is refused, not guessed.** `querySelector` returns the *first* match with no word, so a selector matching two elements silently drove the wrong one. Measured on x.com's `/compose/post`: `[data-testid="tweetTextarea_0"]` matches **twice** — the dialog's real composer and the empty page-level inline composer. You now get a refusal naming the count and the tag (`ambiguous selector … matches 2 elements — refusing to pick one silently`). **Scope it and retry:** `[role="dialog"] [data-testid="tweetTextarea_0"]`, or any selector that is unique on that page. This is also why `find` returns **all** matches with no cap — a cap would hide the second element and make the ambiguity invisible.
+
+`effect` remains weak evidence for everything else: `confirmed` means "the page measurably moved", never "the app accepted and persisted it". Re-read the field or the page when the outcome matters.
+
 ### Trusted input — `act{how:"trusted"}`
 
 `how:"trusted"` drives `chrome.debugger` + `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent`, so the page receives **`isTrusted`** events and **the browser itself runs the default action** (a link navigates, an Enter submits, a checkbox toggles, an arrow key moves a slider) instead of the tool guessing. It works in a **background tab** — no focus steal, no window activation. Chrome shows its "debugging this browser" infobar while attached.

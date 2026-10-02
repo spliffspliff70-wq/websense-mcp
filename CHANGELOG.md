@@ -3,6 +3,13 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [2.0.1] — 2026-10-02
+
+- **The diff can now upgrade a verdict.** A real structure/content move promotes `unverifiable`/`suspected_noop` to `confirmed` with `effectSource:"page_diff"`; a `failed` refusal is never upgraded.
+- **An ambiguous selector is refused, not resolved to the first match.** `act`/`trusted_click` report the match count and tag; scope the selector to disambiguate.
+- Fixed stale tool counts in `src/server.js`, `MODEL_PROMPT.md` and the guide exporter (all now 7 listed / 37 registered).
+- `find`/`page_slice` remain uncapped by design — the no-cap inventory is what makes a duplicate selector visible at all.
+
 ## [2.0.0] — 2026-10-01
 
 - **A 7-tool listed surface** — `browse`, `find`, `act`, `page_slice`, `tabs`, `debug`, `websense_guide`. The other 30 registered tools stay callable by name but are no longer listed.

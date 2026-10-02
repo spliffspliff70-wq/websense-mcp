@@ -79,8 +79,14 @@ THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
   act              DO something: action=click|hover|rightclick|drag|type|key|form|upload|scroll|dialog. how="trusted" goes through the browser's own input pipeline (a real isTrusted event, default actions run); how="os" is OS-level input and needs the tab in front. This is the one to reach for.
   debug            WebSense itself + raw reads: op=status|session|logs|cookies|clipboard|screenshot|ax|evaluate|main_world|explore_page|reload|respawn|guide. Reach for it when something is wrong.
   websense_guide   this guide
-  browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + the vocabulary. Replaces navigate+page_snapshot+map read.
+  browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + vocabulary. Replaces navigate+page_snapshot+map read.
   find             TOOL 2 — search the stored inventory; each hit gives WHERE (region, position, branch chain resolved from parent pointers) and WHAT (the page's own role/name/attrs/state). Returns ALL matches.
+
+★★ TWO ANSWERS YOU MUST KNOW BEFORE YOU TRUST A VERDICT ★★
+
+1. THE VERDICT CAN NOW BE UPGRADED BY THE DIFF. effect is decided from page_state (url/title/readyState/scroll) alone, so an action that ONLY changes the DOM — a trusted type, filling a field, opening an inline menu — used to answer 'unverifiable' while this same reply said mutated:true. That is a verdict contradicting its own evidence, and 'unverifiable' reads as "no proof", so a caller re-runs an action that already worked. Now: when the page-side differ measures a real structure/content move (mutated:true), an 'unverifiable' or 'suspected_noop' verdict is UPGRADED to 'confirmed' and carries effectSource:"page_diff", and the stale escalation advice is dropped with it. ★ IT ONLY EVER UPGRADES: a 'failed' verdict (the action layer refused, e.g. disabled/read-only) stays 'failed'. The measurement happened; classifyEffect just could not see it.
+
+2. AN AMBIGUOUS SELECTOR IS REFUSED, NOT GUESSED. querySelector returns the FIRST match with no word, so a selector matching two elements silently drove the wrong one. Measured on x.com's /compose/post: [data-testid="tweetTextarea_0"] matches TWICE — the dialog's real composer and the empty page-level inline composer. You now get a refusal naming the count and the tag: 'ambiguous selector ... matches 2 elements — refusing to pick one silently'. SCOPE IT and retry: [role="dialog"] [data-testid="tweetTextarea_0"], or a selector unique on that page. This is also why find returns ALL matches with no cap — a cap would hide the second element and the ambiguity would be invisible.
 THE REMAINING 30 — registered and callable by name, but NOT listed, so a model does not have to choose between them. The listed ones (page_slice, tabs) also appear here:
   explore_page     quick look at a page's actions (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (you usually do NOT need this any more: every mutating op returns a grouped DIFF automatically; for a full page map use browse + find instead — explore_page is the quick look, not the map)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
@@ -218,14 +224,20 @@ the 21 consolidated names:
 
 ## Why this prompt (design notes)
 - **No vision / no CDP debug port / no eval** is the core principle: the model navigates from the
-  Semantic Action Graph (structured JSON), which is immune to bot-detection and works on
+  lossless page inventory (structured JSON), which is immune to bot-detection and works on
   strict-CSP SPAs (LinkedIn, GitHub, Google).
-- **21 tools instead of 65** (2026-08-30 consolidation): every old tool became a
-  `mode`/`format`/`action`/`kind` parameter on a consolidated parent. Smaller schema on the
-  wire, same capabilities — the model picks one tool + one dispatcher arg instead of
-  memorizing 65 names.
-- The **autonomous loop** (explore → read → act → inspect → repeat) is explicit so the model
-  treats WebSense as its eyes/hands rather than reaching for screenshots.
+- **7 listed tools over 37 registered** (consolidated 2026-08-30, surface re-cut 2026-10-02):
+  the old tool names became `mode`/`format`/`action`/`kind` parameters on a consolidated parent,
+  and the remainder are registered and callable by name but unlisted so the model does not have
+  to choose between them. Smaller schema on the wire, same capabilities.
+- **The loop is `browse` → `find` → `act` → read the diff**, and every mutating action returns a
+  grouped diff so "did it land" is answerable without a second call. `explore_page` is kept as
+  the quick look, explicitly demoted from being the page map.
+- **The verdict is weak evidence and the diff is the strong one.** `effect` is derived from
+  url/title/readyState/scroll, so a DOM-only action used to answer `unverifiable` while the same
+  reply said `mutated:true`; a real structure/content move now upgrades it to `confirmed`
+  (`effectSource:"page_diff"`). An **ambiguous selector is refused rather than resolved to the
+  first match** — see the two numbered rules in the guide above.
 - **Dialog handling** is called out because native browser dialogs are the one thing DOM
   automation cannot reach — `dialog` (JS) and `dialog keystroke:true` (OS, via Windows
   control) close that gap.

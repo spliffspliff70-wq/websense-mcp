@@ -3358,5 +3358,134 @@ test('diff: SVG drawing attributes are rendering, not structure', () => {
   assert(/var RENDER_ATTRS = \[/.test(COLLECTOR), 'and the list is interpolated into the collector');
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// 2026-10-02 — TWO FIXES MEASURED ON x.com's THREAD COMPOSER
+// Both were found by USING the tool and reading its own output back, not by
+// reading the code: a verdict that contradicted its own diff, and a selector
+// that resolved to the wrong element without saying so.
+// ══════════════════════════════════════════════════════════════════════════
+
+test('verdict: a mutated:true diff UPGRADES an unverifiable verdict (it lied on x.com)', () => {
+  const CODE = SRV_SRC.replace(/\/\/[^\n]*/g, '');
+  // The upgrade must live where the diff is already computed (withDelta), so it covers EVERY
+  // delta op rather than being re-implemented per tool.
+  assert(/payload\.effect === 'unverifiable' \|\| payload\.effect === 'suspected_noop'/.test(CODE)
+    && /delta && delta\.mutated === true/.test(CODE),
+    'withDelta must upgrade unverifiable/suspected_noop when the diff measured a real move');
+  assert(/effectSource = 'page_diff'/.test(CODE),
+    "the upgrade must SAY it came from the diff (effectSource:'page_diff')");
+  // ★ IT ONLY EVER UPGRADES. A 'failed' verdict is a refusal (disabled/read-only) and a real
+  // measurement must not launder it into success. This is the direction that would be dangerous.
+  // Pin the WHOLE guard clause, not a hand-guessed block shape: the accepted inputs are named
+  // explicitly and 'failed' is absent from them, which is the property that matters.
+  const guard = /if \(payload && typeof payload === 'object'\s*\n\s*&&\s*\(payload\.effect === 'unverifiable' \|\| payload\.effect === 'suspected_noop'\)\s*\n\s*&&\s*delta && delta\.mutated === true\)/.exec(CODE);
+  assert(guard, 'the upgrade guard must accept exactly unverifiable|suspected_noop + mutated:true');
+  assert(!/payload\.effect === 'failed'/.test(guard[0]),
+    "the upgrade must NOT accept a 'failed' verdict — a refusal stays a refusal");
+  assert(/payload\.effect = 'confirmed'/.test(CODE),
+    "and it must set the verdict to 'confirmed', not merely annotate it");
+  // And the stale escalation advice must go WITH the upgrade, or a caller reads "re-read before
+  // retrying" on a now-confirmed verdict and clicks a second time.
+  assert(/if \(payload\.escalation\) delete payload\.escalation/.test(CODE),
+    'upgrading the verdict must also drop its now-stale escalation advice');
+});
+
+test('ambiguity: a selector matching >1 element is REFUSED, never first-match-wins', () => {
+  const CODE = SRV_SRC.replace(/\/\/[^\n]*/g, '');
+  // The page-side resolver must count, not take the first match.
+  assert(/querySelectorAll\(s\)\.length>1/.test(CODE) || /all\.length>1/.test(CODE),
+    'the resolver must detect a multi-match selector');
+  assert(/ambiguous:\s*true/.test(CODE), 'and report it as an ambiguity');
+  // …and pageCentre must surface it as an ERROR, not a silent null (a null falls into the
+  // "no box" branch, which blames the element and sends the caller to re-explore a fine page).
+  assert(/p\.ambiguous/.test(CODE) && /reason:\s*'ambiguous-selector'/.test(CODE),
+    'pageCentre must throw a named ambiguous-selector refusal');
+  // The refusal must TELL the caller how to fix it.
+  assert(/Scope it/.test(CODE), 'the refusal must say how to scope the selector');
+});
+
+test('ambiguity: the built resolver really reports a 2-match selector (EXECUTION, not a pattern pin)', () => {
+  // A pattern pin cannot catch a dropped line in a string-built page function — the same defect
+  // the existing PAGE_CENTRE_FUNC execution test was written for. So EXECUTE the real built
+  // function against a two-element DOM stub: the measured case is x.com's /compose/post, where
+  // [data-testid="tweetTextarea_0"] matches the dialog composer AND the empty inline decoy.
+  //
+  // ★ EVAL THE REAL EXPRESSION, DO NOT RE-ASSEMBLE THE STRING (2026-10-02). A hand-rolled
+  // line-scanner that concatenates the literal segments was tried first and failed three ways:
+  // it dropped lines carrying SEVERAL literals ('a=' + 'b=' + ';'), then dropped the FINAL
+  // segment (which ends `}';` with no trailing '+') — taking the whole `return {…}` with it, so
+  // the unique-selector case answered null and the test read as a product bug. The declaration
+  // is a JS expression; let JS evaluate it, exactly as the sibling execution test does.
+  const m = SRV_SRC.match(/const PAGE_CENTRE_FUNC = ([\s\S]*?);\n/);
+  assert(m, 'PAGE_CENTRE_FUNC must be defined');
+  const builder = eval('(' + m[1].replace(/;\s*$/, '') + ')');
+  const built = builder.replace(/SELV/g, JSON.stringify('[data-testid="tweetTextarea_0"]'))
+    .replace(/SCROLLV/g, 'false');
+
+  const TWO = '[data-testid="tweetTextarea_0"]';
+  const rect = { left: 10, top: 20, width: 40, height: 20, right: 50, bottom: 40 };
+  function makeEl() {
+    const el = {
+      getBoundingClientRect: () => rect,
+      querySelectorAll: () => [],
+      getAttribute: () => null, hasAttribute: () => false,
+      closest: () => null, focus() {},
+      parentNode: null, host: null, scrollIntoView: () => {},
+      tagName: 'DIV', id: '', className: '',
+    };
+    el.ownerDocument = { defaultView: globalThis.window, querySelector: () => null, querySelectorAll: () => [] };
+    return el;
+  }
+  const one = makeEl(), two = makeEl();
+  const mkDoc = (matches) => ({
+    querySelector: (s) => (s === TWO ? one : null),
+    querySelectorAll: (s) => (s === TWO ? matches : []),
+    elementFromPoint: () => one,
+  });
+
+  const hadWindow = ('window' in globalThis), hadDocument = ('document' in globalThis);
+  const oldWindow = globalThis.window, oldDocument = globalThis.document;
+  try {
+    globalThis.window = { innerWidth: 1280, innerHeight: 900, scrollTo() {}, scrollBy() {} };
+    // ── THE MEASURED CASE: two matches must be REFUSED, not resolved to the first.
+    globalThis.document = mkDoc([one, two]);
+    const out = eval('(' + built + ')')();
+    assert(out && out.ambiguous === true,
+      'a 2-match selector must return {ambiguous:true}, not silently resolve to the first: '
+      + JSON.stringify(out));
+    assert(out.count === 2, 'and it must report the real count (2), got: ' + JSON.stringify(out));
+    // ── AND A UNIQUE SELECTOR MUST STILL RESOLVE. Without this the fix could refuse EVERY
+    // lookup and still pass the assertion above.
+    globalThis.document = mkDoc([one]);
+    const out2 = eval('(' + built + ')')();
+    assert(!(out2 && out2.ambiguous), 'a UNIQUE selector must still resolve (no false refusal)');
+    assert(out2 && typeof out2.w === 'number' && out2.w > 0,
+      'and must still yield a real box: ' + JSON.stringify(out2));
+  } finally {
+    if (hadWindow) globalThis.window = oldWindow; else delete globalThis.window;
+    if (hadDocument) globalThis.document = oldDocument; else delete globalThis.document;
+  }
+});
+
+test('docs: no surface may claim a retired tool count', () => {
+  // The push checklist's stale-count class. These three were live in the tree: the exporter
+  // header said "a 21-tool guide", the MODEL_PROMPT footer said "21 tools instead of 65", and
+  // src/server.js said "exposes ~65 tools" — while the server registered 37 and listed 7.
+  const md = readFileSync(new URL('./MODEL_PROMPT.md', import.meta.url), 'utf8');
+  assert(!/\b21 tools\b/.test(md) && !/\binstead of 65\b/.test(md),
+    'MODEL_PROMPT.md must not teach a retired tool count');
+  assert(/7 listed/.test(md), 'MODEL_PROMPT.md must state the CURRENT listed surface');
+  const code = SRV_SRC.replace(/\/\/[^\n]*/g, '');
+  assert(!/exposes ~65 tools/.test(code), 'src/server.js must not claim ~65 tools');
+  const exp = readFileSync(new URL('./tools/export-guide.mjs', import.meta.url), 'utf8')
+    .replace(/\/\/[^\n]*/g, '');
+  assert(!/WebSense MCP — Guide \(31 consolidated tools\)/.test(exp),
+    "the exporter's own comment must not pin a retired guide title");
+  // README must document BOTH new behaviors where a reader will look for them.
+  const rd = readFileSync(new URL('./README.md', import.meta.url), 'utf8');
+  assert(/ambiguous selector/i.test(rd), 'README must document the ambiguous-selector refusal');
+  assert(/effectSource/.test(rd), 'README must document the diff-upgraded verdict');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

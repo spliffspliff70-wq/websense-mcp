@@ -441,7 +441,8 @@ function stampedHubSend(cmd) {
   return hubChrome.send(withSessionTab(cmd));
 }
 // ═══ SCHEMA MINIFIER (Ali directive 2026-08-18) ═══
-// WebSense exposes ~65 tools; raw SDK schemas cost ~10k+ tokens per request.
+// WebSense registers 37 tools and lists 7 on the wire; raw SDK schemas for all of them would
+// cost ~10k+ tokens per request, which is why tools/list is filtered to the listed surface.
 // The SDK converts zod -> JSON schema internally, so we post-process the
 // tools/list WIRE OUTPUT (installSchemaMinifier below): strip structural fat
 // ($schema, additionalProperties), clip tool descriptions, drop/trim param
@@ -661,16 +662,49 @@ function withDelta(name, handler) {
     // the navigation the handler proved; say it here too, because this block is what a caller
     // reads first.
     let navNote = '';
+    let payload = null;
     try {
       const firstText = res && Array.isArray(res.content) && res.content[0] && res.content[0].text;
-      const payload = firstText ? JSON.parse(firstText) : null;
+      payload = firstText ? JSON.parse(firstText) : null;
       const nav = payload && payload.navigation;
       if (nav) navNote = '\nTHE PAGE NAVIGATED (' + nav.from + ' -> ' + nav.to + ') — this baseline belongs to the document that was replaced, so structure/content/visual above are NOT meaningful. The navigation itself is the confirmation.'
         + (delta && delta.mutated === false ? ' In particular, mutated:false here does NOT mean nothing happened.' : '');
     } catch (_) { /* an unparseable payload just gets the plain line */ }
+    // ★★★ THE VERDICT MUST BE ABLE TO SEE THE DIFF (2026-10-02, Ali: "instead of relying on
+    // documented fails can we please fix them?"). Measured on x.com: every trusted TYPE of a
+    // thread post came back effect:'unverifiable' while THIS SAME reply said mutated:true — a
+    // verdict that contradicted its own evidence, in the worst direction: 'unverifiable' is
+    // documented as "not measured", so a caller reads it as "no proof" and re-runs the action.
+    //
+    // WHY IT HAPPENED: the per-op verdicts are decided from page_state ALONE (url/title/
+    // readyState/scroll — see withEffect/classifyEffect), and a trusted type changes none of
+    // those. It changes the DOM. The page-side differ had ALREADY measured that change; the
+    // verdict simply never read it. The two halves of one reply disagreed.
+    //
+    // THE FIX: when the page-side diff says the DOM genuinely moved, an 'unverifiable' verdict
+    // is superseded — the measurement DID happen, just not in the field classifyEffect reads.
+    // ★ ONLY EVER UPGRADES, NEVER DOWNGRADES: a mutated:true diff with a 'failed' verdict stays
+    // 'failed' (a refusal is a refusal), and 'confirmed' is already the strongest answer. This
+    // can only turn "I could not measure it" into "here is the measurement".
+    let verdictNote = '';
     try {
-      if (res && Array.isArray(res.content)) res.content.push({ type: 'text', text: line + navNote });
-      else return { content: [{ type: 'text', text: line + navNote }] };
+      if (payload && typeof payload === 'object'
+        && (payload.effect === 'unverifiable' || payload.effect === 'suspected_noop')
+        && delta && delta.mutated === true) {
+        payload.effect = 'confirmed';
+        payload.effectSource = 'page_diff';
+        // Keep the escalation advice consistent — leaving "re-read before retrying" attached to a
+        // now-confirmed verdict is how a caller talks itself into clicking a second time.
+        if (payload.escalation) delete payload.escalation;
+        if (res && Array.isArray(res.content) && res.content[0]) {
+          res.content[0].text = JSON.stringify(payload);
+        }
+        verdictNote = '\nVERDICT: upgraded unverifiable -> confirmed FROM THE DIFF. page_state (url/title/readyState/scroll) did not change because this action only changed the DOM, but the page-side differ measured a real structure/content move (mutated:true) — see the counts above. The earlier unverifiable was the state-pair being blind to DOM edits, not a failure.';
+      }
+    } catch (_) { /* never let the verdict fix break a result */ }
+    try {
+      if (res && Array.isArray(res.content)) res.content.push({ type: 'text', text: line + navNote + verdictNote });
+      else return { content: [{ type: 'text', text: line + navNote + verdictNote }] };
     } catch (_) { /* never let the flag break a result */ }
     return res;
   };
@@ -819,9 +853,25 @@ function sendKeysForWindows(key) {
 // focus, so the scroll happens only when the CENTRE is outside the viewport.
 const PAGE_CENTRE_FUNC = 'function(){' +
   'var SEL=' + 'SELV' + ';' +
-  'function find(s,d){var e=d.querySelector(s);if(e)return e;var fs=d.querySelectorAll("iframe");' +
+  'function find(s,d){var e=d.querySelector(s);' +
+  // ★ AN AMBIGUOUS SELECTOR MUST NOT RESOLVE SILENTLY TO "the first one" (2026-10-02, Ali:
+  // "instead of relying on documented fails can we please fix them?"). Measured on x.com:
+  // [data-testid="tweetTextarea_0"] matches TWICE at once — the /compose/post dialog's real
+  // composer AND the empty page-level inline composer. querySelector returns the first with no
+  // word, so a type can land in the wrong editor and the reply looks successful either way.
+  // That is the two-composer trap, and it is a WIRING failure, not an x.com quirk.
+  //
+  // THE FIX: when a selector matches more than one element, do NOT guess — report the
+  // multiplicity (count + tag) so the caller can scope explicitly, e.g.
+  // [role="dialog"] [data-testid="tweetTextarea_0"]. A refusal that NAMES the two candidates
+  // beats a click that silently went to the wrong one.
+  'if(e){try{var all=d.querySelectorAll(s);if(all.length>1){return {ambiguous:true,count:all.length,tag:String(e.tagName).toLowerCase()};}}catch(_a){}return e;}' +
+  // Same-origin frame walk — UNCHANGED, documented capability (only a cross-origin frame is out
+  // of reach). Kept AFTER the ambiguity check so a clean multi-frame page still resolves.
+  'var fs=d.querySelectorAll("iframe");' +
   'for(var i=0;i<fs.length;i++){try{if(fs[i].contentDocument){var r=find(s,fs[i].contentDocument);if(r)return r;}}catch(x){}}return null;}' +
   'var el=find(SEL,document);if(!el)return null;' +
+  'if(el.ambiguous)return el;' +
   // rectOf(e): any element's rect in TOP-viewport space (walks frameElement up). Was topRect(),
   // which was hardcoded to `el`.
   'function rectOf(e){var r=e.getBoundingClientRect();var x=r.left,y=r.top,inF=false;' +
@@ -944,6 +994,23 @@ async function pageCentre(sel, tabId, doScroll) {
   const raw = await callTool('main_world', { tabId: tabId, verify: false,
     func: PAGE_CENTRE_FUNC.replace(/SELV/g, JSON.stringify(String(sel))).replace(/SCROLLV/g, doScroll ? 'true' : 'false') });
   const p = mainWorldValue(raw);
+  // ★ AN AMBIGUOUS SELECTOR IS A REFUSAL, NOT A MISS (2026-10-02). pageCentre must pass it up:
+  // returning null here would drop it into the "no box" branch, which blames the ELEMENT and
+  // sends the caller off to re-explore a page that is fine. The page told us exactly what is
+  // wrong — two elements match — so that is the error the caller must read.
+  if (p && p.ambiguous) {
+    const e = new Error('ambiguous selector "' + String(sel) + '" matches ' + p.count
+      + ' elements (<' + (p.tag || '?') + '>) — refusing to pick one silently. Scope it, e.g. '
+      + '[role="dialog"] ' + String(sel) + ', or use a selector that is unique on this page.');
+    e.detail = {
+      reason: 'ambiguous-selector',
+      selector: String(sel),
+      matches: p.count,
+      tag: p.tag || null,
+      hint: 'A selector matching more than one element is refused rather than resolved to the first match. Scope the selector to a container ([role="dialog"], a form, a specific parent) so exactly one element matches.',
+    };
+    throw e;
+  }
   // w/h are REQUIRED (2026-10-02): without them the reply cannot be told apart from a
   // zero-box one, and the guard downstream would have nothing to test. A missing/NaN size
   // falls back to the geometry op rather than fabricating a 2x2.
@@ -1226,8 +1293,14 @@ THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
   act              DO something: action=click|hover|rightclick|drag|type|key|form|upload|scroll|dialog. how="trusted" goes through the browser's own input pipeline (a real isTrusted event, default actions run); how="os" is OS-level input and needs the tab in front. This is the one to reach for.
   debug            WebSense itself + raw reads: op=status|session|logs|cookies|clipboard|screenshot|ax|evaluate|main_world|explore_page|reload|respawn|guide. Reach for it when something is wrong.
   websense_guide   this guide
-  browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + the vocabulary. Replaces navigate+page_snapshot+map read.
+  browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + vocabulary. Replaces navigate+page_snapshot+map read.
   find             TOOL 2 — search the stored inventory; each hit gives WHERE (region, position, branch chain resolved from parent pointers) and WHAT (the page's own role/name/attrs/state). Returns ALL matches.
+
+★★ TWO ANSWERS YOU MUST KNOW BEFORE YOU TRUST A VERDICT ★★
+
+1. THE VERDICT CAN NOW BE UPGRADED BY THE DIFF. effect is decided from page_state (url/title/readyState/scroll) alone, so an action that ONLY changes the DOM — a trusted type, filling a field, opening an inline menu — used to answer 'unverifiable' while this same reply said mutated:true. That is a verdict contradicting its own evidence, and 'unverifiable' reads as "no proof", so a caller re-runs an action that already worked. Now: when the page-side differ measures a real structure/content move (mutated:true), an 'unverifiable' or 'suspected_noop' verdict is UPGRADED to 'confirmed' and carries effectSource:"page_diff", and the stale escalation advice is dropped with it. ★ IT ONLY EVER UPGRADES: a 'failed' verdict (the action layer refused, e.g. disabled/read-only) stays 'failed'. The measurement happened; classifyEffect just could not see it.
+
+2. AN AMBIGUOUS SELECTOR IS REFUSED, NOT GUESSED. querySelector returns the FIRST match with no word, so a selector matching two elements silently drove the wrong one. Measured on x.com's /compose/post: [data-testid="tweetTextarea_0"] matches TWICE — the dialog's real composer and the empty page-level inline composer. You now get a refusal naming the count and the tag: 'ambiguous selector ... matches 2 elements — refusing to pick one silently'. SCOPE IT and retry: [role="dialog"] [data-testid="tweetTextarea_0"], or a selector unique on that page. This is also why find returns ALL matches with no cap — a cap would hide the second element and the ambiguity would be invisible.
 THE REMAINING 30 — registered and callable by name, but NOT listed, so a model does not have to choose between them. The listed ones (page_slice, tabs) also appear here:
   explore_page     quick look at a page's actions (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (you usually do NOT need this any more: every mutating op returns a grouped DIFF automatically; for a full page map use browse + find instead — explore_page is the quick look, not the map)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)

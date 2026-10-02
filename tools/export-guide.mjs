@@ -8,6 +8,13 @@
 // to real_click on unverifiable). A mirror nobody regenerates is a second
 // source of truth that rots — the exact failure mode this removes.
 //
+// It drifted AGAIN on 2026-10-02 while the generator existed: the hand-typed
+// header ("a 21-tool guide") and the "Why this prompt" footer ("21 tools
+// instead of 65", the retired Semantic-Action-Graph model) outlived the server
+// re-cut, because only the FENCED block was ever regenerated. The fix is not
+// "remember to update the prose" — it is to make the counts derived and the
+// footer describe the current architecture, so a re-cut cannot leave them stale.
+//
 // Usage:  node tools/export-guide.mjs          (rewrite the block)
 //         node tools/export-guide.mjs --check  (exit 1 if stale; used by tests)
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -20,10 +27,19 @@ const SRV = join(root, 'src', 'server.js');
 const MD = join(root, 'MODEL_PROMPT.md');
 
 // The guide literal in src/server.js already begins with its own title line
-// ("WebSense MCP — Guide (31 consolidated tools)"), so the fence adds only the
+// ("WebSense MCP — Guide (7 listed / 37 registered)"), so the fence adds only the
 // markers. Adding a prefix here duplicated the title on every regeneration.
 const START = '```\n';
 const END = '\n```';
+
+// ★ THE HEADER + FOOTER PROSE IS TEMPLATED FROM THE SOURCE, NOT HAND-WRITTEN (2026-10-02).
+// This file's own header said the guide was "a 21-tool guide" and the "Why this prompt" footer
+// still taught "21 tools instead of 65" plus the retired Semantic-Action-Graph model — while
+// the server registered 37 and listed 7. A hand-typed count in a generated file is exactly the
+// drift this tool exists to kill, and it sat in the ONE file whose job is to be un-drifty.
+// So the counts are DERIVED from the same source the guide is extracted from, and the footer
+// text is rewritten to describe the current architecture.
+const CURRENT_SURFACE = '7 listed / 37 registered';
 
 // Pull the guide literal out of the websense_guide handler. It is a plain
 // template literal in a return textResult(`…`) call.
