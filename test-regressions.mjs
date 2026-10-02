@@ -2568,6 +2568,105 @@ test('PAGE_CENTRE_FUNC: the built function must EXECUTE — pattern pins do not 
   }
 });
 
+test('PAGE_CENTRE_FUNC: a hidden control resolves to its LABEL proxy — the human path (2026-10-02)', () => {
+  // Ali: "trusted everywhere as the single click action ... it would be like saying a user click
+  // will not work ... if it fails it's the wiring." A visually-hidden input has NO coordinate —
+  // but its label[for] does, and THAT is what a human presses. The resolver must follow it:
+  // input 0x0, label rendered -> probes run on the label (el reassigned), the reply carries
+  // viaLabel + the label's proven point + the label's box (what will actually be dispatched at).
+  // And the honest-refusal twin: no rendered label -> the refusal STANDS (nothing to press).
+  const m = SRV_SRC.match(/const PAGE_CENTRE_FUNC = ([\s\S]*?);\n/);
+  assert(m, 'PAGE_CENTRE_FUNC must be defined');
+  const builder = eval('(' + m[1].replace(/;\s*$/, '') + ')');
+  const built = builder.replace(/SELV/g, JSON.stringify('#hidden')).replace(/SCROLLV/g, 'false');
+  const zero = { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+  const labRect = { left: 200, top: 300, width: 80, height: 24, right: 280, bottom: 324 };
+  const hadWindow = ('window' in globalThis), hadDocument = ('document' in globalThis);
+  const oldWindow = globalThis.window, oldDocument = globalThis.document;
+  try {
+    globalThis.window = { innerWidth: 1920, innerHeight: 1080 };
+    const mk = (tagName, id, rect) => ({
+      getBoundingClientRect: () => rect,
+      querySelectorAll: () => [],
+      ownerDocument: null,
+      parentNode: null, host: null,
+      tagName, id, className: '',
+      closest: () => null,
+      scrollIntoView: () => {}
+    });
+    const label = mk('LABEL', '', labRect);
+    const el = mk('INPUT', 'hidden', zero);
+    const doc = {
+      querySelector: (s) => (s === '#hidden' ? el : (s === 'label[for="hidden"]' ? label : null)),
+      querySelectorAll: () => [],
+      elementFromPoint: (x, y) => (x >= 200 && x <= 280 && y >= 300 && y <= 324 ? label : null)
+    };
+    el.ownerDocument = doc; label.ownerDocument = doc;
+    globalThis.document = doc;
+    const out = eval('(' + built + ')')();
+    assert(out && out.viaLabel === true,
+      'the proxy path must be taken (viaLabel) for a 0x0 input whose label renders');
+    assert(out.unreachable === false && out.click, 'the label must yield a proven point');
+    assert(typeof out.click.x === 'number' && out.click.x >= 200 && out.click.x <= 280 &&
+           out.click.y >= 300 && out.click.y <= 324,
+      'the proven point must lie ON the label, got ' + JSON.stringify(out.click));
+    assert(out.w === 80 && out.h === 24,
+      'the returned box must be the LABEL box the dispatch will use, got ' + out.w + 'x' + out.h);
+    assert(out.blockedBy === '', 'no occluder on a reachable label');
+    // The refusal twin: same 0x0 input, NO label in the DOM.
+    const doc2 = {
+      querySelector: (s) => (s === '#hidden' ? el : null),
+      querySelectorAll: () => [],
+      elementFromPoint: () => null
+    };
+    el.ownerDocument = doc2;
+    globalThis.document = doc2;
+    const out2 = eval('(' + built + ')')();
+    assert(out2.viaLabel === false && out2.unreachable === true,
+      'with no rendered label the refusal must STAND — the page renders nothing to press');
+  } finally {
+    if (hadWindow) globalThis.window = oldWindow; else delete globalThis.window;
+    if (hadDocument) globalThis.document = oldDocument; else delete globalThis.document;
+  }
+});
+
+test('trusted is the SINGLE click action: auto is TRUSTED-FIRST; hover/rightclick route through it (2026-10-02)', () => {
+  // Ali: "The idea is to have trusted everywhere as the single click action, there is no possible
+  // reason that this should not work ... If it fails it's the wiring and or other components.
+  // Make it happen." Pins the ROUTING: (1) auto tries trusted_click BEFORE the synthetic click;
+  // (2) a successful trusted dispatch returns immediately — synthetic can never run behind it
+  // (no double click); (3) the synthetic rung is a TAGGED refusal-only fallback; (4) hover and
+  // rightclick no longer drop `how` — trusted-first with button:'right' / mode:'hover'; (5) an
+  // explicit how:"trusted" keeps its refusal; (6) mode reaches the hub on BOTH dispatch paths and
+  // the SW returns after the move with NO press; (7) viaLabel survives the return whitelist;
+  // (8) a hover never runs the navigation probe.
+  const tIdx = SRV_SRC.indexOf("const tr0 = await callTool('trusted_click'");
+  const sIdx = SRV_SRC.indexOf("const r0 = await callTool('click'");
+  assert(tIdx > -1 && sIdx > -1, 'auto must call trusted_click and the synthetic click');
+  assert(tIdx < sIdx, 'TRUSTED-FIRST: trusted_click must be called BEFORE the synthetic click');
+  assert(/p0\.path = 'auto→trusted'/.test(SRV_SRC), 'a trusted acceptance must be tagged auto→trusted');
+  assert(/q0\.path = 'auto→synthetic'[\s\S]{0,200}trustedRefusal/.test(SRV_SRC),
+    'the fallback must be tagged auto→synthetic WITH the refusal it fell back from — never silent');
+  assert(/success === true[\s\S]{0,80}return _wrap\(p0\)/.test(SRV_SRC),
+    'a successful trusted dispatch returns immediately — the synthetic click must not run behind it');
+  assert(/extra\.button = 'right'/.test(SRV_SRC), "rightclick must map to the trusted pipeline's button:'right'");
+  assert(/extra\.mode = 'hover'/.test(SRV_SRC), "hover must map to trusted_click mode:'hover'");
+  assert(/if \(trusted\) return trh;/.test(SRV_SRC),
+    'an explicit how:"trusted" refusal must STAND — falling back to synthetic would hide what the caller asked for');
+  assert(/mode: z\.enum\(\['click',\s*'hover'\]\)/.test(SRV_SRC), 'trusted_click must declare mode');
+  assert(/mode: isHover \? 'hover' : 'click'/.test(SRV_SRC), 'the coordinate dispatch path must carry the mode');
+  assert(/mode: isHoverR \? 'hover' : 'click'/.test(SRV_SRC), 'the ref dispatch path must carry the mode');
+  assert(/payload\.mode === 'hover'/.test(BG_SRC), 'the SW must branch on mode');
+  assert(/payload\.mode === 'hover'[\s\S]{0,1600}mousePressed/.test(BG_SRC),
+    'the hover branch must return BEFORE the press — a hover must not click');
+  assert(/hover: true/.test(BG_SRC), 'the hover reply must say hover:true');
+  assert(/viaLabel: !!p\.viaLabel/.test(SRV_SRC), "viaLabel must survive pageCentre's return whitelist");
+  assert(/viaLabel:viaLabel/.test(SRV_SRC), 'the resolver must return viaLabel');
+  assert(/!isHover && result\.effect !== 'confirmed'/.test(SRV_SRC) &&
+         /!isHoverR && result\.effect !== 'confirmed'/.test(SRV_SRC),
+    'a hover must not poll for navigation');
+});
+
 test('trusted_key: wired like the click, and it must SHARE the preparation', () => {
   // The keyboard half of trusted_click, for the same measured reason: a dispatched KeyboardEvent is
   // untrusted, so the browser runs NO default action. Measured on en.wikipedia.org: an Enter reached

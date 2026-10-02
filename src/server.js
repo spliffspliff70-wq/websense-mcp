@@ -839,6 +839,18 @@ const PAGE_CENTRE_FUNC = 'function(){' +
   'var ds=el.querySelectorAll("*");for(var i=0;i<ds.length;i++){var b=rectOf(ds[i]);' +
   'if(b.w<=0||b.h<=0)continue;if(!best||(b.w*b.h)>(best.w*best.h))best=b;}' +
   'return best||a;}' +
+  // ★ THE LABEL IS WHERE A HUMAN CLICKS A HIDDEN INPUT (2026-10-02, Ali: "trusted everywhere as
+  // the single click action ... it would be like saying a user click will not work ... if it
+  // fails it's the wiring"). The visually-hidden pattern gives the control itself NO pixels (0x0,
+  // off-screen clip, display:none) — but the page pairs it with a label[for] (or a wrapping
+  // label) that DOES render, and that label is the surface a real mouse presses; the browser
+  // forwards the trusted click to the input. When the element's own box yields no reachable
+  // point, resolve THAT instead of refusing: same page, same user path, still one coordinate.
+  'function proxyOf(e){var px=null;' +
+  'try{if(e.id){var esc=(window.CSS&&CSS.escape)?CSS.escape(e.id):e.id;' +
+  'px=e.ownerDocument.querySelector("label[for=\\""+esc+"\\"]");}}catch(_e){}' +
+  'if(!px){try{px=e.closest?e.closest("label"):null;}catch(_e2){}}' +
+  'return (px&&px!==e)?px:null;}' +
   'var a=pick();' +
   'var cx=a.x+a.w/2,cy=a.y+a.h/2;' +
   'var off=(cx<0||cy<0||cx>window.innerWidth||cy>window.innerHeight);' +
@@ -874,24 +886,44 @@ const PAGE_CENTRE_FUNC = 'function(){' +
   // reach the target, which is not necessarily the geometric centre). All probes miss ->
   // unreachable:true + the identity of what sits on top, so the handler can refuse honestly
   // and name the remedy instead of clicking the overlay and reporting a quiet no-op.
-  'function reaches(h){var p=h;for(var g=0;g<25&&p;g++){if(p===el)return true;p=p.parentNode||p.host;}return false;}' +
-  'var _own=el.getBoundingClientRect(),_te=rectOf(el);' +
-  'var _fox=_te.x-_own.left,_foy=_te.y-_own.top;' +
-  'var _fr=[[0.5,0.5],[0.25,0.25],[0.75,0.25],[0.25,0.75],[0.75,0.75],[0.5,0.15],[0.5,0.85],[0.15,0.5],[0.85,0.5]];' +
-  'var _first=null,_hp=null;' +
-  'for(var _i=0;_i<_fr.length;_i++){' +
-  'var _tx=t.x+t.w*_fr[_i][0],_ty=t.y+t.h*_fr[_i][1];' +
-  'var _h=null;try{_h=el.ownerDocument.elementFromPoint(_tx-_fox,_ty-_foy);}catch(_e){}' +
-  'if(!_h)continue;if(!_first)_first=_h;' +
-  'if(reaches(_h)){_hp={x:Math.round(_tx),y:Math.round(_ty)};break;}' +
+  // PROBE IS A FUNCTION BECAUSE IT NOW RUNS TWICE (2026-10-02): once on the element's own box,
+  // and — when no point reaches it — again on its label proxy. Same hit test, same verdict shape,
+  // one body. `tgt` is the element being probed (label after a proxy switch) and `boxT` the box
+  // whose points are sampled (the re-resolved rect after any reveal scroll).
+  'function probe(tgt,boxT){' +
+  'function reaches(h){var p=h;for(var g=0;g<25&&p;g++){if(p===tgt)return true;p=p.parentNode||p.host;}return false;}' +
+  'var own=tgt.getBoundingClientRect(),te=rectOf(tgt);' +
+  'var fox=te.x-own.left,foy=te.y-own.top;' +
+  'var fr=[[0.5,0.5],[0.25,0.25],[0.75,0.25],[0.25,0.75],[0.75,0.75],[0.5,0.15],[0.5,0.85],[0.15,0.5],[0.85,0.5]];' +
+  'var first=null,hp=null;' +
+  'for(var i2=0;i2<fr.length;i2++){' +
+  'var tx=boxT.x+boxT.w*fr[i2][0],ty=boxT.y+boxT.h*fr[i2][1];' +
+  'var h=null;try{h=tgt.ownerDocument.elementFromPoint(tx-fox,ty-foy);}catch(_e){}' +
+  'if(!h)continue;if(!first)first=h;' +
+  'if(reaches(h)){hp={x:Math.round(tx),y:Math.round(ty)};break;}' +
   '}' +
-  // blockedBy must ONLY be set when unreachable — on success _first is simply the element the
+  // blockedBy must ONLY be set when unreachable — on success first is simply the element the
   // first probe hit (often a child that reaches), and reporting it as an "occluder" is noise
   // that made successful replies self-contradictory (measured: unreachable:false alongside
   // blockedBy:"path" on a click that worked).
-  'var _bb="";if(!_hp&&_first){_bb=_first.tagName||"";if(_first.id)_bb+="#"+_first.id;' +
-  'var _c=(typeof _first.className==="string")?_first.className:"";if(_c)_bb+="."+_c.split(" ")[0];}' +
-  'return {x:Math.round(t.x),y:Math.round(t.y),w:Math.round(t.w),h:Math.round(t.h),inFrame:t.inFrame,offViewport:off,scrolled:!!(SCROLLV&&off),click:_hp,unreachable:_hp?false:true,blockedBy:_bb};}';
+  'var bb="";if(!hp&&first){bb=first.tagName||"";if(first.id)bb+="#"+first.id;' +
+  'var c=(typeof first.className==="string")?first.className:"";if(c)bb+="."+c.split(" ")[0];}' +
+  'return {hp:hp,bb:bb};}' +
+  'var R=probe(el,t);' +
+  // ★ THE PROXY RETRY — only when the element itself could not be reached. A reachable element
+  // is clicked directly (the input, not its label). No proxy in the DOM, or the proxy also has
+  // no pixels: the refusal stands, and it is honest — the page renders nothing to press.
+  'var viaLabel=false;' +
+  'if(!R.hp){var px=proxyOf(el);' +
+  'if(px){var pr=rectOf(px);' +
+  'if(pr.w>0&&pr.h>0){el=px;viaLabel=true;' +
+  'a=pick();cx=a.x+a.w/2;cy=a.y+a.h/2;' +
+  'off=(cx<0||cy<0||cx>window.innerWidth||cy>window.innerHeight);' +
+  'if(SCROLLV&&off){el.scrollIntoView({block:"center"});var q2=pick();var dy2=q2.y+q2.h/2-window.innerHeight/2;if(Math.abs(dy2)>8)window.scrollBy(0,dy2);}' +
+  't=(SCROLLV&&off)?pick():a;' +
+  'R=probe(el,t);}}}' +
+  'var _bb=R.bb,_hp=R.hp;' +
+  'return {x:Math.round(t.x),y:Math.round(t.y),w:Math.round(t.w),h:Math.round(t.h),inFrame:t.inFrame,offViewport:off,scrolled:!!(SCROLLV&&off),viaLabel:viaLabel,click:_hp,unreachable:_hp?false:true,blockedBy:_bb};}';
 
 // ★ THE REPLY IS JSON, SO IT IS READ AS JSON (2026-10-01). pageCentre used to pull the two numbers
 // straight out of the reply TEXT with /x[^-\d]{0,10}(-?\d+)/ — a parse that only works because of
@@ -922,7 +954,7 @@ async function pageCentre(sel, tabId, doScroll) {
   // blockedBy) would have been erased right before dispatch — the guard downstream would never
   // fire and the blind click it exists to prevent would go out anyway. Pass them through.
   return { x: p.x, y: p.y, w: p.w, h: p.h, fromPage: true, inFrame: !!p.inFrame,
-           offViewport: !!p.offViewport, scrolled: !!p.scrolled,
+           offViewport: !!p.offViewport, scrolled: !!p.scrolled, viaLabel: !!p.viaLabel,
            click: (p.click && typeof p.click.x === 'number' && typeof p.click.y === 'number') ? { x: p.click.x, y: p.click.y } : null,
            unreachable: !!p.unreachable, blockedBy: (typeof p.blockedBy === 'string') ? p.blockedBy : '' };
 }
@@ -951,6 +983,11 @@ function registerFacades(server) {
     const trusted = o.how === 'trusted';
     const os = o.how === 'os';
     const pass = (extra) => Object.assign({}, o, extra);
+    // JSON decode/encode for the ladder below: a tool answers as textResult JSON, and the routing
+    // decision (did the trusted path ACCEPT the click or REFUSE it?) must read success/error
+    // structurally — never by string-guessing over the reply text.
+    const _json = (r) => { try { const t = r && r.content && r.content[0] && r.content[0].text; return t ? JSON.parse(t) : null; } catch (_) { return null; } };
+    const _wrap = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj) }] });
     if (a === 'click') {
       if (os) return await callTool('real_click', pass({}));
       // ★ TRUSTED COORDINATE CLICKS (2026-10-02): the trusted path used to receive
@@ -963,28 +1000,29 @@ function registerFacades(server) {
         const sel = o.ref || o.selector;
         return await callTool('trusted_click', pass(sel ? { selector: sel } : { x: o.x, y: o.y }));
       }
-      // ★ SELF-ESCALATING CLICK (2026-10-02). `how:"auto"` routes to the
-      // synthetic dispatchEvent click. A page that inspects isTrusted (React
-      // gated handlers, the x.com thread +, canvas/WebGL) accepts the event
-      // but runs no default action, so the verdict comes back
-      // suspected_noop / unverifiable while a trusted Input.dispatchMouseEvent
-      // at the same box lands. The model should not have to know which
-      // controls gate on trust: try the cheap synthetic path, and when the
-      // page measurably ignored it, retry through the trusted pipeline in the
-      // same call — UNLESS the page NAVIGATED (a navigation is the strongest
-      // confirmation there is, so it is never "re-tried").
-      const r = await callTool('click', pass({}));
-      const eff = r && r.effect;
-      const navigated = r && r.navigation && r.navigation.to && r.navigation.to !== r.navigation.from;
-      if (eff !== 'suspected_noop' && eff !== 'unverifiable') return r;
-      if (navigated) return r;
-      const sel2 = o.ref || o.selector;
-      const tr = await callTool('trusted_click', pass(sel2 ? { selector: sel2 } : { x: o.x, y: o.y }));
-      if (tr && typeof tr === 'object' && Array.isArray(tr.content)) {
-        const txt = (tr.content[0] && tr.content[0].text) || '';
-        try { const parsed = JSON.parse(txt); if (parsed && parsed.success) { parsed.escalatedFrom = 'click(auto)'; return { content: [{ type: 'text', text: JSON.stringify(parsed) }] }; } } catch (_) {}
+      // ★ TRUSTED IS THE SINGLE CLICK ACTION (2026-10-02, Ali: "The idea is to have trusted
+      // everywhere as the single click action, there is no possible reason that this should not
+      // work, it would be like saying a user click will not work ... If it fails it's the wiring
+      // and or other components. Make it happen."). TRUSTED-FIRST: how:"auto" runs the real input
+      // pipeline FIRST — resolve the box, hit-test it, Input.dispatchMouseEvent — because a user's
+      // click IS the default input, not an escalation. The synthetic dispatchEvent click survives
+      // as the FALLBACK for the two refusals trusted_click now reports honestly (no coordinate
+      // exists for the element and no label proxy rendered either, or every point on it is
+      // occluded) plus transport failure (debugger unavailable). A refusal returns BEFORE any
+      // dispatch, so the fallback cannot double-click. The reply is TAGGED — path:'auto→trusted'
+      // or path:'auto→synthetic' with trustedRefusal — so which rung fired is never silent.
+      const selA = o.ref || o.selector;
+      const tr0 = await callTool('trusted_click', pass(selA ? { selector: selA } : { x: o.x, y: o.y }));
+      const p0 = _json(tr0);
+      if (p0 && p0.success === true) { p0.path = 'auto→trusted'; return _wrap(p0); }
+      const r0 = await callTool('click', pass({}));
+      const q0 = _json(r0);
+      if (q0 && typeof q0 === 'object') {
+        q0.path = 'auto→synthetic';
+        q0.trustedRefusal = (p0 && (p0.error || '')) || 'trusted_click unavailable';
+        return _wrap(q0);
       }
-      return tr;
+      return r0;
     }
     if (a === 'drag' && trusted) {
       const tb = o.tabId || sessionTabOf();
@@ -1036,7 +1074,35 @@ function registerFacades(server) {
       return { content: [{ type: 'text', text: JSON.stringify(rr !== undefined && rr !== null ? rr : dr) }] };
     }
     if (a === 'hover' || a === 'rightclick' || a === 'drag') {
-      return await callTool('click', pass({ mode: a }));
+      // drag+trusted is handled above (trusted_drag); how:"os" keeps the old synthetic route
+      // (the OS rung has no hover, and rightclick's OS path was never wired — unchanged here).
+      if (a === 'drag' || os) return await callTool('click', pass({ mode: a }));
+      // ★ HOVER AND RIGHT-CLICK ARE THE SAME CLICK ACTION (2026-10-02, Ali: "trusted everywhere as
+      // the single click action ... make it happen"). This branch used to drop `how` on the floor:
+      // BOTH went to the synthetic dispatch even for how:"trusted", so the trusted rung was
+      // unreachable for them. Trusted-first now, same rule as the click branch — right-click is
+      // the SAME trusted pipeline with button:'right' (the extension already honors
+      // payload.button: mask 2), and hover is the same pipeline WITHOUT the press (the move that
+      // precedes every trusted click is exactly what applies :hover; mode:'hover' returns right
+      // after it). Synthetic only behind a TAGGED refusal.
+      const selH = o.ref || o.selector;
+      const extra = {};
+      if (a === 'rightclick') extra.button = 'right';
+      if (a === 'hover') extra.mode = 'hover';
+      const trh = await callTool('trusted_click', pass(Object.assign(selH ? { selector: selH } : { x: o.x, y: o.y }, extra)));
+      const ph = _json(trh);
+      if (ph && ph.success === true) { ph.path = 'auto→trusted'; return _wrap(ph); }
+      // An explicit how:"trusted" keeps its refusal — synthetic is not trusted, and silently
+      // substituting it would hide exactly what the caller asked for.
+      if (trusted) return trh;
+      const rh = await callTool('click', pass({ mode: a }));
+      const qh = _json(rh);
+      if (qh && typeof qh === 'object') {
+        qh.path = 'auto→synthetic';
+        qh.trustedRefusal = (ph && (ph.error || '')) || 'trusted_click unavailable';
+        return _wrap(qh);
+      }
+      return rh;
     }
     if (a === 'type') {
       if (os) return await callTool('real_paste', pass({}));
@@ -2079,6 +2145,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       selector: z.string().optional().describe('CSS selector alternative to ref'),
       button: z.enum(['left', 'right', 'middle']).optional().describe('Mouse button (default left)'),
       clickCount: z.number().optional().describe('Click count; 2 for a double click (this is what reaches the page as event.detail)'),
+      mode: z.enum(['click', 'hover']).optional().describe('"click" (default) = move+press+release; "hover" = the SAME trusted pipeline with the move only — no press — which is exactly what applies :hover for a real mouse'),
       tabId: z.number().optional().describe('Target tab; omit to use your bound tab'),
     },
   }, async (o) => {
@@ -2101,8 +2168,9 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
       const btn = o.button || 'left';
       const mask = btn === 'left' ? 1 : btn === 'right' ? 2 : 4;
       const count = Number(o.clickCount) || 1;
-      const before = await readPageState(tabId);
-      const result = await getActiveHub().send({ type: 'trusted_click', tabId, x: cx, y: cy, button: btn, clickCount: count });
+      const isHover = o.mode === 'hover';
+      const before = isHover ? null : await readPageState(tabId);
+      const result = await getActiveHub().send({ type: 'trusted_click', tabId, x: cx, y: cy, button: btn, clickCount: count, mode: isHover ? 'hover' : 'click' });
       const rr = unwrapRelay(result);
       const refuse = relayFailure(rr);
       if (refuse) {
@@ -2110,10 +2178,15 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         result.escalation = { recommended: 're_read', reason: refuse };
       } else {
         result.effect = 'unverifiable';
-        result.clicked = { x: cx, y: cy, via: 'Input.dispatchMouseEvent (trusted)', button: btn, clickCount: count };
+        // A hover reports `hovered`, not `clicked` — it pressed nothing, and a reply field that
+        // claims a click for a move is the kind of quiet untruth this codebase keeps paying for.
+        if (isHover) result.hovered = { x: cx, y: cy, via: 'Input.dispatchMouseEvent (trusted, move only)' };
+        else result.clicked = { x: cx, y: cy, via: 'Input.dispatchMouseEvent (trusted)', button: btn, clickCount: count };
       }
       // A trusted click is precisely the one that CAN navigate — same probe as the ref path.
-      if (result.effect !== 'confirmed') await confirmNavigation(result, tabId, 3, before && before.url);
+      // A hover presses nothing, so it must NOT get the navigation probe: polling for a
+      // navigation a hover is not supposed to cause is noise that reads like a verdict.
+      if (!isHover && result.effect !== 'confirmed') await confirmNavigation(result, tabId, 3, before && before.url);
       return textResult(result);
     }
     // ★ RESOLVE THE BOX NOW, not from the stored snapshot: layout may have moved since the
@@ -2152,7 +2225,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
       return textResult({ success: false, effect: 'failed', error: 'trusted_click: could not resolve a clickable box for that element',
         ...(box ? { detail: JSON.stringify(box).slice(0, 240) } : {}),
-        escalation: { recommended: 'how:auto', reason: 'NO COORDINATE EXISTS FOR THIS ELEMENT (measured 2026-10-02): the resolver (and its largest-descendant fallback) found nothing clickable-sized, so the subtree does not render — display:none, detached, or inside a CROSS-ORIGIN frame (same-origin frames ARE reachable; the resolver walks every iframe document and converts the rect into TOP-viewport space, so list frames with tabs{action:"frames"} before blaming origin). Trusted input is coordinate-based and cannot aim at what the render tree omits — but how:"auto" dispatches the event ON THE NODE, which bypasses geometry entirely and is measured to work on hidden controls (wikipedia.org\'s hidden checkbox toggled). Either switch to how:"auto", or reveal the element first (unhide / scroll it into existence) and retry how:"trusted"' } });
+        escalation: { recommended: 'how:auto', reason: 'NO COORDINATE EXISTS FOR THIS ELEMENT (measured 2026-10-02): the resolver found nothing clickable-sized in the subtree (largest-descendant fallback), AND the LABEL PROXY attempt — label[for] / wrapping label, the surface a human presses for a visually-hidden control — found no rendered label either. So the render tree gives this element no pixels at all: display:none, detached, or inside a CROSS-ORIGIN frame (same-origin frames ARE reachable; the resolver walks every iframe document and converts the rect into TOP-viewport space, so list frames with tabs{action:"frames"} before blaming origin). Trusted input is coordinate-based and cannot aim at what the render tree omits — but how:"auto" dispatches the event ON THE NODE, which bypasses geometry entirely. Either switch to how:"auto", or reveal the element first (unhide / scroll it into existence) and retry how:"trusted"' } });
     }
     // ★ THE BOX IS REAL BUT NOTHING ON IT REACHES THE ELEMENT — REFUSE, DON'T CLICK BLIND
     // (2026-10-02, the click battery). Before dispatching, the resolver hit-tested 9 points
@@ -2164,7 +2237,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     if (vp.unreachable) {
       return textResult({ success: false, effect: 'failed',
         error: 'trusted_click: the element has a real box but NO point on it reaches the element',
-        detail: `box ${vp.w}x${vp.h} at (${vp.x},${vp.y}) — elementFromPoint answered "${vp.blockedBy || 'another element'}" at every probe point (centre, quarters, edges). That element sits on top: a human cannot click this control at these coordinates either.`,
+        detail: `box ${vp.w}x${vp.h} at (${vp.x},${vp.y}) — elementFromPoint answered "${vp.blockedBy || 'another element'}" at every probe point (centre, quarters, edges)${vp.viaLabel ? ', and this IS the label proxy the resolver fell back to, so the visible label itself is covered' : ''}. That element sits on top: a human cannot click this control at these coordinates either.`,
         escalation: { recommended: 'how:auto', reason: 'OCCLUDED, NOT MISSING (measured 2026-10-02): trusted input is coordinate-based, and every coordinate on this element is covered — dispatching would hit the covering element (measured: the click "succeeded" and nothing happened). Two remedies: (1) how:"auto" dispatches the event ON THE NODE and bypasses hit-testing entirely; (2) dismiss/scroll away what covers it (an overlay, sticky header, expanding sibling — reported above) and retry how:"trusted".' } });
     }
     // Prefer the point the reach test PROVEN to route to the element — it may be an edge or a
@@ -2173,8 +2246,9 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     // which never run the probe.
     const x = Math.round(vp.click ? vp.click.x : (vp.x + vp.w / 2));
     const y = Math.round(vp.click ? vp.click.y : (vp.y + vp.h / 2));
-    const before = await readPageState(tabId);
-    const result = await getActiveHub().send({ type: 'trusted_click', tabId, x, y, button: o.button || 'left', clickCount: o.clickCount || 1 });
+    const isHoverR = o.mode === 'hover';
+    const before = isHoverR ? null : await readPageState(tabId);
+    const result = await getActiveHub().send({ type: 'trusted_click', tabId, x, y, button: o.button || 'left', clickCount: o.clickCount || 1, mode: isHoverR ? 'hover' : 'click' });
     const rr = unwrapRelay(result);
     const refuse = relayFailure(rr);
     if (refuse) {
@@ -2183,11 +2257,17 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     } else {
       // The input was injected; whether it LANDED is decided below by the page itself.
       result.effect = 'unverifiable';
-      result.clicked = { x, y, box: vp, via: 'Input.dispatchMouseEvent (trusted)', button: o.button || 'left', clickCount: o.clickCount || 1 };
+      // `hovered` for a move (no press was sent), `clicked` otherwise — the field must say what
+      // actually went out. `vp` carries viaLabel when the coordinate is the LABEL proxy's, so the
+      // reply shows which surface was actually aimed at.
+      if (isHoverR) result.hovered = { x, y, box: vp, via: 'Input.dispatchMouseEvent (trusted, move only)' };
+      else result.clicked = { x, y, box: vp, via: 'Input.dispatchMouseEvent (trusted)', button: o.button || 'left', clickCount: o.clickCount || 1 };
     }
     // ★ A TRUSTED click is precisely the one that CAN navigate, so it gets the same probe as
-    // click — the strongest evidence available, and it needs no OS focus either.
-    if (result.effect !== 'confirmed') await confirmNavigation(result, tabId, 3, before && before.url);
+    // click — the strongest evidence available, and it needs no OS focus either. A hover presses
+    // nothing: no navigation probe (polling for a navigation a hover should not cause is noise
+    // that reads like a verdict).
+    if (!isHoverR && result.effect !== 'confirmed') await confirmNavigation(result, tabId, 3, before && before.url);
     return textResult(result);
   });
 

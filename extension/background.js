@@ -617,6 +617,17 @@ async function handleTabControl(action, payload) {
         // would have been looking at.
         await chrome.debugger.sendCommand({ tabId: tClick }, 'Input.dispatchMouseEvent',
           Object.assign({ type: 'mouseMoved', buttons: 0 }, base));
+        // ★ HOVER IS THE SAME PIPELINE, WITHOUT THE PRESS (2026-10-02, Ali: "trusted everywhere as
+        // the single click action ... make it happen"). A human hovers by ARRIVING: the move is
+        // what applies :hover and feeds mousemove-driven UI, so mode:"hover" returns right after
+        // it — no press, no release, nothing toggles. This is what makes hover a first-class
+        // trusted rung instead of a synthetic dispatchEvent dispatch.
+        if (payload.mode === 'hover') {
+          ok = true;
+          return { success: true, mode: 'trusted', via: 'Input.dispatchMouseEvent', hover: true,
+                   x: cx, y: cy, ms: Date.now() - t0, emulation: emu,
+                   timings: { totalMs: Date.now() - t0, attachMs: attachMs } };
+        }
         // ★ AND IT TAKES TIME TO PRESS (2026-10-01). Firing move→press→release in the same tick
         // meant Chrome's input pipeline coalesced the press away: the page received
         // pointerover/pointermove and NO pointerdown/mousedown/click at all — measured on
