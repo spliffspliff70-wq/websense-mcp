@@ -856,8 +856,42 @@ const PAGE_CENTRE_FUNC = 'function(){' +
   // geometry/inventory paths (which return topleft boxes), so the handler's +w/2 added a
   // systematic 1px offset to every page-resolved click. Return topleft+w+h like every other
   // resolver; the handler computes the centre, the guard sees the true size.
+  // `t` MUST BE DEFINED BEFORE THE REACH TEST USES IT (2026-10-02). The reach-test patch
+  // replaced the old `var t=…; return …;` block and dropped the definition with it — the
+  // function then threw ReferenceError at runtime, pageCentre answered null, and the handler
+  // silently fell through to the geometry path (observed: the refusal carried the GEOMETRY
+  // reply instead of the unreachable verdict). The suite could not catch it: it pins source
+  // patterns, not execution. Execute the built function before trusting it.
   'var t=(SCROLLV&&off)?pick():a;' +
-  'return {x:Math.round(t.x),y:Math.round(t.y),w:Math.round(t.w),h:Math.round(t.h),inFrame:t.inFrame,offViewport:off,scrolled:!!(SCROLLV&&off)};}';
+  // ★ REACH TEST — the browser's own hit test BEFORE any dispatch (2026-10-02, battery).
+  // The box can be real and still be UNCLICKABLE: duckduckgo.com's semantic submit lays out
+  // 16x16 behind a sibling overlay, so Input.dispatchMouseEvent at its centre reached the
+  // overlay, not the button (click landed, nothing submitted). A human cannot click it either
+  // — that is a fact about the page, not about the input rung, so REPORT it. Probe points
+  // across the resolved box with elementFromPoint (the exact routing the browser would use),
+  // climbing parentNode/host so shadow-DOM children count as reaching their host. First
+  // point whose hit resolves to el -> return it as the click coordinate (a point PROVEN to
+  // reach the target, which is not necessarily the geometric centre). All probes miss ->
+  // unreachable:true + the identity of what sits on top, so the handler can refuse honestly
+  // and name the remedy instead of clicking the overlay and reporting a quiet no-op.
+  'function reaches(h){var p=h;for(var g=0;g<25&&p;g++){if(p===el)return true;p=p.parentNode||p.host;}return false;}' +
+  'var _own=el.getBoundingClientRect(),_te=rectOf(el);' +
+  'var _fox=_te.x-_own.left,_foy=_te.y-_own.top;' +
+  'var _fr=[[0.5,0.5],[0.25,0.25],[0.75,0.25],[0.25,0.75],[0.75,0.75],[0.5,0.15],[0.5,0.85],[0.15,0.5],[0.85,0.5]];' +
+  'var _first=null,_hp=null;' +
+  'for(var _i=0;_i<_fr.length;_i++){' +
+  'var _tx=t.x+t.w*_fr[_i][0],_ty=t.y+t.h*_fr[_i][1];' +
+  'var _h=null;try{_h=el.ownerDocument.elementFromPoint(_tx-_fox,_ty-_foy);}catch(_e){}' +
+  'if(!_h)continue;if(!_first)_first=_h;' +
+  'if(reaches(_h)){_hp={x:Math.round(_tx),y:Math.round(_ty)};break;}' +
+  '}' +
+  // blockedBy must ONLY be set when unreachable — on success _first is simply the element the
+  // first probe hit (often a child that reaches), and reporting it as an "occluder" is noise
+  // that made successful replies self-contradictory (measured: unreachable:false alongside
+  // blockedBy:"path" on a click that worked).
+  'var _bb="";if(!_hp&&_first){_bb=_first.tagName||"";if(_first.id)_bb+="#"+_first.id;' +
+  'var _c=(typeof _first.className==="string")?_first.className:"";if(_c)_bb+="."+_c.split(" ")[0];}' +
+  'return {x:Math.round(t.x),y:Math.round(t.y),w:Math.round(t.w),h:Math.round(t.h),inFrame:t.inFrame,offViewport:off,scrolled:!!(SCROLLV&&off),click:_hp,unreachable:_hp?false:true,blockedBy:_bb};}';
 
 // ★ THE REPLY IS JSON, SO IT IS READ AS JSON (2026-10-01). pageCentre used to pull the two numbers
 // straight out of the reply TEXT with /x[^-\d]{0,10}(-?\d+)/ — a parse that only works because of
@@ -883,8 +917,14 @@ async function pageCentre(sel, tabId, doScroll) {
   // falls back to the geometry op rather than fabricating a 2x2.
   if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' ||
       typeof p.w !== 'number' || typeof p.h !== 'number') return null;
+  // ★ CLICK/UNREACHABLE MUST SURVIVE THE RETURN (2026-10-02). This whitelist dropped every
+  // field it did not know, so the reach test's verdict (click proven-point / unreachable /
+  // blockedBy) would have been erased right before dispatch — the guard downstream would never
+  // fire and the blind click it exists to prevent would go out anyway. Pass them through.
   return { x: p.x, y: p.y, w: p.w, h: p.h, fromPage: true, inFrame: !!p.inFrame,
-           offViewport: !!p.offViewport, scrolled: !!p.scrolled };
+           offViewport: !!p.offViewport, scrolled: !!p.scrolled,
+           click: (p.click && typeof p.click.x === 'number' && typeof p.click.y === 'number') ? { x: p.click.x, y: p.click.y } : null,
+           unreachable: !!p.unreachable, blockedBy: (typeof p.blockedBy === 'string') ? p.blockedBy : '' };
 }
 
 async function callTool(name, args) {
@@ -2114,7 +2154,25 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         ...(box ? { detail: JSON.stringify(box).slice(0, 240) } : {}),
         escalation: { recommended: 'how:auto', reason: 'NO COORDINATE EXISTS FOR THIS ELEMENT (measured 2026-10-02): the resolver (and its largest-descendant fallback) found nothing clickable-sized, so the subtree does not render — display:none, detached, or inside a CROSS-ORIGIN frame (same-origin frames ARE reachable; the resolver walks every iframe document and converts the rect into TOP-viewport space, so list frames with tabs{action:"frames"} before blaming origin). Trusted input is coordinate-based and cannot aim at what the render tree omits — but how:"auto" dispatches the event ON THE NODE, which bypasses geometry entirely and is measured to work on hidden controls (wikipedia.org\'s hidden checkbox toggled). Either switch to how:"auto", or reveal the element first (unhide / scroll it into existence) and retry how:"trusted"' } });
     }
-    const x = Math.round(vp.x + vp.w / 2), y = Math.round(vp.y + vp.h / 2);
+    // ★ THE BOX IS REAL BUT NOTHING ON IT REACHES THE ELEMENT — REFUSE, DON'T CLICK BLIND
+    // (2026-10-02, the click battery). Before dispatching, the resolver hit-tested 9 points
+    // across the box with the browser's OWN elementFromPoint. All of them answered with some
+    // other element (duckduckgo.com's semantic submit sits behind a sibling overlay: the
+    // dispatch went through, hit the overlay, and the search silently never ran — a coordinate
+    // click can neither aim around nor detect that). An overlay is not an input-rung defect,
+    // so report the PAGE's fact with the occluder's identity and the two real remedies.
+    if (vp.unreachable) {
+      return textResult({ success: false, effect: 'failed',
+        error: 'trusted_click: the element has a real box but NO point on it reaches the element',
+        detail: `box ${vp.w}x${vp.h} at (${vp.x},${vp.y}) — elementFromPoint answered "${vp.blockedBy || 'another element'}" at every probe point (centre, quarters, edges). That element sits on top: a human cannot click this control at these coordinates either.`,
+        escalation: { recommended: 'how:auto', reason: 'OCCLUDED, NOT MISSING (measured 2026-10-02): trusted input is coordinate-based, and every coordinate on this element is covered — dispatching would hit the covering element (measured: the click "succeeded" and nothing happened). Two remedies: (1) how:"auto" dispatches the event ON THE NODE and bypasses hit-testing entirely; (2) dismiss/scroll away what covers it (an overlay, sticky header, expanding sibling — reported above) and retry how:"trusted".' } });
+    }
+    // Prefer the point the reach test PROVEN to route to the element — it may be an edge or a
+    // child icon, not the geometric centre (the centre of a zero-width submit's box is a
+    // different element entirely). Fall back to the centre for geometry/inventory paths,
+    // which never run the probe.
+    const x = Math.round(vp.click ? vp.click.x : (vp.x + vp.w / 2));
+    const y = Math.round(vp.click ? vp.click.y : (vp.y + vp.h / 2));
     const before = await readPageState(tabId);
     const result = await getActiveHub().send({ type: 'trusted_click', tabId, x, y, button: o.button || 'left', clickCount: o.clickCount || 1 });
     const rr = unwrapRelay(result);
@@ -2737,6 +2795,13 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
           disabled: r.dis ? 1 : 0, checked: r.chk ? 1 : 0, inViewport: r.vp ? 1 : 0,
         },
         pos: (r.x == null) ? undefined : { x: r.x, y: r.y },
+        // ★ THE BOX IS PART OF THE ANSWER (2026-10-02, Ali: "all elements are indexed...
+        // right there waiting for an action — if they are active"). The collector has
+        // ALWAYS recorded w/h (snapshot.js rec.w/rec.h); find just didn't emit them, so
+        // from the index alone you could not tell a live control from duckduckgo's
+        // 0-width submit button or Wikipedia's display:none checkbox — you only found
+        // out after a click missed. pos stays (x,y) for eyeballing; box is the full rect.
+        box: (r.w == null) ? undefined : { x: r.x, y: r.y, w: r.w, h: r.h },
         attrs: r.attrs,
         branch: branchChain(e.snap, r, depth),
       };

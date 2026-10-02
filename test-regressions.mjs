@@ -2488,6 +2488,86 @@ test('trusted_click: the resolver must report the REAL box — a fabricated 2x2 
     'a truly unrendered element must be refused with how:auto as the remedy, never clicked blind');
 });
 
+test('trusted_click: the index and the click are WIRED — find emits the box, the resolver hit-tests before dispatching', () => {
+  // Ali (2026-10-02): "the workflow on clicks should be simple: button appeared after dif or is
+  // there from page load -> we search for it -> we activate trusted_click on it... all elements
+  // are indexed and grouped... right there waiting for an action... if they are active."
+  // Gap 1: the collector records w/h for every element but find never emitted it, so the index
+  // could not tell a live control from a 0-width ghost until AFTER a click failed:
+  assert(/box:.*r\.w == null.*\{ x: r\.x, y: r\.y, w: r\.w, h: r\.h \}/s.test(SRV_SRC),
+    'find must emit box {x,y,w,h} from the record the collector already stores');
+  // Gap 2: the resolver fired at the box centre without asking the browser whether that point
+  // even routes to the element — a real box under a sibling overlay is unclickable by coordinate
+  // (measured: duckduckgo.com's submit dispatch hit the overlay, nothing submitted):
+  assert(/elementFromPoint/.test(SRV_SRC),
+    'the resolver must hit-test candidate points with the browser\'s own elementFromPoint');
+  assert(/unreachable:_hp\?false:true/.test(SRV_SRC) && /blockedBy:_bb/.test(SRV_SRC),
+    'and report unreachable + the occluder\'s identity when no point reaches the element');
+  // The verdict must SURVIVE the return whitelist (it dropped unknown fields — would have erased
+  // the verdict right before dispatch) and the handler must actually honor it:
+  assert(/unreachable: !!p\.unreachable/.test(SRV_SRC),
+    'pageCentre must pass unreachable through its return whitelist');
+  assert(/if \(vp\.unreachable\)/.test(SRV_SRC),
+    'trusted_click must REFUSE an unreachable element instead of clicking the overlay blind');
+  // And when a point IS proven to reach, it is preferred over the geometric centre:
+  assert(/vp\.click \? vp\.click\.x/.test(SRV_SRC),
+    'the dispatch must prefer the reach-tested point over the box centre');
+});
+
+test('PAGE_CENTRE_FUNC: the built function must EXECUTE — pattern pins do not catch a dropped line', () => {
+  // Measured 2026-10-02: a patch replaced `var t=…; return …;` with a reach test that USES t
+  // but never defines it. The function threw ReferenceError at runtime, pageCentre answered
+  // null, the handler silently fell through to the geometry path — and all 172 tests stayed
+  // green, because every one of them only greps the SOURCE TEXT. Execute the real built
+  // function against a minimal DOM; a runtime throw fails here.
+  const m = SRV_SRC.match(/const PAGE_CENTRE_FUNC = ([\s\S]*?);\n/);
+  assert(m, 'PAGE_CENTRE_FUNC must be defined');
+  // The captured expression ends in `;` (statement terminator) — strip it before wrapping in
+  // parens or the eval dies on `('str' + … ;)`.
+  const builder = eval('(' + m[1].replace(/;\s*$/, '') + ')');
+  const built = builder.replace(/SELV/g, JSON.stringify('#probe')).replace(/SCROLLV/g, 'false');
+  const rect = { left: 100, top: 50, width: 60, height: 30, right: 160, bottom: 80 };
+  const hadWindow = ('window' in globalThis), hadDocument = ('document' in globalThis);
+  const oldWindow = globalThis.window, oldDocument = globalThis.document;
+  try {
+    globalThis.window = { innerWidth: 1920, innerHeight: 1080 };
+    const doc = {
+      querySelector: (s) => (s === '#probe' ? el : null),
+      querySelectorAll: () => [],
+      elementFromPoint: (x, y) => (x >= 100 && x <= 160 && y >= 50 && y <= 80 ? el : null)
+    };
+    const el = {
+      getBoundingClientRect: () => rect,
+      querySelectorAll: () => [],
+      ownerDocument: doc,
+      parentNode: null, host: null,
+      tagName: 'BUTTON', id: '', className: 'probe',
+      scrollIntoView: () => {}
+    };
+    globalThis.document = doc;
+    const out = eval('(' + built + ')')();
+    assert(out && typeof out.x === 'number' && typeof out.y === 'number' &&
+           typeof out.w === 'number' && typeof out.h === 'number',
+      'the resolver must RETURN a numeric box — a thrown ReferenceError here is the dropped-line bug');
+    assert(out.w === 60 && out.h === 30, `box must be the real rect, got ${out.w}x${out.h}`);
+    assert(out.unreachable === false && out.click,
+      'a point whose elementFromPoint answers with the target must be returned as the proven click');
+    // MEASURED WRONG (2026-10-02): the resolver returned click as an ARRAY [x,y] while
+    // pageCentre's whitelist checked p.click.x — arrays have no .x, so the proven point was
+    // silently dropped and the handler fell back to the centre (which can be occluded when an
+    // edge is not). Pin the shape both sides agree on.
+    assert(out.click && typeof out.click.x === 'number' && typeof out.click.y === 'number',
+      'click must be an OBJECT {x,y} — an array is silently dropped by the return whitelist');
+    // And on success there is no occluder: reporting one made replies self-contradictory
+    // (measured: unreachable:false alongside blockedBy:"path" on a click that worked).
+    assert(out.blockedBy === '',
+      'blockedBy must be EMPTY when reachable — it names an occluder, and a reachable element has none');
+  } finally {
+    if (hadWindow) globalThis.window = oldWindow; else delete globalThis.window;
+    if (hadDocument) globalThis.document = oldDocument; else delete globalThis.document;
+  }
+});
+
 test('trusted_key: wired like the click, and it must SHARE the preparation', () => {
   // The keyboard half of trusted_click, for the same measured reason: a dispatched KeyboardEvent is
   // untrusted, so the browser runs NO default action. Measured on en.wikipedia.org: an Enter reached
