@@ -822,23 +822,42 @@ const PAGE_CENTRE_FUNC = 'function(){' +
   'function find(s,d){var e=d.querySelector(s);if(e)return e;var fs=d.querySelectorAll("iframe");' +
   'for(var i=0;i<fs.length;i++){try{if(fs[i].contentDocument){var r=find(s,fs[i].contentDocument);if(r)return r;}}catch(x){}}return null;}' +
   'var el=find(SEL,document);if(!el)return null;' +
-  // topRect(): the element rect, converted to TOP-viewport space by walking frameElement up to the
-  // top window. Re-read AFTER any scroll — the old version measured, then scrolled, and could have
-  // shipped the pre-scroll number.
-  'function topRect(){var r=el.getBoundingClientRect();var x=r.left,y=r.top,inF=false;' +
-  'var w=el.ownerDocument.defaultView;' +
-  'while(w&&w!==window){try{var fe=w.frameElement,f2=fe.getBoundingClientRect();x+=f2.left;y+=f2.top;inF=true;w=w.parent;}catch(e2){break;}}' +
+  // rectOf(e): any element's rect in TOP-viewport space (walks frameElement up). Was topRect(),
+  // which was hardcoded to `el`.
+  'function rectOf(e){var r=e.getBoundingClientRect();var x=r.left,y=r.top,inF=false;' +
+  'var w=e.ownerDocument.defaultView;' +
+  'while(w&&w!==window){try{var fe=w.frameElement,f2=fe.getBoundingClientRect();x+=f2.left;y+=f2.top;inF=true;w=w.parent;}catch(ex){break;}}' +
   'return {x:x,y:y,w:r.width,h:r.height,inFrame:inF};}' +
-  'var a=topRect();' +
+  // pick(): the element's own box when it is clickable-sized. When the own box is DEGENERATE
+  // (measured 2026-10-02: duckduckgo.com's submit button lays out 0-width while its icon child
+  // renders fine), fall back to the LARGEST descendant box — a real mouse clicks that icon and
+  // the event bubbles to the button, so it is the honest target. If NOTHING in the subtree
+  // renders (Wikipedia's hidden header checkbox is display:none — no child has a box either),
+  // return the degenerate rect so the zero-box guard REFUSES: no coordinate reaches a node the
+  // render tree omits, and silently clicking empty space is worse than an honest failure.
+  'function pick(){var a=rectOf(el);if(a.w>0&&a.h>0)return a;var best=null;' +
+  'var ds=el.querySelectorAll("*");for(var i=0;i<ds.length;i++){var b=rectOf(ds[i]);' +
+  'if(b.w<=0||b.h<=0)continue;if(!best||(b.w*b.h)>(best.w*best.h))best=b;}' +
+  'return best||a;}' +
+  'var a=pick();' +
   'var cx=a.x+a.w/2,cy=a.y+a.h/2;' +
   'var off=(cx<0||cy<0||cx>window.innerWidth||cy>window.innerHeight);' +
   // ★ AND THEN SCROLL THE TOP PAGE (2026-10-01). scrollIntoView on a FRAME's child scrolls the
   // frame's own document; the IFRAME element stays where it is in the parent, so the button stayed
   // at top-y 1727 and the trusted click landed on nothing. scrollBy on the TOP window moves the page
   // for real. Measured: the frame click's y went 1727 (nothing) -> 881 (the page echoed its click).
-  'if(SCROLLV&&off){el.scrollIntoView({block:"center"});var q=topRect();var dy=q.y+q.h/2-window.innerHeight/2;if(Math.abs(dy)>8)window.scrollBy(0,dy);}' +
-  'var t=(SCROLLV&&off)?topRect():a;' +
-  'return {x:Math.round(t.x+t.w/2),y:Math.round(t.y+t.h/2),inFrame:t.inFrame,offViewport:off,scrolled:!!(SCROLLV&&off)};}';
+  'if(SCROLLV&&off){el.scrollIntoView({block:"center"});var q=pick();var dy=q.y+q.h/2-window.innerHeight/2;if(Math.abs(dy)>8)window.scrollBy(0,dy);}' +
+  // ★ RETURN THE REAL RECT, NOT THE CENTRE (2026-10-02). This used to return the element's
+  // CENTRE with w/h hard-coded to 2x2 by the caller — so (a) the trusted_click zero-box guard
+  // could NEVER fire (pageCentre always claimed a valid 2x2), and a hidden/zero-sized target
+  // was clicked as EMPTY SPACE: measured on en.wikipedia.org the hidden header checkbox was
+  // clicked at (1,1) and on duckduckgo.com the 0-width submit button's centre+1 landed on the
+  // wrapper DIV, not the button. (b) The centre-as-topleft convention disagreed with the
+  // geometry/inventory paths (which return topleft boxes), so the handler's +w/2 added a
+  // systematic 1px offset to every page-resolved click. Return topleft+w+h like every other
+  // resolver; the handler computes the centre, the guard sees the true size.
+  'var t=(SCROLLV&&off)?pick():a;' +
+  'return {x:Math.round(t.x),y:Math.round(t.y),w:Math.round(t.w),h:Math.round(t.h),inFrame:t.inFrame,offViewport:off,scrolled:!!(SCROLLV&&off)};}';
 
 // ★ THE REPLY IS JSON, SO IT IS READ AS JSON (2026-10-01). pageCentre used to pull the two numbers
 // straight out of the reply TEXT with /x[^-\d]{0,10}(-?\d+)/ — a parse that only works because of
@@ -859,8 +878,12 @@ async function pageCentre(sel, tabId, doScroll) {
   const raw = await callTool('main_world', { tabId: tabId, verify: false,
     func: PAGE_CENTRE_FUNC.replace(/SELV/g, JSON.stringify(String(sel))).replace(/SCROLLV/g, doScroll ? 'true' : 'false') });
   const p = mainWorldValue(raw);
-  if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return null;
-  return { x: p.x, y: p.y, w: 2, h: 2, fromPage: true, inFrame: !!p.inFrame,
+  // w/h are REQUIRED (2026-10-02): without them the reply cannot be told apart from a
+  // zero-box one, and the guard downstream would have nothing to test. A missing/NaN size
+  // falls back to the geometry op rather than fabricating a 2x2.
+  if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' ||
+      typeof p.w !== 'number' || typeof p.h !== 'number') return null;
+  return { x: p.x, y: p.y, w: p.w, h: p.h, fromPage: true, inFrame: !!p.inFrame,
            offViewport: !!p.offViewport, scrolled: !!p.scrolled };
 }
 
@@ -2089,7 +2112,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     if (!vp || !(vp.w > 0) || !(vp.h > 0)) {
       return textResult({ success: false, effect: 'failed', error: 'trusted_click: could not resolve a clickable box for that element',
         ...(box ? { detail: JSON.stringify(box).slice(0, 240) } : {}),
-        escalation: { recommended: 're_read', reason: 'no box for that element, and the frame-aware PAGE resolver could not find it either. Same-origin frame content IS reachable now — the resolver walks every iframe document the way the collector does and converts the rect into TOP-viewport space, so what is left is a CROSS-ORIGIN frame (nothing in the page can read it, and no click can be aimed inside it), OR inside an IFRAME that is not same-origin, OR an element that is hidden, detached or zero-sized. Address it by the loc find gives you, or list frames with tabs{action:"frames"}' } });
+        escalation: { recommended: 'how:auto', reason: 'NO COORDINATE EXISTS FOR THIS ELEMENT (measured 2026-10-02): the resolver (and its largest-descendant fallback) found nothing clickable-sized, so the subtree does not render — display:none, detached, or inside a CROSS-ORIGIN frame (same-origin frames ARE reachable; the resolver walks every iframe document and converts the rect into TOP-viewport space, so list frames with tabs{action:"frames"} before blaming origin). Trusted input is coordinate-based and cannot aim at what the render tree omits — but how:"auto" dispatches the event ON THE NODE, which bypasses geometry entirely and is measured to work on hidden controls (wikipedia.org\'s hidden checkbox toggled). Either switch to how:"auto", or reveal the element first (unhide / scroll it into existence) and retry how:"trusted"' } });
     }
     const x = Math.round(vp.x + vp.w / 2), y = Math.round(vp.y + vp.h / 2);
     const before = await readPageState(tabId);

@@ -2458,6 +2458,36 @@ test('trusted_click: wired through all four layers, and it must make the rendere
     'and a refusal riding inside a success envelope must not read as a performed action');
 });
 
+test('trusted_click: the resolver must report the REAL box — a fabricated 2x2 made the zero-box guard unwinnable', () => {
+  // ★ MEASURED IN THE CLICK BATTERY (2026-10-02, 6 real-page controls x 2 rungs): trusted failed
+  // on exactly the controls synthetic handled, both times because of the RESOLVER, not the input:
+  //   - en.wikipedia.org's hidden header checkbox: pageCentre returned the element centre with
+  //     w/h HARD-CODED to 2, so the !vp.w>0 guard could never fire and the click landed at (1,1)
+  //     in empty space, while synthetic (node dispatch) toggled it.
+  //   - duckduckgo.com's submit button lays out 0-width while its icon child renders: the centre+1
+  //     hit the wrapper DIV and the search never submitted; synthetic submitted.
+  // One convention bug on top: pageCentre returned CENTRES where geometry/inventory return
+  // TOPLEFT boxes, and the single handler adds w/2 to both — a systematic 1px miss on every
+  // page-resolved trusted click.
+  // pageCentre must pass through the real size...
+  assert(/typeof p\.w !== 'number'/.test(SRV_SRC),
+    'pageCentre must REQUIRE a real width — a missing size falls back to geometry, never a fabricated one');
+  assert(!/w: 2, h: 2, fromPage: true/.test(SRV_SRC),
+    'and the fabricated {w:2,h:2} that disarmed the zero-box guard must be gone');
+  // ...and PAGE_CENTRE_FUNC must return the TOPLEFT rect (the handler computes the centre), not the centre:
+  assert(/return \{x:Math\.round\(t\.x\),y:Math\.round\(t\.y\),w:Math\.round\(t\.w\),h:Math\.round\(t\.h\)/.test(SRV_SRC),
+    'PAGE_CENTRE_FUNC must return topleft+w+h — the same convention as the geometry and inventory paths');
+  assert(!/return \{x:Math\.round\(t\.x\+t\.w\/2\),y:Math\.round\(t\.y\+t\.h\/2\)/.test(SRV_SRC),
+    'and the centre-as-box convention (the +1px offset) must be gone');
+  // A DEGENERATE own-box must fall back to the largest descendant (a mouse clicks the icon child
+  // and it bubbles), so a 0-width-but-visible control stays clickable by coordinate:
+  assert(/function pick\(\)/.test(SRV_SRC) && /ds=el\.querySelectorAll\("\*"\)/.test(SRV_SRC),
+    'the resolver must fall back to the largest descendant box when the own box is degenerate');
+  // And when NOTHING renders, the guard fires and names the measured remedy (node dispatch):
+  assert(/recommended: 'how:auto'/.test(SRV_SRC),
+    'a truly unrendered element must be refused with how:auto as the remedy, never clicked blind');
+});
+
 test('trusted_key: wired like the click, and it must SHARE the preparation', () => {
   // The keyboard half of trusted_click, for the same measured reason: a dispatched KeyboardEvent is
   // untrusted, so the browser runs NO default action. Measured on en.wikipedia.org: an Enter reached
@@ -2507,7 +2537,14 @@ test('drag: the full sequence INCLUDING drop, and a frame must not be blamed on 
   assert(/DragEvent\('drop'/.test(CS_SRC), 'DROP must be dispatched — it is the one that matters');
   assert(/DragEvent\('dragend'/.test(CS_SRC), 'and dragend');
   assert(/dataTransfer: dt/.test(CS_SRC), 'carrying a real DataTransfer');
-  assert(/OR inside an IFRAME/.test(SRV_SRC), 'a failed box resolve must name the IFRAME possibility');
+  // 2026-10-02: the reason was rewritten when the zero-box guard started firing for real (the
+  // battery: a hidden wikipedia checkbox and a 0-width duckduckgo submit were clicked as empty
+  // space because pageCentre fabricated a 2x2). It must still name the frame possibility — now
+  // as CROSS-ORIGIN (same-origin IS reachable) — and it must point at the measured remedy:
+  // how:"auto" dispatches on the node where no coordinate exists.
+  assert(/CROSS-ORIGIN frame/.test(SRV_SRC), 'a failed box resolve must name the IFRAME possibility');
+  assert(/recommended: 'how:auto'/.test(SRV_SRC) && /dispatches the event ON THE NODE/.test(SRV_SRC),
+    'a failed box resolve must recommend how:auto (node dispatch) as the measured remedy');
   assert(!/has no box \(hidden, detached, or zero-sized\)/.test(SRV_SRC),
     'and the old wording, which blamed the element, must be gone');
 });
