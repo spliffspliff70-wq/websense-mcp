@@ -71,3 +71,6 @@ bench/*.json
 bench/bench-*.json
 !bench/pages/
 
+
+# One-off scratch: a captured snippet from a live x.com composer session.
+type_post.js
