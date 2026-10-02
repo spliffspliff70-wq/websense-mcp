@@ -1530,11 +1530,20 @@ test('docs: README does not advertise capabilities the audit proved absent', () 
   // feature list again.
   const dialogSection = README.slice(README.indexOf('## Dialog handling'), README.indexOf('## Iframes'));
   const limitsSection = README.slice(README.indexOf('## Known limitations'), README.indexOf('## v1.4.5'));
-  assert(/are captured/.test(dialogSection) && /MAIN-world hook shadows the three functions/.test(dialogSection),
-    'the Dialog handling section must state that JS dialogs are captured');
+  // 2026-10-02: INVERTED AGAIN. The doctrine changed from "all three shadowed"
+  // to "alert only": a hooked confirm/prompt returns a Promise (always truthy),
+  // so every if(confirm()) takes the TRUE branch — the README must state the
+  // NATIVE confirm/prompt behavior and the on-request answer path, and must NOT
+  // claim the three functions are shadowed.
+  assert(/alert.*only|only.*alert/.test(dialogSection) && /NATIVE/.test(dialogSection),
+    'the Dialog handling section must state that ONLY alert is captured and confirm/prompt stay NATIVE');
+  assert(/native:true/.test(dialogSection) && /handleJavaScriptDialog/.test(dialogSection),
+    'the Dialog handling section must document dialog{native:true} via Page.handleJavaScriptDialog');
+  assert(!/shadows the three functions/.test(dialogSection),
+    'the Dialog handling section must NOT claim the hook shadows all three functions (retired 2026-10-02)');
   assert(!/not reliably captured/.test(limitsSection),
     'Known limitations must not repeat the retired "dialogs are not captured" claim');
-  assert(/auto-dismisses/.test(limitsSection),
+  assert(/auto-dismiss/.test(limitsSection),
     'the real remaining dialog limitation (hidden tab) must be stated');
 
   assert(!/blocked by strict page CSP/.test(README),
