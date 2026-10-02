@@ -1066,11 +1066,25 @@ v2.0 — THE LOOP (four steps, in this order):
   measured, not assumed: the DIFF is cached because it used to be 379 KB for one action; the summary is
   what changed and the handle is the rest. "mutated" comes from structure+content ONLY, so scroll or
   layout churn can never make an action look landed.
-  HONEST LIMITS — read before you plan: a trusted DRAG does not COMPLETE (it produces trusted
-  dragstart/dragenter/dragover but no drop; the plain drag mode fires the whole sequence but its events
-  are NOT trusted, so a page checking isTrusted ignores them). Trusted clicks/keys are the browser's own
-  input but are NOT proven byte-identical to an OS click. Same-origin iframes ARE readable and clickable;
-  cross-origin frames are not. Canvas/WebGL: use act{action:"click", x, y}.
+  HONEST LIMITS — read before you plan: trusted clicks/keys are the browser's own
+  input but are NOT proven byte-identical to an OS click. Same-origin iframes ARE
+  readable and clickable; cross-origin frames are not. Canvas/WebGL: use act{action:"click", x, y}.
+  A trusted DRAG DOES COMPLETE (trusted dragstart/dragenter/dragover AND a real drop —
+  the drop is read back from the page's own capture-phase listener, so the verdict is
+  the page's, not the tool's). What is NOT trusted: the PLAIN drag mode (its events are
+  synthetic), so a page checking isTrusted ignores it — use how:"trusted" for a drag.
+  ★ SELF-ESCALATION (2026-10-02): act{how:"auto"} (the default) tries the cheap
+  synthetic rung first and, when the page measurably ignores it (suspected_noop on a
+  click, "Element not found"/failed on a type), automatically retries through the
+  trusted pipeline in the same call. You do not have to know which controls gate on
+  isTrusted or reconcile Draft.js writes — just call act, and the facade climbs.
+  A navigation is never retried (it is the strongest confirmation there is).
+  ★ DIALOGS: alert is captured (its return is undefined, so nothing branches on it).
+  confirm/prompt stay NATIVE — a hooked one returns a Promise (always truthy), so every
+  if(confirm(...)) would take the TRUE branch. To answer a native confirm/prompt on a
+  background tab, call dialog{native:true, action:"accept"|"dismiss", value:promptText}
+  — it goes through Page.handleJavaScriptDialog so the page's branch follows YOUR choice.
+  Nothing auto-answers; a dialog is answered only when you decide.
 
 THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
   act              DO something: action=click|hover|rightclick|drag|type|key|form|upload|scroll|dialog. how="trusted" goes through the browser's own input pipeline (a real isTrusted event, default actions run); how="os" is OS-level input and needs the tab in front. This is the one to reach for.
@@ -2146,7 +2160,7 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
 
   // ═══ 16. DIALOG ═══
   reg(server, 'dialog', {
-    description: 'Resolve dialogs. JS dialogs (alert/confirm/prompt — captured, non-blocking): action:"accept"|"dismiss" + index? + value? (prompt answer). OS-level dialogs (basic-auth, print — unreachable by DOM): keystroke:true + key:"enter|escape|tab|space|f5|ctrl+c" + optional value typed first (e.g. credentials).',
+    description: 'Resolve dialogs. JS dialogs (alert/confirm/prompt — captured, non-blocking): action:"accept"|"dismiss" + index? + value? (prompt answer). native:true answers a NATIVE confirm/prompt (left native by default) via Page.handleJavaScriptDialog on a background tab. OS-level dialogs (basic-auth, print — unreachable by DOM): keystroke:true + key:"enter|escape|tab|space|f5|ctrl+c" + optional value typed first (e.g. credentials).',
     inputSchema: {
       tabId: z.number().optional().describe('Target tab (default: session-bound tab)'),
       action: z.enum(['accept', 'dismiss']).optional().describe('JS-dialog resolution'),
@@ -2168,6 +2182,21 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
         execSync('powershell -NoProfile -NonInteractive -Command ' + JSON.stringify(ps), { timeout: 12000, windowsHide: true });
         return textResult({ success: true, sent: o.key || null, typed: o.value ? true : false });
       } catch (e) { return textResult({ success: false, error: String((e && e.message) || e) }); }
+    }
+    // ★ NATIVE-DIALOG ANSWER (2026-10-02). confirm/prompt are left
+    // NATIVE (a hooked one returns a Promise = always truthy = every
+    // if(confirm()) takes TRUE), so they never enter the hook's captured
+    // queue and handle_dialog cannot see them. A page in a BACKGROUND
+    // tab blocks on its own native dialog, and Chrome auto-dismisses a
+    // dialog raised while hidden. When the caller names a dialog type the
+    // hook does not capture, answer it through the browser
+    // (Page.handleJavaScriptDialog) so the page's branch follows the
+    // agent's real choice — reviving d5afe20 after its revert 29a0766,
+    // but ONLY on an explicit accept/dismiss of a named dialog, never an
+    // auto-answer. Routed through the existing `dialog` tool (no new
+    // listed tool) with native:true as the switch.
+    if (o.native) {
+      return textResult(await getActiveHub().send({ type: 'dialog_answer', tabId: o.tabId, accept: o.action !== 'dismiss', promptText: o.value }));
     }
     return textResult(await getActiveHub().send({ type: 'handle_dialog', action: o.action || 'accept', index: (o.index === undefined ? null : o.index), value: (o.value === undefined ? null : o.value), tabId: o.tabId }));
   });

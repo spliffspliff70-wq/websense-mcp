@@ -124,16 +124,28 @@
         }
         const p = new Promise((r) => { d.resolve = r; });
         pending.push(d); publish();
-        setTimeout(() => auto(d, type === 'confirm' ? true : d.defaultValue), AUTO_MS);
+        // No auto-answer for confirm/prompt: a dialog is answered only on
+        // request (Ali, 2026-10-01: "a dialog must be shown and read, never
+        // blindly dismissed or accepted"). Auto-answering confirm TRUE after
+        // 30s meant every if(confirm(...)) had ALREADY taken the TRUE branch —
+        // a hooked confirm returns a Promise, which is always truthy — so the
+        // page decided with nobody choosing. Only alert auto-answers (its return
+        // is undefined, so nothing can branch on it).
+        if (type === 'alert') setTimeout(() => auto(d, undefined), AUTO_MS);
         return p;
       };
       // Keep the original callable (some pages feature-detect toString/name).
       try { Object.defineProperty(window[name], 'name', { value: name }); } catch (_) {}
     };
 
+    // Only alert is hooked: its return is undefined, so no page can branch on
+    // it wrongly. confirm/prompt are left NATIVE — under the hook they return a
+    // Promise (always truthy), so every if(confirm(...)) takes the TRUE branch
+    // regardless of the answer. Left native, the page blocks on its own real
+    // dialog and its branch follows the real answer; the SW answers it via
+    // Page.handleJavaScriptDialog (dialog{keystroke} / the dialog tool's
+    // native path) when the agent decides.
     install('alert', 'alert');
-    install('confirm', 'confirm');
-    install('prompt', 'prompt');
 
     publish();
     document.documentElement.setAttribute('data-ws-dialog-hook', '1');

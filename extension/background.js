@@ -831,6 +831,31 @@ async function handleTabControl(action, payload) {
                ...(threw ? { transportError: threw } : {}),
                ...(dropped ? {} : { note: 'NO drop reached the page. A drag only completes over a DROP ZONE: the target must cancel `dragover` (ev.preventDefault()) — that is what makes a drop target valid in HTML drag-and-drop, and without it the browser fires dragleave/dragend and no drop, by specification, for a real mouse exactly as for this one. Trusted dragstart/dragenter/dragover still fired, so the gesture itself was delivered.' }) };
     }
+    case 'dialog_answer': {
+      // ★ ANSWER A NATIVE JS DIALOG VIA THE BROWSER (2026-10-02, revives
+      // d5afe20 after its revert 29a0766). When confirm/prompt are left
+      // native (they must be — a hooked one returns a Promise, always
+      // truthy, so every if(confirm()) takes TRUE), a page in a BACKGROUND
+      // tab blocks on its own dialog, and Chrome auto-dismisses a dialog
+      // raised while hidden. The debugger answers it through the browser so
+      // the page's branch follows the agent's real choice. The emulation
+      // state comes from __dbgPrepare, exactly as trusted_click/key do.
+      const tD = parseInt(payload.tabId, 10);
+      if (!tD) return { error: 'dialog_answer: tabId required' };
+      const prep = await __dbgPrepare(tD);
+      try {
+        await chrome.debugger.sendCommand({ tabId: tD }, 'Page.enable', {});
+      } catch (_) {}
+      try {
+        await chrome.debugger.sendCommand({ tabId: tD }, 'Page.handleJavaScriptDialog', {
+          accept: payload.accept !== false,
+          promptText: payload.promptText === undefined ? undefined : String(payload.promptText),
+        });
+        return { success: true, via: 'Page.handleJavaScriptDialog', accept: payload.accept !== false, emulation: prep.emulation };
+      } catch (e) {
+        return { error: 'dialog_answer failed: ' + String((e && e.message) || e) };
+      }
+    }
     case 'capture_visible_tab': {
       // Phase 4 (2026-08-15): browser_screenshot tool. chrome.tabs.captureVisibleTab
       // is a chrome.tabs API — no CDP, no webdriver flag, no bot-detection surface.

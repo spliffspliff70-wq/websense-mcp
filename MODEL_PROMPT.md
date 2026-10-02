@@ -55,11 +55,25 @@ v2.0 — THE LOOP (four steps, in this order):
   measured, not assumed: the DIFF is cached because it used to be 379 KB for one action; the summary is
   what changed and the handle is the rest. "mutated" comes from structure+content ONLY, so scroll or
   layout churn can never make an action look landed.
-  HONEST LIMITS — read before you plan: a trusted DRAG does not COMPLETE (it produces trusted
-  dragstart/dragenter/dragover but no drop; the plain drag mode fires the whole sequence but its events
-  are NOT trusted, so a page checking isTrusted ignores them). Trusted clicks/keys are the browser's own
-  input but are NOT proven byte-identical to an OS click. Same-origin iframes ARE readable and clickable;
-  cross-origin frames are not. Canvas/WebGL: use act{action:"click", x, y}.
+  HONEST LIMITS — read before you plan: trusted clicks/keys are the browser's own
+  input but are NOT proven byte-identical to an OS click. Same-origin iframes ARE
+  readable and clickable; cross-origin frames are not. Canvas/WebGL: use act{action:"click", x, y}.
+  A trusted DRAG DOES COMPLETE (trusted dragstart/dragenter/dragover AND a real drop —
+  the drop is read back from the page's own capture-phase listener, so the verdict is
+  the page's, not the tool's). What is NOT trusted: the PLAIN drag mode (its events are
+  synthetic), so a page checking isTrusted ignores it — use how:"trusted" for a drag.
+  ★ SELF-ESCALATION (2026-10-02): act{how:"auto"} (the default) tries the cheap
+  synthetic rung first and, when the page measurably ignores it (suspected_noop on a
+  click, "Element not found"/failed on a type), automatically retries through the
+  trusted pipeline in the same call. You do not have to know which controls gate on
+  isTrusted or reconcile Draft.js writes — just call act, and the facade climbs.
+  A navigation is never retried (it is the strongest confirmation there is).
+  ★ DIALOGS: alert is captured (its return is undefined, so nothing branches on it).
+  confirm/prompt stay NATIVE — a hooked one returns a Promise (always truthy), so every
+  if(confirm(...)) would take the TRUE branch. To answer a native confirm/prompt on a
+  background tab, call dialog{native:true, action:"accept"|"dismiss", value:promptText}
+  — it goes through Page.handleJavaScriptDialog so the page's branch follows YOUR choice.
+  Nothing auto-answers; a dialog is answered only when you decide.
 
 THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
   act              DO something: action=click|hover|rightclick|drag|type|key|form|upload|scroll|dialog. how="trusted" goes through the browser's own input pipeline (a real isTrusted event, default actions run); how="os" is OS-level input and needs the tab in front. This is the one to reach for.

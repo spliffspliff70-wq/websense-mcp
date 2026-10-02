@@ -1717,6 +1717,24 @@ test('dialogs: a MAIN-world hook captures the PAGE\'s own alert/confirm/prompt',
   assert(/pending\.filter\(\(d\) => !d\.done\)/.test(HOOK),
     'only UNRESOLVED dialogs may be published as pending');
 
+  // ★ NATIVE-DIALOG ANSWER IS WIRED THROUGH ALL FOUR LAYERS (2026-10-02).
+  // confirm/prompt stay native, so the answer must reach the browser via
+  // Page.handleJavaScriptDialog. The path: dialog{native:true} -> hub
+  // dialog_answer op -> offscreen relay -> SW handleTabControl -> CDP.
+  // Pin every hop, so a future revert (d5afe20 was reverted once as
+  // 29a0766) cannot silently drop a layer again.
+  const SRV = readFileSync(new URL('./src/server.js', import.meta.url), 'utf8');
+  const HUB = readFileSync(new URL('./src/hub.js', import.meta.url), 'utf8');
+  const OFF = readFileSync(new URL('./extension/offscreen.js', import.meta.url), 'utf8');
+  assert(/case 'dialog_answer'/.test(BG) && /Page\.handleJavaScriptDialog/.test(BG),
+    'the SW must answer a native dialog via Page.handleJavaScriptDialog');
+  assert(/'dialog_answer'/.test(OFF) && /sendTabControl\('dialog_answer'/.test(OFF),
+    'the offscreen relay must forward dialog_answer to the SW');
+  assert(/dialog_answer/.test(HUB) && /SW_REQUIRED_OPS/.test(HUB),
+    'the hub must route dialog_answer to the service worker');
+  assert(/type: 'dialog_answer'/.test(SRV) && /o\.native/.test(SRV),
+    'the dialog tool must route native:true to the dialog_answer op');
+
   assert(/function readMainWorldDialogs\(\)/.test(READERS), 'the CS must read the MAIN-world queue');
   assert(/function readRecentMainWorldDialogs\(\)/.test(READERS), 'the CS must read the recent history');
   assert(/readMainWorldDialogs\(\)\.slice/.test(READERS), 'page_state must include the MAIN-world dialogs');
