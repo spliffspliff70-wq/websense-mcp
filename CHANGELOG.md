@@ -3,6 +3,12 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [2.0.2] — 2026-10-02
+
+- **Public-install fixes:** the OS-input interpreter is now discovered (`WEBSENSE_PYTHON` still overrides) instead of defaulting to the maintainer's absolute Python path, which broke `real_click`/`real_paste`/`dialog{keystroke}` for every other user; `package.json`, the extension manifest and CONTRIBUTING no longer advertise the retired Semantic Action Graph model.
+- **Removed from tracking:** a 2 MB capture of the maintainer's logged-in feed (`x-dump.json`, gitignored) and ~50 one-off diagnostic probes. Files remain on disk locally. `scripts/real_input.py` is kept — the server execs it.
+- README: canvas/WebGL coordinate clicks are trusted since 2026-10-02 (the limitation was stale), and the Python requirement for OS-level input is now stated.
+
 ## [2.0.1] — 2026-10-02
 
 - **The diff can now upgrade a verdict.** A real structure/content move promotes `unverifiable`/`suspected_noop` to `confirmed` with `effectSource:"page_diff"`; a `failed` refusal is never upgraded.

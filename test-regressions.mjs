@@ -3487,5 +3487,50 @@ test('docs: no surface may claim a retired tool count', () => {
   assert(/effectSource/.test(rd), 'README must document the diff-upgraded verdict');
 });
 
+test('public install: no machine-local path may be the DEFAULT for anything a user runs', () => {
+  // The OS-input rungs used to default to 'C:/Users/Ali/AppData/Local/.../python.exe' — the
+  // maintainer's absolute path, shipped. It was a privacy leak AND a broken install for every
+  // other user: real_click / real_paste / dialog{keystroke} spawned a command that could not
+  // exist, and the failure read like a page problem rather than a missing interpreter.
+  const CODE = SRV_SRC.replace(/\/\/[^\n]*/g, '');
+  assert(!/C:\/Users\/Ali/.test(CODE), 'src/server.js must not ship any operator home path');
+  assert(!/E:\/websense/.test(CODE) && !/E:\/local_memstore/.test(CODE),
+    'src/server.js must not ship a local checkout path');
+  // The interpreter is DISCOVERED, with an explicit override still honoured.
+  assert(/WEBSENSE_PYTHON/.test(CODE), 'WEBSENSE_PYTHON must remain the override');
+  assert(/execFileSync\(PY, \[REAL_INPUT/.test(CODE),
+    'OS input must exec the interpreter as an ARGUMENT (execFileSync), not a shell string');
+  assert(/import \{ execSync, execFileSync \} from 'node:child_process'/.test(SRV_SRC),
+    'execFileSync must be imported — it was added without the import on the first attempt');
+  // …and the missing-interpreter case must NAME the fix instead of failing opaquely.
+  assert(/OS input needs Python 3/.test(CODE),
+    'a missing interpreter must produce an actionable error, not an opaque exec failure');
+  // The runtime dependency on scripts/real_input.py is load-bearing — do not prune it.
+  assert(/new URL\('\.\.\/scripts\/real_input\.py'/.test(CODE),
+    'real_input.py is execed by the server; removing scripts/ would break OS input');
+});
+
+test('public metadata: no retired architecture term may be what a user sees first', () => {
+  // package.json is the npm landing page. It advertised "via the Semantic Action Graph" —
+  // the model the 2.0 surface replaced — long after the README and the in-tool guide dropped
+  // it, so anyone installing from npm read a description of software we no longer ship.
+  const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+  assert(!/semantic action graph/i.test(pkg.description || ''),
+    'package.json description must not advertise the retired architecture: ' + pkg.description);
+  const kw = pkg.keywords || [];
+  const retired = kw.filter((k) => /semantic-action-graph/i.test(k));
+  assert(retired.length === 0,
+    'nor may the retired term survive as an npm keyword: ' + retired.join(', '));
+  assert(/browser automation/i.test(pkg.description || ''),
+    'the description must say what the project actually is');
+  // The extension manifest is the Chrome Web Store surface — same rule.
+  const mf = JSON.parse(readFileSync(new URL('./extension/manifest.json', import.meta.url), 'utf8'));
+  assert(!/semantic action graph/i.test(mf.description || ''),
+    'the extension description must not advertise the retired architecture');
+  // And the identity dump must never be tracked again.
+  const gi = readFileSync(new URL('./.gitignore', import.meta.url), 'utf8');
+  assert(/x-dump\.json/.test(gi), 'x-dump.json (a capture of the logged-in feed) must be gitignored');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

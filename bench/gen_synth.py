@@ -1,7 +1,7 @@
 """Generate synthetic pages with KNOWN element counts to measure the scaling
 law of explore_page's extraction (the default path walks the entire DOM).
 
-Writes E:/local_memstore/websense/bench/pages/synth_<links>_<divs>.html
+Writes bench/pages/synth_<links>_<divs>.html (relative to this file).
 """
 import os
 

@@ -19,7 +19,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { cacheDiff, getDiff, summariseDelta } from './diff-cache.js';
 import * as z from 'zod';
@@ -2642,13 +2642,42 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   // title-gated so multi-agent tab churn can't land input on a sibling tab.
   // All coords are VIEWPORT coords (same space as inspect geometry); the
   // helper measures the Chrome Document origin itself.
-  const PY = process.env.WEBSENSE_PYTHON || 'C:/Users/Ali/AppData/Local/Programs/Python/Python311/python.exe';
+  // ★ THE INTERPRETER MUST BE DISCOVERED, NOT HARD-CODED (2026-10-02). This read
+  // 'C:/Users/Ali/AppData/Local/Programs/Python/Python311/python.exe' — the OPERATOR's
+  // absolute path, shipped as the DEFAULT. Every other user therefore got a command
+  // that could not execute: the OS-level rungs (real_click / real_paste /
+  // dialog{keystroke}) failed with a spawn error while the failure read like a page
+  // problem. It was both a privacy leak (someone's home directory in a public repo)
+  // and a broken install for 100% of everyone else.
+  // Resolution order: an explicit override, then the names PATH resolves on this
+  // platform. `python3` first on POSIX; on Windows the launcher is `py`, and `python`
+  // is a Store stub that exits without running anything, so it is tried last.
+  const PY_CANDIDATES = process.platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python'];
+  let PY = process.env.WEBSENSE_PYTHON || null;
+  if (!PY) {
+    for (const cand of PY_CANDIDATES) {
+      try {
+        execSync(`"${cand}" -c "import sys"`, { stdio: 'ignore', timeout: 8000 });
+        PY = cand;
+        break;
+      } catch (_) { /* not this one */ }
+    }
+  }
+  if (!PY) PY = process.platform === 'win32' ? 'py' : 'python3';   // last resort; the error names the fix
   const REAL_INPUT = fileURLToPath(new URL('../scripts/real_input.py', import.meta.url));
 
   function runRealInput(args) {
-    const out = execSync(`"${PY}" "${REAL_INPUT}" ${args}`, { encoding: 'utf8', timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] });
-    try { return JSON.parse(out.trim().split('\n').pop()); }
-    catch (e) { return { success: false, error: 'parse failed: ' + out.slice(0, 300) }; }
+    try {
+      const out = execFileSync(PY, [REAL_INPUT, ...args], { encoding: 'utf8', timeout: 30000 });
+      return JSON.parse(out.trim().split('\n').pop());
+    } catch (e) {
+      // A missing interpreter is the single most likely cause here and it used to
+      // surface as an opaque exec failure. Name it.
+      if (e && e.code === 'ENOENT') {
+        return { success: false, error: 'OS input needs Python 3 with pyautogui + pywinauto, and no interpreter was found. Install Python, or set WEBSENSE_PYTHON to its full path. Tried: ' + PY_CANDIDATES.join(', ') + '.' };
+      }
+      return { success: false, error: String((e && (e.stderr || e.message)) || e).slice(0, 300) };
+    }
   }
 
   // Genuine OS input (click/paste) is delivered OUTSIDE the page's JS, so there is

@@ -1,8 +1,8 @@
 {
   "name": "websense-mcp",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
-  "description": "WebSense MCP \u2014 non-vision, AI-native web automation via the Semantic Action Graph. No screenshots, no CDP, no bot detection.",
+  "description": "WebSense MCP \u2014 non-vision browser automation for AI agents. Real logged-in Chrome via an extension: no CDP debug port, no screenshots, CSP-safe.",
   "license": "MIT",
   "author": "spliff70",
   "repository": {
@@ -16,9 +16,10 @@
     "chrome-extension",
     "web-scraping",
     "ai-agent",
-    "semantic-action-graph",
+    "llm",
     "csp-safe",
-    "react"
+    "react",
+    "accessibility-tree"
   ],
   "engines": {
     "node": ">=18"

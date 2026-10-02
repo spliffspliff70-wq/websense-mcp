@@ -68,7 +68,7 @@ src/server.js          MCP server (tool registration, inputSchema)
 src/hub.js             WebSocket hub on ws://localhost:38401
 extension/background.js  service worker — tab management, binding
 extension/offscreen.js   WebSocket client, auto-reconnect
-extension/websense-cs.js Semantic Action Graph extraction + native DOM interaction
+extension/websense-cs.js lossless inventory collection + native DOM interaction
 test-regressions.mjs   regression suite (pure functions)
 ```
 

@@ -18,3 +18,56 @@ __pycache__/
 probe.mp4
 *.jsonl
 commitmsg.txt
+
+# ── Local-only artifacts. Never publish these. ────────────────────────────────
+# A 2 MB capture of the operator's own logged-in feed: their handle, their
+# timeline, their DOM. It was committed once and is still retrievable from
+# history by SHA; it must never be tracked again.
+x-dump.json
+
+# One-off diagnostic probes. Each was written to measure a SINGLE bug during
+# development and has no role in running WebSense. Kept locally for re-diagnosis;
+# the four the build and CI actually need are the explicit exceptions below.
+tools/_*.mjs
+tools/*-check.mjs
+tools/*-probe.mjs
+tools/*-diag*.mjs
+tools/*-diag*.py
+tools/battery-runner.mjs
+tools/task-battery.mjs
+tools/task-sweep.mjs
+tools/fixture-battery.mjs
+tools/frames-drag-check.mjs
+tools/click-probe.mjs
+tools/close-extra-tabs.mjs
+tools/mcp-call.mjs
+tools/mcp_raw.py
+tools/mcp_smoke.py
+tools/regions-*.mjs
+tools/schema-cost.mjs
+tools/slice-to-file.mjs
+tools/scope-depth.py
+tools/why-no-collapse.mjs
+tools/diff-*.py
+tools/dispatcher-*.py
+tools/tabid-audit.py
+tools/find-missing-tabid.py
+tools/fix-handler-tabid.py
+tools/add-tabid.py
+tools/reload-ext.mjs
+tools/reload-extension.py
+tools/which_extension_path.py
+
+# OS-level helpers that are NOT wired into the server (real_input.py IS — the
+# real_click / real_paste / dialog{keystroke} rungs exec it). Kept for reference.
+scripts/goto_url.py
+scripts/press_at.py
+scripts/native_upload.py
+scripts/kill-server.ps1
+scripts/reddit-post.cjs
+
+# Local benchmark scratch
+bench/*.json
+bench/bench-*.json
+!bench/pages/
+
