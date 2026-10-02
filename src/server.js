@@ -890,7 +890,38 @@ function registerFacades(server) {
     const pass = (extra) => Object.assign({}, o, extra);
     if (a === 'click') {
       if (os) return await callTool('real_click', pass({}));
-      return await callTool(trusted ? 'trusted_click' : 'click', pass(trusted ? { selector: o.ref || o.selector } : {}));
+      // ★ TRUSTED COORDINATE CLICKS (2026-10-02): the trusted path used to receive
+      // ONLY the selector, so act{action:"click", how:"trusted", x, y} could never
+      // reach the SW's trusted_click op (which needs x/y) — raw coordinates were
+      // forced onto the UNTRUSTED dispatchEvent click. Canvas/WebGL is exactly where
+      // a page inspects isTrusted, so pass x/y through. (A ref/selector stays the
+      // normal route; the SW op resolves the box itself.)
+      if (trusted) {
+        const sel = o.ref || o.selector;
+        return await callTool('trusted_click', pass(sel ? { selector: sel } : { x: o.x, y: o.y }));
+      }
+      // ★ SELF-ESCALATING CLICK (2026-10-02). `how:"auto"` routes to the
+      // synthetic dispatchEvent click. A page that inspects isTrusted (React
+      // gated handlers, the x.com thread +, canvas/WebGL) accepts the event
+      // but runs no default action, so the verdict comes back
+      // suspected_noop / unverifiable while a trusted Input.dispatchMouseEvent
+      // at the same box lands. The model should not have to know which
+      // controls gate on trust: try the cheap synthetic path, and when the
+      // page measurably ignored it, retry through the trusted pipeline in the
+      // same call — UNLESS the page NAVIGATED (a navigation is the strongest
+      // confirmation there is, so it is never "re-tried").
+      const r = await callTool('click', pass({}));
+      const eff = r && r.effect;
+      const navigated = r && r.navigation && r.navigation.to && r.navigation.to !== r.navigation.from;
+      if (eff !== 'suspected_noop' && eff !== 'unverifiable') return r;
+      if (navigated) return r;
+      const sel2 = o.ref || o.selector;
+      const tr = await callTool('trusted_click', pass(sel2 ? { selector: sel2 } : { x: o.x, y: o.y }));
+      if (tr && typeof tr === 'object' && Array.isArray(tr.content)) {
+        const txt = (tr.content[0] && tr.content[0].text) || '';
+        try { const parsed = JSON.parse(txt); if (parsed && parsed.success) { parsed.escalatedFrom = 'click(auto)'; return { content: [{ type: 'text', text: JSON.stringify(parsed) }] }; } } catch (_) {}
+      }
+      return tr;
     }
     if (a === 'drag' && trusted) {
       const tb = o.tabId || sessionTabOf();
@@ -946,7 +977,27 @@ function registerFacades(server) {
     }
     if (a === 'type') {
       if (os) return await callTool('real_paste', pass({}));
-      return await callTool(trusted ? 'trusted_key' : 'type_text', pass({}));
+      if (trusted) return await callTool('trusted_key', pass({}));
+      // ★ SELF-ESCALATING TYPE (2026-10-02). `how:"auto"` routes to type_text,
+      // which sets the value through the native setter + input/change events.
+      // That is untrusted: on a Draft.js/Lexical/ProseMirror editor the value
+      // reconciles away and the reply comes back "Element not found" / effect
+      // "failed" — exactly what the x.com composer returned — while the SAME
+      // text typed through the browser's own pipeline (trusted_key →
+      // Input.dispatchKeyEvent) lands. The model should not have to know which
+      // controls are reconcilers: try the cheap synthetic path, and when the
+      // page refuses it, retry through the trusted pipeline in the same call.
+      const r = await callTool('type_text', pass({}));
+      const d = unwrapRelay(r);
+      const refused = r && (r.effect === 'failed' || r.effect === 'unverifiable')
+        && (!d || d.success !== true);
+      if (!refused) return r;
+      const tr = await callTool('trusted_key', pass({ text: o.text }));
+      if (tr && typeof tr === 'object' && Array.isArray(tr.content)) {
+        const txt = (tr.content[0] && tr.content[0].text) || '';
+        try { const parsed = JSON.parse(txt); if (parsed && parsed.success) parsed.escalatedFrom = 'type_text(auto)'; return { content: [{ type: 'text', text: JSON.stringify(parsed) }] }; } catch (_) {}
+      }
+      return tr;
     }
     if (a === 'key') {
       return await callTool(trusted ? 'trusted_key' : 'press_key', pass({}));
@@ -1956,7 +2007,38 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   }, async (o) => {
     const tabId = o.tabId || sessionTabOf();
     if (!tabId) return textResult({ success: false, error: 'trusted_click: no tab — pass tabId or browse first' });
-    if (!o.ref && !o.selector) return textResult({ success: false, error: 'trusted_click: pass ref or selector' });
+    // ★ RAW COORDINATE CLICKS (2026-10-02). This used to REQUIRE a ref/selector, so a
+    // coordinate click through the trusted path was UNREACHABLE from the listed surface —
+    // act{action:"click", how:"trusted", x, y} passed only the selector (none), and the
+    // only coordinate click was the UNTRUSTED dispatchEvent one. Canvas/WebGL surfaces
+    // (which the guide itself routes to "act{action:'click', x, y}") are exactly the
+    // surfaces where a page inspects isTrusted, so the trusted path is the one that
+    // matters there. Coordinates are NOT a stale-box risk (the ref path resolves a box
+    // because layout may have moved; a coordinate IS the point — nothing to resolve), so
+    // they skip the box resolution entirely.
+    if (!o.ref && !o.selector) {
+      const cx = Number(o.x), cy = Number(o.y);
+      if (!isFinite(cx) || !isFinite(cy)) {
+        return textResult({ success: false, error: 'trusted_click: pass ref/selector OR x and y (viewport CSS px)' });
+      }
+      const btn = o.button || 'left';
+      const mask = btn === 'left' ? 1 : btn === 'right' ? 2 : 4;
+      const count = Number(o.clickCount) || 1;
+      const before = await readPageState(tabId);
+      const result = await getActiveHub().send({ type: 'trusted_click', tabId, x: cx, y: cy, button: btn, clickCount: count });
+      const rr = unwrapRelay(result);
+      const refuse = relayFailure(rr);
+      if (refuse) {
+        result.effect = 'failed';
+        result.escalation = { recommended: 're_read', reason: refuse };
+      } else {
+        result.effect = 'unverifiable';
+        result.clicked = { x: cx, y: cy, via: 'Input.dispatchMouseEvent (trusted)', button: btn, clickCount: count };
+      }
+      // A trusted click is precisely the one that CAN navigate — same probe as the ref path.
+      if (result.effect !== 'confirmed') await confirmNavigation(result, tabId, 3, before && before.url);
+      return textResult(result);
+    }
     // ★ RESOLVE THE BOX NOW, not from the stored snapshot: layout may have moved since the
     // collect, and a stale coordinate clicks whatever is there now — the one failure mode a
     // coordinate click cannot recover from or detect.

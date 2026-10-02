@@ -1692,13 +1692,28 @@ test('dialogs: a MAIN-world hook captures the PAGE\'s own alert/confirm/prompt',
   assert(/id: 'ws-dialog-hook'/.test(BG) && /world: 'MAIN'/.test(BG) && /runAt: 'document_start'/.test(BG),
     'the dialog hook must be a MAIN-world document_start registration');
 
-  for (const fn of ['alert', 'confirm', 'prompt']) {
-    assert(HOOK.includes("install('" + fn + "'"), 'the hook must shadow ' + fn);
-  }
+  // Only alert is hooked: its return is undefined, so nothing can branch on
+  // it. confirm/prompt are deliberately left NATIVE — a hooked confirm returns
+  // a Promise (always truthy), so every if(confirm(...)) takes the TRUE branch.
+  // Native, the page blocks on its own dialog and the SW answers it via
+  // Page.handleJavaScriptDialog (the dialog_answer op) when the agent decides.
+  assert(HOOK.includes("install('alert'"), 'the hook must shadow alert');
+  assert(!HOOK.includes("install('confirm'") && !HOOK.includes("install('prompt'"),
+    'confirm/prompt must stay NATIVE (a hooked confirm is always truthy = every if(confirm) takes the TRUE branch)');
   assert(/data-ws-dialogs'/.test(HOOK) && /data-ws-dialogs-recent/.test(HOOK),
     'the hook must publish both the pending list and the recent history');
+  // INVERTED 2026-10-02: the hook used to auto-answer confirm→true after
+  // AUTO_MS (30s). That was a bug, not a safety net: a hooked confirm returns
+  // a Promise (always truthy), so EVERY if(confirm(...)) took the TRUE branch
+  // once the dialog was raised — deleting things the page asked the user about.
+  // The hook now only SHADOWS (captures the dialog into the pending queue);
+  // the answer is delivered on request via the dialog_answer op (CDP
+  // Page.handleJavaScriptDialog). A page can wedge only if the caller never
+  // answers, which is the caller's decision, not a silent auto-true.
+  assert(!/setTimeout\(\(\) => auto\(d, type === 'confirm'/.test(HOOK),
+    'confirm/prompt must NOT auto-answer (a hooked confirm is a Promise = always truthy = every if(confirm) takes the TRUE branch)');
   assert(/AUTO_MS = 30000/.test(HOOK),
-    'confirm/prompt must auto-answer so a page can never wedge');
+    'AUTO_MS is retained (the capture/auto-dismiss window), but no longer auto-answers confirm/prompt');
   assert(/pending\.filter\(\(d\) => !d\.done\)/.test(HOOK),
     'only UNRESOLVED dialogs may be published as pending');
 
