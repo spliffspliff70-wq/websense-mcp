@@ -2653,6 +2653,13 @@ test('trusted is the SINGLE click action: auto is TRUSTED-FIRST; hover/rightclic
   assert(/extra\.mode = 'hover'/.test(SRV_SRC), "hover must map to trusted_click mode:'hover'");
   assert(/if \(trusted\) return trh;/.test(SRV_SRC),
     'an explicit how:"trusted" refusal must STAND — falling back to synthetic would hide what the caller asked for');
+  // MEASURED LIVE, first run (2026-10-02): the fallback passed `selector`, which the click
+  // tool's schema STRIPS — ref arrived undefined and the fallback answered "Element not found"
+  // for an element that exists. resolveRef takes CSS through `ref`, so the mapping is load-bearing.
+  assert(/callTool\('click', pass\(\{ ref: selA \}\)\)/.test(SRV_SRC),
+    'the click fallback must hand the selector to the click tool AS ref');
+  assert(/pass\(\{ mode: a, ref: selH \}\)/.test(SRV_SRC),
+    'the hover/rightclick fallback must map selector -> ref too');
   assert(/mode: z\.enum\(\['click',\s*'hover'\]\)/.test(SRV_SRC), 'trusted_click must declare mode');
   assert(/mode: isHover \? 'hover' : 'click'/.test(SRV_SRC), 'the coordinate dispatch path must carry the mode');
   assert(/mode: isHoverR \? 'hover' : 'click'/.test(SRV_SRC), 'the ref dispatch path must carry the mode');

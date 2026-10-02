@@ -1015,7 +1015,12 @@ function registerFacades(server) {
       const tr0 = await callTool('trusted_click', pass(selA ? { selector: selA } : { x: o.x, y: o.y }));
       const p0 = _json(tr0);
       if (p0 && p0.success === true) { p0.path = 'auto→trusted'; return _wrap(p0); }
-      const r0 = await callTool('click', pass({}));
+      // THE FALLBACK MUST MAP selector -> ref (2026-10-02, first live run): the click tool's
+      // schema has NO `selector` field, so pass({selector}) was STRIPPED, ref arrived undefined,
+      // and the fallback answered "Element not found" for an element that exists. resolveRef
+      // accepts a CSS selector THROUGH `ref` (since the form-fix), so hand it selA as ref —
+      // preserving the canvas x,y path (click checks x,y first).
+      const r0 = await callTool('click', pass({ ref: selA }));
       const q0 = _json(r0);
       if (q0 && typeof q0 === 'object') {
         q0.path = 'auto→synthetic';
@@ -1095,7 +1100,9 @@ function registerFacades(server) {
       // An explicit how:"trusted" keeps its refusal — synthetic is not trusted, and silently
       // substituting it would hide exactly what the caller asked for.
       if (trusted) return trh;
-      const rh = await callTool('click', pass({ mode: a }));
+      // selector -> ref for the same reason as the click fallback: the click tool's schema
+      // strips `selector`, and resolveRef takes CSS through `ref`.
+      const rh = await callTool('click', pass({ mode: a, ref: selH }));
       const qh = _json(rh);
       if (qh && typeof qh === 'object') {
         qh.path = 'auto→synthetic';
