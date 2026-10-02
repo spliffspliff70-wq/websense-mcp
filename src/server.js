@@ -41,6 +41,9 @@ function parsePort() {
 const PORT = parsePort();
 const USE_HTTP = process.argv.includes('--http');
 const HTTP_PORT = parseInt(process.argv.find(a => a.startsWith('--http-port='))?.split('=')[1] || '9222');
+// WEBSENSE_WATCHDOG=0 disables the self-handshake probe (see the watchdog block at the end
+// of main()). It is ON by default: the failure it catches is silent, so nothing else finds it.
+const WEBSENSE_WATCHDOG = process.env.WEBSENSE_WATCHDOG || '1';
 
 // Chrome: plain ws:// on 38401. 127.0.0.1 is localhost-exempt from
 // mixed-content blocking, so ws:// works from HTTPS pages (lemonsqueezy etc.)
@@ -739,7 +742,12 @@ function reg(server, name, def, handler) {
 // ★ WHAT A MODEL MAY SEE (2026-10-01, Ali: "combine the tools as it makes sense ... the 14 debug
 // tools seem excessive cut it down and combine them into 2-3"). Everything stays registered and
 // CALLABLE — the repo's tests and harnesses use the old names — but this is the listed surface.
-const WIRE_SURFACE = new Set(['browse', 'find', 'act', 'page_slice', 'tabs', 'debug', 'websense_guide']);
+// The WIRE surface is what a model is allowed to SEE in tools/list (8 of 38 registered).
+// preflight joins it deliberately (2026-10-02): it is the FIRST call to make when anything
+// is refused, so hiding it behind the debug tool would defeat its purpose — but it is also
+// the tool most likely to be called reflexively, which is why its description leads with
+// "call this when refused", not "call this always".
+const WIRE_SURFACE = new Set(['browse', 'find', 'act', 'page_slice', 'tabs', 'debug', 'websense_guide', 'preflight']);
 
 function installSchemaMinifier(server) {
   const low = server.server;
@@ -1238,7 +1246,7 @@ function registerAllTools(server) {
   reg(server, 'websense_guide', {
     description: 'START HERE. The listed tools: browse, find, act, page_slice, tabs, debug, guide. Call once before you act.',
   }, async () => {
-    return textResult(`WebSense MCP — Guide (7 listed / 37 registered)
+    return textResult(`WebSense MCP — Guide (8 listed / 38 registered)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
@@ -1289,8 +1297,9 @@ v2.0 — THE LOOP (four steps, in this order):
   — it goes through Page.handleJavaScriptDialog so the page's branch follows YOUR choice.
   Nothing auto-answers; a dialog is answered only when you decide.
 
-THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
+THE 8 LISTED TOOLS — what each absorbed from the old 65-tool surface:
   act              DO something: action=click|hover|rightclick|drag|type|key|form|upload|scroll|dialog. how="trusted" goes through the browser's own input pipeline (a real isTrusted event, default actions run); how="os" is OS-level input and needs the tab in front. This is the one to reach for.
+  preflight        CALL THIS FIRST when a page op is refused or a tool seems inert. Walks launch → server → extension → binding → page-ready in order, stops at the FIRST broken link, and returns THE STATE plus THE COMMAND that fixes it. Read-only by default; repair:true binds an unambiguous single tab. Never guesses which tab you meant.
   debug            WebSense itself + raw reads: op=status|session|logs|cookies|clipboard|screenshot|ax|evaluate|main_world|explore_page|reload|respawn|guide. Reach for it when something is wrong.
   websense_guide   this guide
   browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + vocabulary. Replaces navigate+page_snapshot+map read.
@@ -2477,6 +2486,147 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
   });
 
   // ═══ 17. SESSION ═══
+  // ═══ 12. PREFLIGHT — THE WHOLE LAUNCH → CONNECT → BIND → VERIFY CHAIN (2026-10-02) ═══
+  // ★ WHY THIS EXISTS. Four failures look identical from the outside — "the tool doesn't
+  // work" — but have four different fixes, and each was diagnosed by hand today:
+  //   1. no server        -> /health refuses connection
+  //   2. server up, no extension -> hub connected:false, and Chromium is not even running
+  //   3. extension up, session unbound -> the tab-hijack guard refuses EVERY page op
+  //   4. bound, but the page is not ready -> the op runs against a half-hydrated DOM
+  // A caller cannot tell these apart from an error message, so it re-diagnoses and
+  // re-tries. preflight walks the chain in order, stops at the first break, and returns
+  // THE STATE plus THE COMMAND that fixes it. It never silently repairs anything: launching
+  // a browser or resetting a session are the caller's decisions, not ours.
+  reg(server, 'preflight', {
+    description: 'Walk the launch → connect → bind → verify chain and report the FIRST broken link plus the exact command that fixes it. Call this FIRST when a page op is refused, a tool seems inert, or you are starting work in a new session: it distinguishes "no server", "no extension", "session not bound" and "page not ready" in one call instead of by trial and error. Read-only by default; pass repair:true to perform the launch/bind steps it says are needed.',
+    inputSchema: {
+      tabId: z.number().optional().describe('Tab to verify/bind (default: the session-bound tab, else the only matching tab)'),
+      url: z.string().optional().describe('Optional URL to check readiness against (e.g. the URL you are about to drive)'),
+      expectSelector: z.string().optional().describe('Optional selector that must exist before you act — the readiness test'),
+      repair: z.boolean().optional().describe('Actually perform the launch/bind steps (default false = diagnose only)'),
+      timeoutMs: z.number().optional().describe('Per-step budget in ms (default 8000)'),
+    },
+  }, async (o) => {
+    const budget = o.timeoutMs || 8000;
+    const steps = [];
+    const deadline = Date.now() + budget;
+    const hub = getActiveHub();
+
+    // ── LINK 1: is the hub itself answering? ──────────────────────────────────
+    // A wedged server answers /health while /mcp initialize returns zero bytes, so the
+    // ONLY honest test is a real MCP-shaped round trip, never the health one-liner.
+    let hubOk = false, hubDetail = null;
+    try {
+      const st = (typeof hub.stats === 'function') ? hub.stats() : null;
+      hubOk = true;
+      hubDetail = { clients: st && st.clients, connected: hub.connected };
+    } catch (e) {
+      hubDetail = { error: String((e && e.message) || e) };
+    }
+    steps.push({ link: 'server', ok: hubOk, detail: hubDetail,
+      ifBroken: 'Start it: `node src/server.js --http --http-port 9222` (the extension auto-connects on :38401).' });
+    if (!hubOk) {
+      return textResult({ ok: false, brokenAt: 'server', steps,
+        fix: 'node src/server.js --http --http-port 9222',
+        why: 'No hub is answering, so every tool call fails identically and nothing else can be diagnosed.' });
+    }
+
+    // ── LINK 2: did the EXTENSION connect? ────────────────────────────────────
+    // The browser being closed is INVISIBLE from here: the server happily serves tools
+    // and every page op then fails at the far end. Check the census, not the port.
+    let census = {};
+    try { census = (typeof hub.census === 'function') ? hub.census() : {}; } catch (_) {}
+    const clients = census.clientsRegistered != null ? census.clientsRegistered
+      : (typeof hub.stats === 'function' && hub.stats() ? (hub.stats().clients || 0) : 0);
+    const extOk = !!hub.connected && clients > 0;
+    steps.push({ link: 'extension', ok: extOk, detail: { connected: !!hub.connected, clients, census: census.contentTabs },
+      ifBroken: 'The browser is not running, or the extension is not loaded/connected. Load extension/ via chrome://extensions (Developer mode → Load unpacked); it auto-connects — no launcher page.' });
+    if (!extOk) {
+      return textResult({ ok: false, brokenAt: 'extension', steps,
+        fix: hub.connected ? 'Reload the extension (chrome://extensions → Reload on WebSense MCP Bridge).'
+                           : 'Launch the browser with the extension loaded, then wait ~2s for the WebSocket.',
+        why: hub.connected
+          ? 'A client is registered but none are answering — usually a suspended/zombie offscreen document. Reloading the extension respawns it.'
+          : 'The server is up but no browser is connected. This is why "the tool does nothing" with no error.' });
+    }
+
+    // ── LINK 3: is THIS SESSION bound to a tab? ───────────────────────────────
+    // The tab-hijack guard refuses every unbound page op with a long message. Naming
+    // that up front is cheaper than rediscovering it from the refusal.
+    // ★ USE THE REAL MECHANISM (measured, not assumed). The binding lives in the
+    // AsyncLocalStorage session store (`sessionTabOf()`), mirrored onto the McpServer
+    // object as `_wsBoundTabId` so it survives across HTTP requests. My first draft read
+    // getSession().boundTabId, which does not exist — it would always report "unbound".
+    const srv = sessionCtx.getStore() ? sessionCtx.getStore().server : null;
+    const bound = sessionTabOf() != null ? sessionTabOf()
+      : (srv && srv._wsBoundTabId != null ? srv._wsBoundTabId : (o.tabId != null ? o.tabId : null));
+    let tabs = [];
+    try {
+      const r = unwrapRelay(await hub.send({ type: 'list_tabs' }));
+      tabs = Array.isArray(r) ? r : (r && Array.isArray(r.tabs) ? r.tabs : []);
+    } catch (e) { tabs = []; }
+    const bindOk = bound != null && tabs.some((t) => Number(t.id) === Number(bound));
+    steps.push({ link: 'binding', ok: bindOk,
+      detail: { sessionBoundTab: bound, requested: o.tabId || null, tabsVisible: tabs.length,
+                urls: tabs.slice(0, 6).map((t) => String(t.url || '').slice(0, 80)) },
+      ifBroken: 'Every page op refuses without a tab (the hub will not guess one). Bind explicitly: tabs{action:"bind", tabId:N} — never rely on the implicit selected tab.' });
+    if (!bindOk) {
+      // BIND ONLY WHEN UNAMBIGUOUS, AND ONLY WITH repair:true. Binding redirects this
+      // session's ops, and with several tabs open a wrong guess would drive someone
+      // else's page — the exact hijack class of bug this project has been fixing.
+      const candidates = tabs.map((t) => ({ tabId: t.id, url: t.url, title: t.title, active: !!t.active }));
+      const unique = candidates.length === 1 ? candidates[0] : null;
+      let didBind = false;
+      if (o.repair && unique) {
+        try {
+          const st = sessionCtx.getStore();
+          if (st) { st.boundTabId = unique.tabId; if (st.server) st.server._wsBoundTabId = unique.tabId; claimTab(st.server, unique.tabId); }
+          didBind = true;
+        } catch (_) { didBind = false; }
+      }
+      return textResult({
+        ok: didBind, brokenAt: didBind ? null : 'binding', steps,
+        candidates,
+        fix: unique ? ('tabs{action:"bind", tabId:' + unique.tabId + '}')
+                    : ('tabs{action:"bind", tabId:N} — ' + candidates.length + ' tabs are open; pick by URL. WebSense will NOT guess: a wrong guess drives the wrong page.'),
+        why: candidates.length === 1
+          ? 'Exactly one tab is open — preflight binds it for you when called with repair:true.'
+          : 'Several tabs are open and this session is unbound, so every page op is refused. Match a tab by URL and bind it.',
+      });
+    }
+
+    // ── LINK 4: is the bound PAGE actually ready to act on? ───────────────────
+    // Acting on a half-hydrated SPA reads a 140-element skeleton and looks like a broken
+    // selector. readyState + the caller's own selector is the honest readiness test.
+    let ready = null, pageDetail = null;
+    try {
+      const st = unwrapRelay(await hub.send({ type: 'page_state', tabId: bound }));
+      ready = st && st.readyState === 'complete';
+      pageDetail = { url: st && st.url, title: st && st.title, readyState: st && st.readyState };
+    } catch (e) { pageDetail = { error: String((e && e.message) || e) }; }
+    let selectorOk = null;
+    if (o.expectSelector) {
+      try {
+        const probe = await pageCentre(o.expectSelector, bound, false);
+        selectorOk = !!probe;
+      } catch (e) {
+        // A refusal here is the ambiguity guard working — which means the element EXISTS.
+        selectorOk = !!(e && e.detail && e.detail.reason === 'ambiguous-selector');
+      }
+      pageDetail = Object.assign({}, pageDetail, { expectSelector: o.expectSelector, present: selectorOk });
+    }
+    const pageOk = ready !== false && selectorOk !== false;
+    steps.push({ link: 'page', ok: pageOk, detail: pageDetail,
+      ifBroken: 'The page is still loading or the selector is absent. wait{notLoading:true} or wait{selector:"…"} rather than acting now — an op on a hydrating DOM reads a skeleton and looks like a missing element.' });
+
+    const anyRepair = steps.some((s) => !s.ok);
+    return textResult({
+      ok: pageOk, brokenAt: pageOk ? null : 'page', steps,
+      elapsedMs: Date.now() - (deadline - budget),
+      summary: steps.map((s) => (s.ok ? 'OK ' : 'BROKEN ') + s.link).join(' → '),
+    });
+  });
+
   reg(server, 'session', {
     description: 'Exploration session: action:"reset" (clear map + tab binding — use when starting a new task) | "map" (pages visited, action history, current position) | "mermaid" (Mermaid flowchart of the journey; direction, detail) | "task" (P2 task-stack: op:"begin"|"done"|"skip"|"status", goal, steps — per-session state machine so multi-step journeys keep their next-action in one place).',
     inputSchema: {
@@ -3109,10 +3259,17 @@ async function main() {
           census = { status: 'census_failed', error: String((err && err.message) || err) };
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
+        // ★ THE WATCHDOG GOES IN THE REPLY, because /health is exactly what lies about a
+        // wedge (2026-10-02). `mcpOk:false` with the probe's reason is the honest signal;
+        // `status:'ok'` here means "this listener answered", NOT "the MCP endpoint works".
+        const wd = (typeof globalThis.__websenseWatchdog === 'function') ? globalThis.__websenseWatchdog() : null;
         res.end(JSON.stringify({
           status: 'ok',
           hubConnected: hubChrome.connected,
           extensionConnected: hubChrome.connected,
+          // null = not probed yet (first probe is ~10s after boot). false = WEDGED.
+          mcpOk: wd ? wd.ok : null,
+          mcpProbe: wd,
           ...census,
         }, null, 2));
         return;
@@ -3191,6 +3348,56 @@ async function main() {
   }
 
   setInterval(() => { hubChrome.healthCheck(); }, 30000);
+
+  // ═══ SELF-HANDSHAKE WATCHDOG (2026-10-02) ═══
+  // ★ THE FAILURE IT EXISTS TO CATCH. On 2026-10-02 the server (PID 16916) answered
+  // GET /health with status:ok while POST /mcp initialize returned ZERO BYTES FOREVER.
+  // It was listening on both ports and looked perfectly healthy to every cheap probe,
+  // so nothing restarted it. The only honest test of an MCP endpoint is an MCP-shaped
+  // round trip; /health cannot see this failure because it is answered by the very
+  // listener that is wedged.
+  //
+  // WHAT IT DOES NOT DO: it does not restart the process itself. A wedged node cannot
+  // reliably respawn itself, and a self-restart that fails leaves nothing running at all.
+  // Instead it detects the wedge EARLY and says so in the log and over /health, and it
+  // tells the operator the exact command — because whoever supervises it (a task
+  // scheduler, systemd, launchd, the Windows scheduled task) is what can actually
+  // replace the process.
+  if (typeof WEBSENSE_WATCHDOG !== 'undefined' && WEBSENSE_WATCHDOG !== '0') {
+    const PROBE_EVERY = 5 * 60 * 1000;
+    const PROBE_TIMEOUT = 8000;
+    let lastProbe = null;
+    const probe = async () => {
+      // A no-op POST with a deliberately incomplete body: a healthy Streamable HTTP
+      // handler rejects it fast (400 "Server not initialized"); a WEDGED one never
+      // answers, and that difference is the signal. No session is created.
+      const started = Date.now();
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), PROBE_TIMEOUT);
+      try {
+        const r = await fetch(`http://127.0.0.1:${HTTP_PORT}/mcp`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+          signal: ac.signal,
+        });
+        // Drain so the socket is released; any status means the handler is alive.
+        try { await r.text(); } catch (_) {}
+        lastProbe = { ok: true, status: r.status, ms: Date.now() - started, at: Date.now() };
+        console.error(`[websense] watchdog: MCP endpoint alive (HTTP ${r.status}, ${lastProbe.ms}ms)`);
+      } catch (e) {
+        const why = (e && e.name) === 'AbortError' ? 'TIMEOUT — no response' : String((e && e.message) || e);
+        lastProbe = { ok: false, error: why, ms: Date.now() - started, at: Date.now() };
+        console.error('[websense] ★ WATCHDOG: /mcp did not answer a real initialize within '
+          + PROBE_TIMEOUT + 'ms (' + why + ') — the endpoint is WEDGED even though /health may still say ok.');
+        console.error('[websense] ★ FIX (the supervisor must run it; this process cannot safely replace itself):');
+        console.error('[websense] ★   taskkill /PID <this pid> /F   &&   node src/server.js --http --http-port ' + HTTP_PORT);
+      } finally { clearTimeout(timer); }
+    };
+    // Give the listener a moment to come up before the first probe.
+    setTimeout(() => { probe(); setInterval(probe, PROBE_EVERY); }, 10000);
+    globalThis.__websenseWatchdog = () => lastProbe;
+  }
 }
 
 main().catch((err) => { console.error('[websense] Fatal:', err.message); process.exit(1); });

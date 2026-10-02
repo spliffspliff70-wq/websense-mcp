@@ -24,7 +24,7 @@ node tools/export-guide.mjs        # rewrites the fenced block below
 ---
 
 ```
-WebSense MCP — Guide (7 listed / 37 registered)
+WebSense MCP — Guide (8 listed / 38 registered)
 ==============================================
 Non-vision web automation via Chrome extension. No CDP debug port, no bot detection. CSP-safe. React/Vue/Angular compatible.
 
@@ -75,8 +75,9 @@ v2.0 — THE LOOP (four steps, in this order):
   — it goes through Page.handleJavaScriptDialog so the page's branch follows YOUR choice.
   Nothing auto-answers; a dialog is answered only when you decide.
 
-THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
+THE 8 LISTED TOOLS — what each absorbed from the old 65-tool surface:
   act              DO something: action=click|hover|rightclick|drag|type|key|form|upload|scroll|dialog. how="trusted" goes through the browser's own input pipeline (a real isTrusted event, default actions run); how="os" is OS-level input and needs the tab in front. This is the one to reach for.
+  preflight        CALL THIS FIRST when a page op is refused or a tool seems inert. Walks launch → server → extension → binding → page-ready in order, stops at the FIRST broken link, and returns THE STATE plus THE COMMAND that fixes it. Read-only by default; repair:true binds an unambiguous single tab. Never guesses which tab you meant.
   debug            WebSense itself + raw reads: op=status|session|logs|cookies|clipboard|screenshot|ax|evaluate|main_world|explore_page|reload|respawn|guide. Reach for it when something is wrong.
   websense_guide   this guide
   browse           TOOL 1 — go to a page and map it in one call: navigate (or bind) + seed the diff baseline + store the inventory + return ONLY the index + vocabulary. Replaces navigate+page_snapshot+map read.

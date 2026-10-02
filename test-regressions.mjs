@@ -3474,7 +3474,21 @@ test('docs: no surface may claim a retired tool count', () => {
   const md = readFileSync(new URL('./MODEL_PROMPT.md', import.meta.url), 'utf8');
   assert(!/\b21 tools\b/.test(md) && !/\binstead of 65\b/.test(md),
     'MODEL_PROMPT.md must not teach a retired tool count');
-  assert(/7 listed/.test(md), 'MODEL_PROMPT.md must state the CURRENT listed surface');
+  // ★ INVERTED, not preserved (push checklist: a test asserting the old number launders a bug
+  // into a documented limitation). The count moves whenever the surface does — preflight took
+  // it from 7 listed / 37 registered to 8 / 38 on 2026-10-02 — so pin the CLAIM to the SOURCE
+  // rather than to a literal that needs editing every time a tool is added.
+  const listed = /Guide \((\d+) listed \/ (\d+) registered\)/.exec(SRV_SRC);
+  assert(listed, 'the guide title must carry the live listed/registered counts');
+  const regCount = (SRV_SRC.match(/reg\(server, '/g) || []).length;
+  assert(Number(listed[2]) === regCount,
+    'the guide claims ' + listed[2] + ' registered but src/server.js registers ' + regCount);
+  const md2 = readFileSync(new URL('./MODEL_PROMPT.md', import.meta.url), 'utf8');
+  assert(md2.includes('(' + listed[1] + ' listed / ' + listed[2] + ' registered)'),
+    'MODEL_PROMPT.md must be regenerated so its counts match the guide exactly');
+  assert(md2.includes(listed[1] + ' listed'),
+    'MODEL_PROMPT.md must state the CURRENT listed surface (' + listed[1] + '), got: '
+    + (md2.match(/(\d+) listed/) || ['(none)'])[0]);
   const code = SRV_SRC.replace(/\/\/[^\n]*/g, '');
   assert(!/exposes ~65 tools/.test(code), 'src/server.js must not claim ~65 tools');
   const exp = readFileSync(new URL('./tools/export-guide.mjs', import.meta.url), 'utf8')
@@ -3557,6 +3571,71 @@ test('ambiguity: the refusal must cover TYPING, not only clicking (live gap, 202
   // Both surfaces must agree — a selector is unambiguous or it is refused, click or type.
   assert(/reason: 'ambiguous-selector'/.test(CODE) && /recommended: 'scope_selector'/.test(CODE),
     'the typing refusal must carry the same named reason and a scope remedy as the click one');
+});
+
+test('preflight: the whole chain, and every option read off the arg object (live-caught bug)', () => {
+  const CODE = SRV_SRC.replace(/\/\/[^\n]*/g, '');
+  assert(/reg\(server, 'preflight'/.test(SRV_SRC), 'preflight must be registered');
+  // THE FOUR LINKS, in order, each with the command that fixes it. A preflight that cannot
+  // name the fix is just an error message with extra steps.
+  const order = ['link: \'server\'', 'link: \'extension\'', 'link: \'binding\'', 'link: \'page\''];
+  let at = -1;
+  for (const L of order) {
+    const i = CODE.indexOf(L);
+    assert(i > at, 'link ' + L + ' must exist and come after the previous one');
+    at = i;
+  }
+  assert(/brokenAt: 'server'/.test(CODE) && /brokenAt: 'extension'/.test(CODE),
+    'each early exit must name WHICH link broke');
+  assert(/ifBroken:/.test(CODE), 'each link must carry its own remedy');
+  // ★ THE BUG THIS PINS. `reg` hands the handler ONE argument object, so a bare `repair`
+  // is a ReferenceError at runtime. It passed the static suite (the string "repair" is
+  // present) and only the LIVE call returned {"error":"repair is not defined"}. Every
+  // declared option must therefore be read as o.<name>, never bare.
+  const body = /reg\(server, 'preflight',[\s\S]*?\n  \}\);/.exec(SRV_SRC);
+  assert(body, 'the preflight registration block must be findable');
+  // Strip comments FIRST — this block explains the very mistakes it must not repeat, and a
+  // raw-source scan would then "find" getSession().boundTabId in a comment and fail a
+  // correct implementation. Test the CODE, not the prose about the code.
+  const bodyCode = body[0].replace(/\/\/[^\n]*/g, '');
+  for (const opt of ['repair', 'tabId', 'timeoutMs', 'expectSelector']) {
+    const bare = new RegExp('[^\\w.$]\\b' + opt + '\\b(?![\\w:])').test(bodyCode.replace(/o\.\w+/g, ''));
+    assert(!bare, 'option "' + opt + '" is read as a BARE identifier — it must be o.' + opt
+      + ' (a bare one is undefined at runtime and the suite cannot see it)');
+  }
+  // The session binding must come from the REAL store, not a field that does not exist.
+  assert(/sessionTabOf\(\)/.test(bodyCode), 'read the binding via sessionTabOf()');
+  assert(!/getSession\(\)\.boundTabId/.test(bodyCode),
+    'getSession().boundTabId does not exist — it would always report "unbound"');
+  // It must never guess which tab you meant: that is the hijack class of bug.
+  assert(/o\.repair && unique/.test(bodyCode),
+    'binding must only happen when the candidate is UNIQUE');
+  assert(/NOT guess/i.test(bodyCode), 'with several tabs it must refuse to pick');
+});
+
+test('watchdog: /health must report whether the MCP endpoint ACTUALLY answers', () => {
+  const CODE = SRV_SRC.replace(/\/\/[^\n]*/g, '');
+  // The failure (2026-10-02): the server answered /health with status:ok while POST /mcp
+  // initialize returned zero bytes forever. So `status:'ok'` on /health is a FALSE POSITIVE
+  // and the honest signal has to be a real MCP-shaped round trip, reported in the reply.
+  assert(/mcpOk:/.test(CODE), '/health must carry an mcpOk field — status:ok alone is a lie');
+  assert(/__websenseWatchdog/.test(CODE), 'the watchdog verdict must be wired into /health');
+  assert(/WEBSENSE_WATCHDOG/.test(SRV_SRC), 'the watchdog must be switchable via env');
+  // It must probe with a real initialize, not a GET of /health — that is the whole point.
+  assert(/method: 'POST'/.test(CODE) && /'initialize'/.test(CODE),
+    'the probe must POST an MCP initialize; probing /health cannot detect the wedge it watches for');
+  // And it must NOT try to restart itself: a wedged node replacing itself is how you end up
+  // with NOTHING running. Detection + the command is the honest division of labour.
+  // Anchor on CODE, not on the comment banner (the source is comment-stripped above, so a
+  // marker living in a comment is invisible). `globalThis.__websenseWatchdog` is the last
+  // statement of the block, and main().catch() closes the function after it.
+  const start = CODE.indexOf('globalThis.__websenseWatchdog');
+  const end = CODE.indexOf('main().catch', start);
+  const wd = start > 0 ? CODE.slice(Math.max(0, start - 3000), end > 0 ? end : CODE.length) : '';
+  assert(start > 0 && wd.length > 0, 'the watchdog block must be findable (got ' + wd.length + ' chars)');
+  assert(!/process\.exit\(/.test(wd), 'the watchdog must not kill its own process');
+  assert(/taskkill|node src\/server\.js/.test(wd),
+    'it must print the command a SUPERVISOR can run — found block was ' + wd.length + ' chars');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
