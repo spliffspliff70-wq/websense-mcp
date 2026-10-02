@@ -3532,5 +3532,32 @@ test('public metadata: no retired architecture term may be what a user sees firs
   assert(/x-dump\.json/.test(gi), 'x-dump.json (a capture of the logged-in feed) must be gitignored');
 });
 
+test('ambiguity: the refusal must cover TYPING, not only clicking (live gap, 2026-10-02)', () => {
+  // ★ FOUND BY THE LIVE RE-TEST, NOT BY THE SUITE. The click path refused a 2-match selector,
+  // but `act{action:"type", how:"trusted"}` typed straight into the wrong composer and reported
+  // success. Two separate causes, both pinned here:
+  const CODE = SRV_SRC.replace(/\/\/[^\n]*/g, '');
+  // (1) trusted_key never went through pageCentre at all — it hands `selector` to the content
+  //     script, which resolves it with its own querySelector.
+  assert(/const selForGuard = o\.ref \|\| o\.selector \|\| null/.test(CODE),
+    'trusted_key must resolve the selector server-side BEFORE dispatching key events');
+  assert(/await pageCentre\(selForGuard, tabId, false\)/.test(CODE),
+    'and it must do so through pageCentre, which is where the multiplicity check lives');
+  // (2) ★ THE PARAM NAME. trusted_key's schema says `ref`, but the `act` facade forwards the
+  //     caller's `selector` verbatim (`pass()` is Object.assign over the whole arg object). The
+  //     first version of the guard read `o.ref` ONLY — undefined on every act call, so it was
+  //     DEAD CODE that looked correct and the live test proved it. Read BOTH names.
+  assert(!/if \(o\.ref\) \{\s*\n\s*try \{\s*\n\s*const probe = await pageCentre\(o\.ref/.test(CODE),
+    'reading only o.ref makes the guard unreachable from act — the exact live failure');
+  // And the refusal must return BEFORE the hub send, so no key event can escape.
+  const guardIdx = CODE.indexOf('selForGuard');
+  const sendIdx = CODE.indexOf("type: 'trusted_key', tabId");
+  assert(guardIdx > 0 && sendIdx > 0 && guardIdx < sendIdx,
+    'the ambiguity guard must run BEFORE trusted_key is dispatched, or text still leaks');
+  // Both surfaces must agree — a selector is unambiguous or it is refused, click or type.
+  assert(/reason: 'ambiguous-selector'/.test(CODE) && /recommended: 'scope_selector'/.test(CODE),
+    'the typing refusal must carry the same named reason and a scope remedy as the click one');
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

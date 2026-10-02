@@ -3,6 +3,10 @@
 All notable changes to WebSense MCP are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [2.0.3] — 2026-10-02
+
+- **The ambiguous-selector refusal now covers typing as well as clicking** (found by live re-test, not by the suite). `trusted_key` resolves the selector server-side before dispatching key events, so text can no longer land in the wrong editor when a selector matches two elements.
+
 ## [2.0.2] — 2026-10-02
 
 - **Public-install fixes:** the OS-input interpreter is now discovered (`WEBSENSE_PYTHON` still overrides) instead of defaulting to the maintainer's absolute Python path, which broke `real_click`/`real_paste`/`dialog{keystroke}` for every other user; `package.json`, the extension manifest and CONTRIBUTING no longer advertise the retired Semantic Action Graph model.

@@ -1300,7 +1300,7 @@ THE 7 LISTED TOOLS — what each absorbed from the old 65-tool surface:
 
 1. THE VERDICT CAN NOW BE UPGRADED BY THE DIFF. effect is decided from page_state (url/title/readyState/scroll) alone, so an action that ONLY changes the DOM — a trusted type, filling a field, opening an inline menu — used to answer 'unverifiable' while this same reply said mutated:true. That is a verdict contradicting its own evidence, and 'unverifiable' reads as "no proof", so a caller re-runs an action that already worked. Now: when the page-side differ measures a real structure/content move (mutated:true), an 'unverifiable' or 'suspected_noop' verdict is UPGRADED to 'confirmed' and carries effectSource:"page_diff", and the stale escalation advice is dropped with it. ★ IT ONLY EVER UPGRADES: a 'failed' verdict (the action layer refused, e.g. disabled/read-only) stays 'failed'. The measurement happened; classifyEffect just could not see it.
 
-2. AN AMBIGUOUS SELECTOR IS REFUSED, NOT GUESSED. querySelector returns the FIRST match with no word, so a selector matching two elements silently drove the wrong one. Measured on x.com's /compose/post: [data-testid="tweetTextarea_0"] matches TWICE — the dialog's real composer and the empty page-level inline composer. You now get a refusal naming the count and the tag: 'ambiguous selector ... matches 2 elements — refusing to pick one silently'. SCOPE IT and retry: [role="dialog"] [data-testid="tweetTextarea_0"], or a selector unique on that page. This is also why find returns ALL matches with no cap — a cap would hide the second element and the ambiguity would be invisible.
+2. AN AMBIGUOUS SELECTOR IS REFUSED, NOT GUESSED. querySelector returns the FIRST match with no word, so a selector matching two elements silently drove the wrong one. Measured on x.com's /compose/post: [data-testid="tweetTextarea_0"] matches TWICE — the dialog's real composer and the empty page-level inline composer. You now get a refusal naming the count and the tag: 'ambiguous selector ... matches 2 elements — refusing to pick one silently'. SCOPE IT and retry: [role="dialog"] [data-testid="tweetTextarea_0"], or a selector unique on that page. ★ THIS COVERS CLICK AND TYPE — verified live after the click path shipped and the type path was found still unguarded: trusted_key resolves the selector server-side first, so text can no longer leak into the wrong editor either. This is also why find returns ALL matches with no cap — a cap would hide the second element and the ambiguity would be invisible.
 THE REMAINING 30 — registered and callable by name, but NOT listed, so a model does not have to choose between them. The listed ones (page_slice, tabs) also appear here:
   explore_page     quick look at a page's actions (SAG). compact:true = old discover_actions; intent:"submit" = old find_intent; goal:"log in" = old explore_intent; preload:true = lazy-load first; incremental:true = delta since last scan (you usually do NOT need this any more: every mutating op returns a grouped DIFF automatically; for a full page map use browse + find instead — explore_page is the quick look, not the map)
   read             page text. format: "text" (extract_text) | "content" (read_content) | "markdown" (dump_markdown) | "diff" (page_diff) | "scrollextract" (scroll_and_extract) | "preload" (preload_content)
@@ -2374,6 +2374,40 @@ NATIVE DIALOGS: JS alert/confirm/prompt are captured (dialog{action}); OS dialog
     let mods = 0;
     for (const m of (o.modifiers || [])) mods |= (MOD[m] || 0);
     const before = await readPageState(tabId);
+    // ★ THE AMBIGUITY GUARD MUST ALSO COVER TYPING (2026-10-02, measured live). trusted_key
+    // hands `selector` straight to the content script, which resolves it with its own
+    // querySelector — so it never reached pageCentre and the 2-match refusal (added for the
+    // click path) never fired here. MEASURED on x.com: with TWO [data-testid="tweetTextarea_0"]
+    // elements on the page (the dialog composer and the page-level one), `act{type, trusted}`
+    // typed into the first one and reported success. That is precisely the silent-wrong-target
+    // bug the refusal exists to stop, so the check is resolved HERE, server-side, before the
+    // key events go out. Click and type must agree: a selector is either unambiguous or refused.
+    let selGuard = null;
+    // ★ READ BOTH NAMES, OR THE GUARD IS DEAD CODE (measured 2026-10-02). trusted_key's schema
+    // names the parameter `ref`, but the `act` facade forwards the caller's `selector` verbatim
+    // (`pass()` is Object.assign over the whole arg object). So the first version of this guard
+    // read `o.ref`, which was undefined on every `act` call — the refusal never fired, and a live
+    // re-test typed straight into the wrong composer with a clean success reply. The two paths
+    // name the same thing differently; accept either.
+    const selForGuard = o.ref || o.selector || null;
+    if (selForGuard) {
+      try {
+        const probe = await pageCentre(selForGuard, tabId, false);
+        // pageCentre throws a named ambiguous-selector error on a multi-match; a null probe
+        // simply means the content script will resolve it, which is the pre-existing path.
+        selGuard = probe || null;
+      } catch (e) {
+        if (e && e.detail && e.detail.reason === 'ambiguous-selector') {
+          return textResult({
+            success: false,
+            effect: 'failed',
+            error: e.message,
+            detail: e.detail,
+            escalation: { recommended: 'scope_selector', reason: 'This selector matches ' + e.detail.matches + ' elements. Scope it (e.g. [role="dialog"] ' + selForGuard + ') so exactly one matches.' },
+          });
+        }
+      }
+    }
     const result = await getActiveHub().send({ type: 'trusted_key', tabId, text: o.text, key: o.key, selector: o.ref, modifiers: mods });
     const rr = unwrapRelay(result);
     const refuse = relayFailure(rr);
